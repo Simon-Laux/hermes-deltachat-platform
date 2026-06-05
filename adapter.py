@@ -1040,9 +1040,32 @@ body {{
             await self.handle_message(message_event)
 
         # File / document (including .xdc webxdc apps)
-        elif view_type == MessageViewtype.FILE.value and filename:
-            logger.info(f"File received: {filename}")
-            # TODO: handle .xdc files specially (webxdc)
+        elif view_type in (MessageViewtype.FILE.value, MessageViewtype.VIDEO.value) and filename:
+            resolved = self._resolve_blob_path(filename)
+            if resolved:
+                try:
+                    from gateway.platforms.base import cache_document_from_bytes
+                    data = open(resolved, "rb").read()
+                    file_name = msg.get("file_name") or os.path.basename(resolved)
+                    resolved = cache_document_from_bytes(data, file_name)
+                    logger.info("Copied document to Hermes cache: %s", resolved)
+                except Exception as e:
+                    logger.warning("Could not copy document to Hermes cache: %s", e)
+            caption = msg.get("text", "") or ""
+            file_name = msg.get("file_name") or os.path.basename(filename)
+            text = f"[File from {user_name}: {file_name}]"
+            if caption:
+                text = f"{text}: {caption}"
+            text = f"{text}\n[dc:chat={token}]"
+            message_event = MessageEvent(
+                text=text,
+                message_type=MessageType.DOCUMENT,
+                source=source,
+                message_id=str(msg_id),
+                media_urls=[resolved] if resolved else [],
+                media_types=[file_mime or "application/octet-stream"],
+            )
+            await self.handle_message(message_event)
 
         else:
             logger.debug(f"Unhandled view_type={view_type}, file={filename}")
