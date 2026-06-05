@@ -349,7 +349,7 @@ if __name__ == "__main__":
     rpc_server = os.getenv("DELTACHAT_RPC_SERVER", "deltachat-rpc-server")
 
     # Initialize transport and RPC
-    transport = IOTransport(accounts_dir=dc_accounts_path)
+    transport = IOTransport(accounts_dir=dc_accounts_path, rpc_server=rpc_server)
     transport.start()
     rpc = deltachat2.Rpc(transport)
 

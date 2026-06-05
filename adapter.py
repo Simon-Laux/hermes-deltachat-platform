@@ -196,7 +196,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
             from deltachat2.transport import IOTransport
 
             os.environ["DC_ACCOUNTS_PATH"] = dc_accounts_path
-            self._transport = IOTransport(accounts_dir=dc_accounts_path)
+            self._transport = IOTransport(accounts_dir=dc_accounts_path, rpc_server=rpc_server_path)
             self._transport.start()
             self.rpc = deltachat2.Rpc(self._transport)
 

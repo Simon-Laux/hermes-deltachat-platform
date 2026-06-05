@@ -44,9 +44,10 @@ class _Result(Event):
 class IOTransport:
     """Delta Chat RPC transport over IO using external deltachat-rpc-server program."""
 
-    def __init__(self, accounts_dir: Optional[str] = None, **kwargs):
+    def __init__(self, accounts_dir: Optional[str] = None, rpc_server: str = "deltachat-rpc-server", **kwargs):
         """The given arguments will be passed to subprocess.Popen()"""
         self.logger = logging.getLogger("deltachat2.IOTransport")
+        self._rpc_server = rpc_server
         if accounts_dir:
             kwargs["env"] = {
                 **kwargs.get("env", os.environ),
@@ -72,7 +73,7 @@ class IOTransport:
             # `process_group` is not supported before Python 3.11.
             kwargs = {"preexec_fn": os.setpgrp, **self._kwargs}  # noqa: PLW1509
         self.process = subprocess.Popen(  # pylint:disable=consider-using-with
-            "deltachat-rpc-server",
+            self._rpc_server,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             **kwargs,
@@ -88,6 +89,8 @@ class IOTransport:
 
     def close(self) -> None:
         """Terminate RPC server process and wait until the reader loop finishes."""
+        if not hasattr(self, "process"):
+            return  # start() was never called or failed before process was created
         self.closing = True
         try:
             self.call("stop_io_for_all_accounts")
