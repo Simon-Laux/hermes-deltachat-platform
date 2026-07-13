@@ -295,11 +295,15 @@ class DeltaChatAdapter(BasePlatformAdapter):
         # Default - assume in PATH
         return "deltachat-rpc-server"
 
-    async def connect(self) -> bool:
+    async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Connect to Delta Chat via RPC server.
 
         Starts the RPC server process, initializes the client,
         checks version, and begins listening for events.
+
+        Args:
+            is_reconnect: True when reconnecting after a drop; ignored (DC
+                RPC has no buffered update queue to preserve).
 
         Returns:
             True if connection successful, False otherwise
