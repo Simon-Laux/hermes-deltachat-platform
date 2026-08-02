@@ -815,6 +815,41 @@ body {{
                 error=str(e),
             )
 
+    def _get_agent_workspace(self) -> str:
+        """Resolve the agent's writable workspace directory.
+
+        Priority order:
+          1. config.extra["workspace"] — explicit plugin override
+          2. terminal.cwd from the active Hermes profile config
+          3. get_hermes_home() — guaranteed writable fallback
+
+        Returns:
+            Absolute path to a directory the agent can write output files to.
+        """
+        from pathlib import Path
+
+        # 1. Explicit plugin config override
+        if self.config.extra and self.config.extra.get("workspace"):
+            ws = str(self.config.extra["workspace"]).strip()
+            if ws:
+                return str(Path(ws).expanduser().resolve())
+
+        # 2. terminal.cwd from Hermes profile config
+        try:
+            from gateway.config import get_config
+            cfg = get_config()
+            terminal_cfg = cfg.get("terminal", {})
+            if isinstance(terminal_cfg, dict):
+                cwd = terminal_cfg.get("cwd", "")
+                if cwd and str(cwd) not in (".", ""):
+                    return str(Path(str(cwd)).expanduser().resolve())
+        except Exception:
+            pass
+
+        # 3. Fallback: Hermes home (always writable)
+        from gateway.config import get_hermes_home
+        return str(Path(get_hermes_home()).expanduser().resolve())
+
     # ------------------------------------------------------------------
     # Container-to-host file path mapping
     # ------------------------------------------------------------------
@@ -829,27 +864,43 @@ body {{
     #
     # The same pattern works for any output file type (.pdf, .html, .zip,
     # .xdc, etc.) — just write to /workspace/ in the container.
+    #
+    # For non-Docker deployments, the agent writes to the resolved
+    # workspace directory (see _get_agent_workspace).  Paths under that
+    # directory are passed through directly since they already exist on
+    # the host.
     # ------------------------------------------------------------------
 
-    @staticmethod
-    def _container_workspace_to_host(container_path: str) -> Optional[str]:
-        """Map a /workspace/<rel> container path to its host-side sandbox path.
+    def _container_workspace_to_host(self, container_path: str) -> Optional[str]:
+        """Map a container/workspace path to its host-side path.
 
-        Returns None when the path is not under /workspace/.
+        Handles both:
+          - /workspace/<rel>  (Docker sandbox paths)
+          - <agent_workspace>/<rel>  (non-Docker direct paths)
+
+        Returns None when the path is not under a known workspace root.
         """
         from pathlib import Path
 
         p = str(container_path)
-        if not p.startswith("/workspace/"):
-            return None
-        rel = p[len("/workspace/"):]
-        try:
-            from tools.environments.base import get_sandbox_dir
-            sandbox_workspace = get_sandbox_dir() / "docker" / "default" / "workspace"
-        except ImportError:
-            from gateway.config import get_hermes_home
-            sandbox_workspace = Path(get_hermes_home()) / "sandboxes" / "docker" / "default" / "workspace"
-        return str(sandbox_workspace / rel)
+
+        # Docker sandbox: /workspace/<rel>
+        if p.startswith("/workspace/"):
+            rel = p[len("/workspace/"):]
+            try:
+                from tools.environments.base import get_sandbox_dir
+                sandbox_workspace = get_sandbox_dir() / "docker" / "default" / "workspace"
+            except ImportError:
+                from gateway.config import get_hermes_home
+                sandbox_workspace = Path(get_hermes_home()) / "sandboxes" / "docker" / "default" / "workspace"
+            return str(sandbox_workspace / rel)
+
+        # Non-Docker: path already on host under agent workspace
+        agent_ws = self._get_agent_workspace()
+        if p.startswith(agent_ws + "/") or p == agent_ws:
+            return p
+
+        return None
 
     def _copy_container_file_to_cache(self, container_path: str) -> Optional[str]:
         """Copy a /workspace/ container file to the Hermes docs cache.
@@ -924,34 +975,34 @@ body {{
         return files, remaining
 
     def filter_media_delivery_paths(self, media_files):
-        """Remap /workspace/ container paths to host cache before validation."""
+        """Remap workspace paths (Docker or agent) to host cache before validation."""
         from gateway.platforms.base import BasePlatformAdapter
 
         remapped = []
         for media_path, is_voice in media_files or []:
             p = str(media_path)
-            if p.startswith("/workspace/"):
+            if self._container_workspace_to_host(p) is not None:
                 cached = self._copy_container_file_to_cache(p)
                 if cached:
                     remapped.append((cached, is_voice))
                     continue
-                logger.warning("Could not resolve container path for delivery: %s", p)
+                logger.warning("Could not resolve workspace path for delivery: %s", p)
             remapped.append((media_path, is_voice))
         return BasePlatformAdapter.filter_media_delivery_paths(remapped)
 
     def filter_local_delivery_paths(self, file_paths):
-        """Remap /workspace/ container paths to host cache before validation."""
+        """Remap workspace paths (Docker or agent) to host cache before validation."""
         from gateway.platforms.base import BasePlatformAdapter
 
         remapped = []
         for file_path in file_paths or []:
             p = str(file_path)
-            if p.startswith("/workspace/"):
+            if self._container_workspace_to_host(p) is not None:
                 cached = self._copy_container_file_to_cache(p)
                 if cached:
                     remapped.append(cached)
                     continue
-                logger.warning("Could not resolve container path for delivery: %s", p)
+                logger.warning("Could not resolve workspace path for delivery: %s", p)
             else:
                 remapped.append(file_path)
         return BasePlatformAdapter.filter_local_delivery_paths(remapped)
@@ -1589,9 +1640,9 @@ def register_platform(ctx):
             "You CAN build and send webxdc mini apps and other files (PDF, HTML, etc.). "
             "MANDATORY: before attempting to build any webxdc app, you MUST first call "
             "skill_view('plugin:deltachat-platform:webxdc-converter') to load the build instructions. "
-            "For file delivery from the Docker sandbox: write output files to /workspace/ (NOT /tmp/), "
-            "then use a MEDIA directive — e.g. 'MEDIA:/workspace/app.xdc'. "
-            "The adapter maps /workspace/ paths to the host and sends via send_document. "
+            "For file delivery: write output files to your configured workspace directory (NOT /tmp/), "
+            "then use a MEDIA directive — e.g. 'MEDIA:<workspace>/app.xdc'. "
+            "The adapter maps workspace paths to the host and sends via send_document. "
             "DC core auto-detects .xdc as webxdc — just send it as a regular file. "
             "Each message ends with a [dc:chat=<token>] metadata tag. "
             "IGNORE this tag during normal conversation — it is only needed if you call dc_safe_rpc_call. "
