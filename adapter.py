@@ -835,7 +835,8 @@ body {{
     def _container_workspace_to_host(container_path: str) -> Optional[str]:
         """Map a /workspace/<rel> container path to its host-side sandbox path.
 
-        Returns None when the path is not under /workspace/.
+        Returns None when the path is not under /workspace/, or when the
+        resolved target escapes the sandbox workspace root (path traversal).
         """
         from pathlib import Path
 
@@ -849,7 +850,12 @@ body {{
         except ImportError:
             from gateway.config import get_hermes_home
             sandbox_workspace = Path(get_hermes_home()) / "sandboxes" / "docker" / "default" / "workspace"
-        return str(sandbox_workspace / rel)
+        root = sandbox_workspace.resolve()
+        candidate = (root / rel).resolve()
+        if candidate != root and not candidate.is_relative_to(root):
+            logger.warning("Rejected container path escaping workspace: %s", p)
+            return None
+        return str(candidate)
 
     def _copy_container_file_to_cache(self, container_path: str) -> Optional[str]:
         """Copy a /workspace/ container file to the Hermes docs cache.
@@ -903,18 +909,24 @@ body {{
         return media_files, remaining
 
     def extract_local_files(self, content: str):
-        """Extend base to also pick up bare /workspace/*.xdc paths.
+        """Extend base to also pick up bare .xdc paths.
 
-        The base staticmethod checks os.path.isfile() on the host — container
-        paths like /workspace/app.xdc don't exist there, so we add them
-        explicitly.  filter_local_delivery_paths then does the host mapping.
+        .xdc is not in Hermes's MEDIA_DELIVERY_EXTS, so the base staticmethod
+        never picks up bare .xdc paths.  We add them explicitly here for both
+        deployment shapes:
+          * Docker sandbox container paths like /workspace/app.xdc, which don't
+            exist on the host — filter_local_delivery_paths then maps them to
+            the host sandbox before validation.
+          * Agent-workspace paths on non-Docker deployments (absolute /... or
+            home ~/... paths already visible on the host) — these flow
+            untouched to the base validator, which enforces the denylist.
         """
         import re
         from gateway.platforms.base import BasePlatformAdapter
 
         files, remaining = BasePlatformAdapter.extract_local_files(content)
 
-        xdc_re = re.compile(r'(?<![/:\w.])(/workspace/[\w./\-]+\.xdc)\b', re.IGNORECASE)
+        xdc_re = re.compile(r'(?<![/:\w.])((?:~/|/)[\w./\-]+\.xdc)\b', re.IGNORECASE)
         for match in xdc_re.finditer(content):
             path = match.group(1)
             if path not in files:
@@ -1589,9 +1601,10 @@ def register_platform(ctx):
             "You CAN build and send webxdc mini apps and other files (PDF, HTML, etc.). "
             "MANDATORY: before attempting to build any webxdc app, you MUST first call "
             "skill_view('plugin:deltachat-platform:webxdc-converter') to load the build instructions. "
-            "For file delivery from the Docker sandbox: write output files to /workspace/ (NOT /tmp/), "
-            "then use a MEDIA directive — e.g. 'MEDIA:/workspace/app.xdc'. "
-            "The adapter maps /workspace/ paths to the host and sends via send_document. "
+            "For file delivery: write output files to your current working directory "
+            "(run `pwd` to find it), NOT /tmp/. "
+            "Then reference the file by ABSOLUTE path in a MEDIA directive — e.g. 'MEDIA:/abs/path/app.xdc'. "
+            "In the Docker sandbox the working directory is /workspace/, so there it is 'MEDIA:/workspace/app.xdc'. "
             "DC core auto-detects .xdc as webxdc — just send it as a regular file. "
             "Each message ends with a [dc:chat=<token>] metadata tag. "
             "IGNORE this tag during normal conversation — it is only needed if you call dc_safe_rpc_call. "

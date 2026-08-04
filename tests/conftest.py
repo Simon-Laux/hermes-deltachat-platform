@@ -139,6 +139,31 @@ class MockBasePlatformAdapter:
         """Handle a message event (to be overridden by adapter)."""
         pass
 
+    @staticmethod
+    def extract_media(content: str):
+        """Mock base extractor.
+
+        The real base only picks up MEDIA_DELIVERY_EXTS (which excludes .xdc),
+        so for the adapter's .xdc-focused overrides an empty base result with
+        the content passed through unchanged is a faithful stand-in.
+        """
+        return [], content
+
+    @staticmethod
+    def extract_local_files(content: str):
+        """Mock base local-file extractor (see extract_media note)."""
+        return [], content
+
+    @staticmethod
+    def filter_media_delivery_paths(media_files):
+        """Mock base media filter — pass through unchanged."""
+        return list(media_files or [])
+
+    @staticmethod
+    def filter_local_delivery_paths(file_paths):
+        """Mock base local filter — pass through unchanged."""
+        return list(file_paths or [])
+
 
 class MockGatewayBase:
     """Mock of gateway.platforms.base module."""
