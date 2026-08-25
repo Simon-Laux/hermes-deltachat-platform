@@ -923,7 +923,7 @@ body {{
 
         return files, remaining
 
-    def filter_media_delivery_paths(self, media_files):
+    def filter_media_delivery_paths(self, media_files, session_key: str = ""):
         """Remap /workspace/ container paths to host cache before validation."""
         from gateway.platforms.base import BasePlatformAdapter
 
@@ -937,9 +937,11 @@ body {{
                     continue
                 logger.warning("Could not resolve container path for delivery: %s", p)
             remapped.append((media_path, is_voice))
-        return BasePlatformAdapter.filter_media_delivery_paths(remapped)
+        return BasePlatformAdapter.filter_media_delivery_paths(
+            remapped, session_key=session_key
+        )
 
-    def filter_local_delivery_paths(self, file_paths):
+    def filter_local_delivery_paths(self, file_paths, session_key: str = ""):
         """Remap /workspace/ container paths to host cache before validation."""
         from gateway.platforms.base import BasePlatformAdapter
 
@@ -954,7 +956,9 @@ body {{
                 logger.warning("Could not resolve container path for delivery: %s", p)
             else:
                 remapped.append(file_path)
-        return BasePlatformAdapter.filter_local_delivery_paths(remapped)
+        return BasePlatformAdapter.filter_local_delivery_paths(
+            remapped, session_key=session_key
+        )
 
     async def _event_listener(self) -> None:
         """Listen for Delta Chat events and forward to Hermes."""

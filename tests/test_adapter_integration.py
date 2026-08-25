@@ -510,3 +510,31 @@ class TestLocationSending:
 
         assert result.success is False
         assert "not connected" in result.error.lower()
+
+
+class TestFilterDeliveryPathsSessionKey:
+    """Regression: Hermes core calls these on the adapter instance as
+    self.filter_media_delivery_paths(media_files, session_key=session_key) /
+    self.filter_local_delivery_paths(file_paths, session_key=session_key).
+    Without a matching session_key parameter, every reply containing a
+    MEDIA directive or local file path crashes with
+    TypeError: ...filter_media_delivery_paths() got an unexpected keyword
+    argument 'session_key'."""
+
+    def test_filter_media_delivery_paths_accepts_session_key(self, platform_config):
+        adapter = DeltaChatAdapter(platform_config)
+
+        result = adapter.filter_media_delivery_paths(
+            [("/home/user/app.xdc", False)], session_key="agent:main:deltachat:dm:12"
+        )
+
+        assert result == [("/home/user/app.xdc", False)]
+
+    def test_filter_local_delivery_paths_accepts_session_key(self, platform_config):
+        adapter = DeltaChatAdapter(platform_config)
+
+        result = adapter.filter_local_delivery_paths(
+            ["/home/user/report.pdf"], session_key="agent:main:deltachat:dm:12"
+        )
+
+        assert result == ["/home/user/report.pdf"]
