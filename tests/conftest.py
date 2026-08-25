@@ -139,6 +139,16 @@ class MockBasePlatformAdapter:
         """Handle a message event (to be overridden by adapter)."""
         pass
 
+    @staticmethod
+    def filter_media_delivery_paths(media_files, session_key: str = ""):
+        """Mock base media filter — pass through unchanged."""
+        return list(media_files or [])
+
+    @staticmethod
+    def filter_local_delivery_paths(file_paths, session_key: str = ""):
+        """Mock base local filter — pass through unchanged."""
+        return list(file_paths or [])
+
 
 class MockGatewayBase:
     """Mock of gateway.platforms.base module."""
