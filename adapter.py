@@ -1973,6 +1973,9 @@ def register_platform(ctx):
             "Then reference the file by ABSOLUTE path in a MEDIA directive — e.g. 'MEDIA:/abs/path/app.xdc'. "
             "In the Docker sandbox the working directory is /workspace/, so there it is 'MEDIA:/workspace/app.xdc'. "
             "DC core auto-detects .xdc as webxdc — just send it as a regular file. "
+            "To message a chat you are NOT currently replying in: use the standard "
+            "send_message tool with target='deltachat-platform:<chat_id>' for text, "
+            "and dc_send_file for a file (send_message cannot attach files here). "
             "Each message ends with a [dc:chat=<token>] metadata tag. "
             "IGNORE this tag during normal conversation — it is only needed if you call dc_safe_rpc_call. "
             "Do NOT call dc_safe_rpc_call, dc_chat_rpc_spec, or dc_rpc_spec unless the user explicitly "
@@ -2105,6 +2108,74 @@ def register_rpc_tools(ctx) -> None:
         if success:
             return json.dumps({"success": True, "message": "Call ended"})
         return json.dumps({"error": "Failed to end call"})
+
+    async def _send_file_handler(args: dict, **kwargs) -> str:
+        """Push a file into a chat without replying to an inbound message.
+
+        Deliberately file-only. Hermes's built-in `send_message` tool already
+        routes text to any plugin platform through _send_via_adapter, so a
+        second text sender would just be a competing way to do the same thing.
+        What send_message cannot do is carry a file: for platforms outside its
+        hardcoded list it errors on media-only sends and silently drops the
+        attachment otherwise. That is the whole gap this tool closes — and it
+        matters here because webxdc delivery is what this plugin is for.
+        """
+        args = args or {}
+        file_path = (args.get("file_path") or "").strip()
+        caption = (args.get("caption") or "").strip()
+        chat_token = args.get("chat_token")
+
+        adapter = _active_adapter
+        if adapter is None or adapter.rpc is None:
+            return json.dumps({"error": "Delta Chat is not connected"})
+        if not file_path:
+            return json.dumps({
+                "error": "Provide 'file_path' — an absolute path to the file to send."
+            })
+
+        if chat_token:
+            real_chat_id = await _resolve_chat_token(adapter.rpc, adapter.account_id, chat_token)
+            if real_chat_id is None:
+                return json.dumps({
+                    "error": "Unknown chat_token — use the [dc:chat=...] value "
+                             "from a message in that chat"
+                })
+        else:
+            home_channel = (os.getenv("DELTACHAT_HOME_CHANNEL") or "").strip()
+            if not home_channel:
+                return json.dumps({
+                    "error": "No chat_token given and DELTACHAT_HOME_CHANNEL is not set — "
+                             "there is no default chat to send to."
+                })
+            try:
+                real_chat_id = int(home_channel)
+            except ValueError:
+                return json.dumps({"error": "DELTACHAT_HOME_CHANNEL is not a valid chat id"})
+
+        # The same remap-then-validate pipeline the reply-flow MEDIA directive
+        # uses: /workspace/ paths (Docker sandbox) are resolved to the host
+        # cache, everything else goes to Hermes's denylist-aware validator.
+        # This tool has no other downstream check, so it is the only thing
+        # between an agent-supplied path and an arbitrary host file read.
+        validated = adapter.filter_local_delivery_paths([file_path])
+        if not validated:
+            return json.dumps({
+                "error": f"'{file_path}' could not be delivered — not found, or blocked by policy. "
+                         "In the Docker sandbox write to /workspace/; otherwise use an absolute "
+                         "path that exists on the host."
+            })
+
+        try:
+            result = await adapter.send_document(
+                str(real_chat_id), validated[0], caption=caption or None
+            )
+        except Exception as e:
+            logger.error("dc_send_file failed: %s", e, exc_info=True)
+            return json.dumps({"error": "Send failed"})
+
+        if not result.success:
+            return json.dumps({"error": result.error or "Send failed"})
+        return json.dumps({"success": True, "message_id": result.message_id})
 
     async def _start_call_handler(args: dict, **kwargs) -> str:
         args = args or {}
@@ -2268,6 +2339,54 @@ def register_rpc_tools(ctx) -> None:
         handler=_end_call_handler,
         is_async=True,
         emoji="📞",
+    )
+
+    ctx.register_tool(
+        name="dc_send_file",
+        toolset="deltachat",
+        schema={
+            "description": (
+                "Send a FILE to a Delta Chat chat proactively — not as a reply to an inbound "
+                "message. Use this from a scheduled/cron task, or whenever you need to push a "
+                "generated file (a .xdc webxdc app, a PDF, an image) into a chat and you are not "
+                "already replying in it. "
+                "For proactive TEXT use the standard send_message tool instead with "
+                "target='deltachat-platform:<chat_id>' — this tool is only for files, because "
+                "send_message cannot deliver attachments to Delta Chat. "
+                "Write the file to your current working directory first (run `pwd`; in the Docker "
+                "sandbox that is /workspace/) and pass its absolute path. DC auto-detects the "
+                "type from the extension, so .xdc is delivered as a webxdc app."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "file_path": {
+                        "type": "string",
+                        "description": (
+                            "Absolute path to the file to send, e.g. '/workspace/app.xdc' in the "
+                            "Docker sandbox or any absolute host path otherwise. Rejected if the "
+                            "file does not exist or is blocked by delivery policy."
+                        ),
+                    },
+                    "caption": {
+                        "type": "string",
+                        "description": "Optional text shown alongside the file.",
+                    },
+                    "chat_token": {
+                        "type": "string",
+                        "description": (
+                            "The opaque chat token from the [dc:chat=...] line in a message from "
+                            "that chat. Omit to fall back to DELTACHAT_HOME_CHANNEL. Never use a "
+                            "token from a different conversation."
+                        ),
+                    },
+                },
+                "required": ["file_path"],
+            },
+        },
+        handler=_send_file_handler,
+        is_async=True,
+        emoji="📎",
     )
 
     ctx.register_tool(

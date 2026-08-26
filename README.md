@@ -103,17 +103,55 @@ echo 'DELTACHAT_HOME_CHANNEL=<chat_id>' >> ~/.hermes/.env
 
 From there you can schedule daily briefings, reminders, or any recurring task — and the AI can also place outgoing voice calls from those tasks.
 
+#### Proactive delivery
+
+"Proactive" means sending into a chat without replying to an incoming message —
+a cron job, or the agent reaching a chat it is not currently talking in.
+
+**Text** is handled entirely by Hermes. Its built-in `send_message` tool routes
+to any plugin platform through the live adapter, so no Delta Chat-specific tool
+is involved:
+
+```
+send_message  target="deltachat-platform:<chat_id>"  message="..."
+send_message  action="list"          # lists chats the bot has talked to
+```
+
+Cron delivery works the same way, because the plugin declares
+`cron_deliver_env_var="DELTACHAT_HOME_CHANNEL"`. So `deliver=origin` (back to
+the chat the job was created in), `deliver=deltachat-platform:<chat_id>`, and
+the bare home-channel default all work with no extra configuration.
+
+**Files** need `dc_send_file`. Hermes'"'"'s `send_message` cannot attach files for
+platforms outside its hardcoded list — it errors on a media-only send and
+silently drops the attachment otherwise — so a proactive `.xdc` or PDF has to go
+through the plugin:
+
+```
+dc_send_file  file_path="/workspace/app.xdc"  caption="here you go"  chat_token="<from [dc:chat=...]>"
+```
+
+Omit `chat_token` to fall back to `DELTACHAT_HOME_CHANNEL`. Paths go through the
+same delivery-policy validation as a normal `MEDIA:` reply.
+
+Out-of-process cron delivery (running `hermes cron` in a separate process from
+the gateway) is **not** supported: it would require a second
+`deltachat-rpc-server` against an accounts directory the gateway already holds
+open. Hermes runs its cron ticker inside the gateway process, so the normal path
+is unaffected.
+
 ### Webxdc Mini-Apps
 Ask the AI to build a small interactive app (a game, a form, a calculator, a data viewer) and it delivers a `.xdc` file straight into the chat. The app runs locally inside Delta Chat — no server, no install. Built-in `webxdc-converter` skill handles the packaging.
 
 ### Raw Delta Chat API (Advanced)
-Three tools are always available once the plugin is loaded:
+These tools are always available once the plugin is loaded:
 
 | Tool | Description |
 |------|-------------|
 | `dc_rpc_spec` | Full OpenRPC spec from the running server — all methods, params, types |
 | `dc_chat_rpc_spec` | Spec filtered to chat-scoped methods, destructive ops removed |
 | `dc_safe_rpc_call` | Call a chat-scoped method safely — `accountId` and `chatId` are injected from an opaque per-chat token; the AI cannot address a different chat |
+| `dc_send_file` | Push a file (`.xdc`, PDF, image) into a chat proactively — see [Proactive delivery](#proactive-delivery) |
 
 Set `DELTACHAT_ENABLE_RAW_RPC=1` to also unlock `dc_rpc_call` (unrestricted access — only for trusted deployments).
 
