@@ -216,7 +216,7 @@ ship bundled without:
 - Message splitting + markdown stripping.
 - `dc_rpc_call` hardening (allowlist, destructive-method block).
 - `_event_supervisor` so a crashed listener does not silently end the session.
-- Delete `_handle_audio_message_UNUSED` (~240 dead lines, `adapter.py:1294`).
+- ~~Delete `_handle_audio_message_UNUSED`~~ — done (174 dead lines removed).
 
 Then run `hermes plugins doctor` (`hermes_cli/plugin_dev.py`, new since
 0.15.1) — it validates manifest, import and registration through the real

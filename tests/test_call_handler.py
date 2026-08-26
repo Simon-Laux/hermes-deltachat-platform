@@ -191,14 +191,16 @@ class TestBargeIn:
         mgr._chat_to_msg[session.chat_id] = session.msg_id
         return mgr
 
-    def test_no_interrupt_when_not_speaking(self):
+    @pytest.mark.asyncio
+    async def test_no_interrupt_when_not_speaking(self):
         session = self._session(0)            # nothing queued
         session.is_responding = False
         mgr = self._manager(session)
         mgr._handle_barge_in(1)
         assert session.interrupted is False   # nothing to interrupt
 
-    def test_interrupt_flushes_and_stops_tts(self):
+    @pytest.mark.asyncio
+    async def test_interrupt_flushes_and_stops_tts(self):
         session = self._session(10)
         session.is_responding = True
         mgr = self._manager(session)
@@ -206,7 +208,8 @@ class TestBargeIn:
         assert session.interrupted is True
         assert session.outgoing_track.is_speaking() is False   # queue flushed
 
-    def test_barge_in_cancels_pending_hangup(self):
+    @pytest.mark.asyncio
+    async def test_barge_in_cancels_pending_hangup(self):
         session = self._session(10)
         session.hangup_pending = True
         session.hanging_up = True             # goodbye drain in progress
@@ -260,12 +263,21 @@ class TestOutgoingCall:
         with pytest.raises(RuntimeError):
             fut.result()
 
-    def test_consume_drop_response_is_one_shot(self):
+    @pytest.mark.asyncio
+    async def test_consume_drop_response_is_one_shot(self):
         mgr = self._manager()
-        mgr._drop_next_response.add("12")
+        # _drop_next_response is a chat_id → count map: each call-end can inject
+        # two AI notes (call thread + main thread), so one send() must not clear
+        # a pending second drop.
+        mgr._drop_next_response["12"] = 1
         assert mgr.consume_drop_response("12") is True   # call-ended note's reply → drop
         assert mgr.consume_drop_response("12") is False  # subsequent replies go through
         assert mgr.consume_drop_response("99") is False
+
+        mgr._drop_next_response["12"] = 2
+        assert mgr.consume_drop_response("12") is True
+        assert mgr.consume_drop_response("12") is True   # second note also dropped
+        assert mgr.consume_drop_response("12") is False
 
 
 class TestDecodeTts:
