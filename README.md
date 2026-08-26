@@ -115,7 +115,18 @@ Three tools are always available once the plugin is loaded:
 | `dc_chat_rpc_spec` | Spec filtered to chat-scoped methods, destructive ops removed |
 | `dc_safe_rpc_call` | Call a chat-scoped method safely — `accountId` and `chatId` are injected from an opaque per-chat token; the AI cannot address a different chat |
 
-Set `DELTACHAT_ENABLE_RAW_RPC=1` to also unlock `dc_rpc_call` (unrestricted access — only for trusted deployments).
+Set `DELTACHAT_ENABLE_RAW_RPC=1` to also unlock `dc_rpc_call`, which reaches the whole
+account rather than a single chat — only for trusted deployments. Even then it refuses
+every `delete_*` / `remove_*` method, and every call it receives is logged at `WARNING`
+so it shows up in `~/.hermes/logs/errors.log`. To narrow it further:
+
+```bash
+DELTACHAT_RAW_RPC_ALLOWLIST=get_account_info,get_chatlist_entries  # only these
+DELTACHAT_RAW_RPC_BLOCKLIST=set_config,add_or_update_transport     # never these
+```
+
+An allowlist, when set, wins over everything else; the blocklist stacks on top of the
+built-in `delete_*` / `remove_*` refusal.
 
 ---
 
@@ -194,7 +205,9 @@ hermes gateway start
 |----------|----------|---------|-------------|
 | `DELTACHAT_RPC_SERVER` | No | `deltachat-rpc-server` | Path to RPC binary |
 | `DELTACHAT_HOME_CHANNEL` | No | — | Chat ID for cron/proactive delivery (or use `/sethome` in chat) |
-| `DELTACHAT_ENABLE_RAW_RPC` | No | — | Enable unrestricted `dc_rpc_call` tool |
+| `DELTACHAT_ENABLE_RAW_RPC` | No | — | Expose the account-wide `dc_rpc_call` tool |
+| `DELTACHAT_RAW_RPC_ALLOWLIST` | No | — | Comma-separated methods `dc_rpc_call` may call (unset = any non-destructive one) |
+| `DELTACHAT_RAW_RPC_BLOCKLIST` | No | — | Comma-separated methods `dc_rpc_call` may never call |
 
 ### Multiple Agents
 

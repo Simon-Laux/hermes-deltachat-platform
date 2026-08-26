@@ -27,6 +27,18 @@ optional_env:
     # one means the value is echoed in plaintext by the other code path.
     password: true
     secret: true
+  - name: DELTACHAT_ENABLE_RAW_RPC
+    description: "Set to 1 to expose the account-wide dc_rpc_call tool in addition to the chat-scoped dc_safe_rpc_call. Trusted deployments only."
+    prompt: "Enable unrestricted dc_rpc_call (1 to enable)"
+    password: false
+  - name: DELTACHAT_RAW_RPC_ALLOWLIST
+    description: "Comma-separated RPC methods dc_rpc_call may call. Unset means any non-destructive method is allowed."
+    prompt: "Raw RPC allowlist (comma-separated)"
+    password: false
+  - name: DELTACHAT_RAW_RPC_BLOCKLIST
+    description: "Comma-separated RPC methods dc_rpc_call may never call, on top of the always-blocked delete_*/remove_* methods."
+    prompt: "Raw RPC blocklist (comma-separated)"
+    password: false
   - name: DELTACHAT_CHATMAIL_SERVERS
     description: "Comma-separated chatmail relays to register on when DELTACHAT_EMAIL=auto (e.g. nine.testrun.org,mehl.cloud). Unset picks nine.testrun.org plus two random relays from chatmail.at/relays for redundancy."
     prompt: "Chatmail relays (comma-separated)"

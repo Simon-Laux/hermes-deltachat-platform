@@ -264,7 +264,8 @@ _active_adapter = None
 _chat_id_to_token: Dict[int, str] = {}
 _chat_token_to_id: Dict[str, int] = {}
 
-# Methods that mutate or destroy chat data — blocked from dc_safe_rpc_call.
+# Methods that mutate or destroy chat data — blocked from dc_safe_rpc_call
+# and from dc_rpc_call, along with any delete_*/remove_* method.
 _DESTRUCTIVE_METHODS = frozenset({
     "delete_chat",
     "delete_messages",
@@ -273,6 +274,27 @@ _DESTRUCTIVE_METHODS = frozenset({
     "remove_draft",
     "leave_group",
 })
+
+
+def _parse_method_list(value: Optional[str]) -> frozenset:
+    """Parse a comma-separated list of RPC method names into a set."""
+    if not value:
+        return frozenset()
+    return frozenset(m.strip() for m in value.split(",") if m.strip())
+
+
+def _is_destructive(method: str) -> bool:
+    """True for methods that destroy or detach chat data.
+
+    The prefix check is deliberately broader than _DESTRUCTIVE_METHODS: the
+    OpenRPC surface grows with every core release, and a new delete_* method
+    should be blocked the day it appears, not the day we notice it.
+    """
+    return (
+        method in _DESTRUCTIVE_METHODS
+        or method.startswith("delete_")
+        or method.startswith("remove_")
+    )
 
 # Cached OpenRPC spec (fetched lazily on first use).
 _spec_cache: Optional[dict] = None
@@ -2023,11 +2045,32 @@ def register_rpc_tools(ctx) -> None:
             return json.dumps({"error": "Missing 'method' (snake_case RPC name)."})
         if _active_adapter is None or _active_adapter.rpc is None:
             return json.dumps({"error": "Delta Chat is not connected"})
+
+        # WARNING, not INFO: this tool can reach the whole account, and anyone
+        # who gets text in front of the model can try to steer it. WARNING is
+        # the lowest level that lands in errors.log, so the audit trail
+        # survives even when gateway.log has rolled over.
+        logger.warning("Raw RPC call: %s", method)
+
+        # Read at call time, not import time — Hermes loads ~/.hermes/.env
+        # after this module is imported.
+        allowlist = _parse_method_list(os.getenv("DELTACHAT_RAW_RPC_ALLOWLIST"))
+        blocklist = _parse_method_list(os.getenv("DELTACHAT_RAW_RPC_BLOCKLIST"))
+        if allowlist and method not in allowlist:
+            return json.dumps({"error": f"'{method}' is not in the raw RPC allowlist"})
+        if method in blocklist or _is_destructive(method):
+            return json.dumps({"error": f"'{method}' is blocked"})
+
         try:
             result = await getattr(_active_adapter.rpc, method)(*params)
             return json.dumps(result, default=str)
+        except AttributeError:
+            return json.dumps({"error": f"Unknown method '{method}'"})
         except Exception as e:
-            return json.dumps({"error": str(e)})
+            # The real error goes to the log, not back to the model: RPC
+            # failures can carry account paths and other local detail.
+            logger.error("Raw RPC call %s failed: %s", method, e, exc_info=True)
+            return json.dumps({"error": "RPC call failed"})
 
     async def _chat_spec_handler(args: dict = None, **kwargs) -> str:
         """Return only the chatId-scoped, non-destructive methods."""
@@ -2038,9 +2081,7 @@ def register_rpc_tools(ctx) -> None:
         safe_methods = [
             m for m in spec.get("methods", [])
             if any(p["name"] == "chatId" for p in m.get("params", []))
-            and m["name"] not in _DESTRUCTIVE_METHODS
-            and not m["name"].startswith("delete_")
-            and not m["name"].startswith("remove_")
+            and not _is_destructive(m["name"])
         ]
         return json.dumps({**spec, "methods": safe_methods}, indent=2)
 
@@ -2060,11 +2101,7 @@ def register_rpc_tools(ctx) -> None:
             return json.dumps({"error": "Unknown chat_token — use the [dc:chat=...] value from your message"})
 
         # Block destructive methods
-        if (
-            method in _DESTRUCTIVE_METHODS
-            or method.startswith("delete_")
-            or method.startswith("remove_")
-        ):
+        if _is_destructive(method):
             return json.dumps({"error": f"'{method}' is not allowed in safe mode"})
 
         # Verify method exists and has a chatId param
@@ -2175,7 +2212,9 @@ def register_rpc_tools(ctx) -> None:
                 "description": (
                     "Call any Delta Chat RPC method directly by name and params. "
                     "Use dc_rpc_spec first to see available methods. "
-                    "CAUTION: unrestricted access — can modify or delete account data. "
+                    "CAUTION: reaches the whole account, not just one chat. "
+                    "delete_*/remove_* methods are refused, and the deployment "
+                    "may restrict this further. "
                     "Prefer dc_safe_rpc_call for chat-scoped operations."
                 ),
                 "parameters": {
