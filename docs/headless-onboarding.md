@@ -99,7 +99,13 @@ It is still available when you need it:
 - `--log-level DEBUG` logs the full link.
 - If `invite.txt` can't be written, the link is logged at WARNING instead —
   with no file to point at, that's the only way to pair.
-- In memory as `adapter._invite_link`, for a future `get_status()`.
+- In memory as `adapter._invite_link`, for whatever surfaces it later.
+
+The file is the canonical copy. Hermes has no way to display it: adapters
+report health through `write_runtime_status()`, whose schema is a fixed set of
+fields (`platform_state`, `error_code`, `error_message`, `needs_attention`, …)
+with no free-form slot, and `get_status()` — which the fork adds — is not a
+Hermes hook and is never called by the gateway.
 
 This is defence in depth, not a guarantee: anyone who can read the accounts
 directory can read the file, and re-running `setup.py` prints the link again.
