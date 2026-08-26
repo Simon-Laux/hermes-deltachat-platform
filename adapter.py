@@ -222,9 +222,13 @@ async def _check_dc_version(rpc) -> bool:
         return True
 
     except Exception as e:
-        logger.warning(f"Could not check Delta Chat version: {e}")
-        # Don't block connection for version check failures
-        return True
+        # Refuse rather than fall through. A malformed or missing version
+        # string is already handled — _parse_version returns (0, 0, 0), which
+        # compares as too old above. Reaching here means get_system_info()
+        # itself raised, i.e. the RPC transport is broken, and every call after
+        # this one would fail too. One clear error beats the cascade.
+        logger.error(f"Could not check Delta Chat version: {e}")
+        return False
 
 
 class _AsyncRpc:
