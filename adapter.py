@@ -7,11 +7,12 @@ import functools
 import html
 import json
 import os
+import random
 import secrets
 import sys
 import asyncio
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 # Add vendor directory to sys.path so vendored deltachat2 can be imported
 _plugin_dir = os.path.dirname(os.path.abspath(__file__))
@@ -41,6 +42,68 @@ if os.getenv("DELTACHAT_DEBUG"):
 # Minimum required Delta Chat core version
 # Plugin will NOT connect with older versions
 MIN_DC_VERSION = "2.51.0"
+
+# ---------------------------------------------------------------------------
+# Headless onboarding
+# ---------------------------------------------------------------------------
+# Creating an account is a side effect with a cost outside this machine: it
+# registers on somebody else's chatmail relay. So it is strictly opt-in — with
+# no onboarding env var set we keep the old behaviour of refusing to start and
+# pointing at setup.py, rather than silently minting an account because
+# DELTACHAT_DATA_DIR was mistyped and the accounts dir looks empty.
+
+# Anchored first in auto mode so the primary address is predictable across
+# rebuilds; the extra relays are drawn at random purely for redundancy.
+ANCHOR_RELAY = "nine.testrun.org"
+AUTO_RELAY_COUNT = 3
+
+
+def _parse_relay_list(raw: str) -> List[str]:
+    """Split a comma-separated relay list into bare hostnames."""
+    hosts = []
+    for chunk in raw.split(","):
+        host = chunk.strip().replace("https://", "").strip("/")
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
+def _auto_relays(count: int = AUTO_RELAY_COUNT) -> List[str]:
+    """Pick relays for `DELTACHAT_EMAIL=auto`: the anchor plus random others.
+
+    Delta Chat core supports several transports on one account, so registering
+    on more than one relay buys redundancy if a relay goes away. Falls back to
+    the anchor alone when the relay list can't be fetched.
+    """
+    try:
+        from setup import get_relay_servers
+
+        available = get_relay_servers()
+    except Exception as e:
+        logger.warning("Could not fetch chatmail relay list (%s)", e)
+        available = []
+
+    others = [h for h in available if h != ANCHOR_RELAY]
+    random.shuffle(others)
+    return [ANCHOR_RELAY] + others[: max(0, count - 1)]
+
+
+def _headless_onboarding() -> Optional[Dict[str, Any]]:
+    """Return onboarding parameters, or None when not opted in.
+
+    - DELTACHAT_EMAIL=<address>  -> configure that mailbox (needs a password)
+    - DELTACHAT_EMAIL=auto       -> mint a chatmail account
+    - DELTACHAT_CHATMAIL_SERVERS -> mint a chatmail account on those relays
+    """
+    email = (os.getenv("DELTACHAT_EMAIL") or "").strip()
+    servers = (os.getenv("DELTACHAT_CHATMAIL_SERVERS") or "").strip()
+
+    if not email and not servers:
+        return None
+    if email and email.lower() != "auto":
+        return {"mode": "email", "email": email}
+    return {"mode": "chatmail", "relays": _parse_relay_list(servers)}
+
 
 # Lazy import to avoid dependency issues if deltachat2 not installed
 _DC2_AVAILABLE = None
@@ -260,6 +323,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._running = False
         self._dc_config_dir: Optional[str] = None
         self._call_manager = None
+        self._invite_link: Optional[str] = None
 
 
 
@@ -294,6 +358,110 @@ class DeltaChatAdapter(BasePlatformAdapter):
 
         # Default - assume in PATH
         return "deltachat-rpc-server"
+
+    @staticmethod
+    def _forget_password() -> None:
+        """Drop DELTACHAT_PASSWORD from the process environment.
+
+        Delta Chat core has persisted its own copy of the credentials by the
+        time a transport is configured, so nothing downstream needs the plain
+        value — but os.environ is readable by anything running in this process
+        (including agent tooling) and is inherited by subprocesses.
+
+        Only called after a *successful* configure: on failure the value has to
+        survive so that a later reconnect can retry.
+        """
+        if os.environ.pop("DELTACHAT_PASSWORD", None) is not None:
+            logger.debug("Cleared DELTACHAT_PASSWORD from the process environment")
+
+    async def _configure_transports(self, onboarding: Dict[str, Any]) -> bool:
+        """Attach a transport to the account from env-var config."""
+        if onboarding["mode"] == "email":
+            return await self._configure_email_transport(onboarding["email"])
+        return await self._configure_chatmail_transports(onboarding["relays"])
+
+    async def _configure_email_transport(self, email: str) -> bool:
+        """Configure an existing mailbox as the account transport."""
+        password = os.getenv("DELTACHAT_PASSWORD") or ""
+        if not password:
+            logger.error(
+                "DELTACHAT_EMAIL is set to %s but DELTACHAT_PASSWORD is empty. "
+                "Use DELTACHAT_EMAIL=auto for a chatmail account instead.",
+                email,
+            )
+            return False
+
+        try:
+            # add_or_update_transport configures and blocks until finished;
+            # the separate configure() call is deprecated as of DC 2025-02.
+            await self.rpc.add_or_update_transport(
+                self.account_id, {"addr": email, "password": password}
+            )
+        except Exception as e:
+            logger.error("Could not configure transport for %s: %s", email, e)
+            return False
+
+        self._forget_password()
+        logger.info("Configured Delta Chat transport for %s", email)
+        return True
+
+    async def _configure_chatmail_transports(self, relays: List[str]) -> bool:
+        """Register on one or more chatmail relays.
+
+        Multiple relays are redundancy, not a requirement — one working
+        transport is enough to succeed, so individual failures only warn.
+        """
+        relays = relays or _auto_relays()
+        logger.info("Onboarding via chatmail relay(s): %s", ", ".join(relays))
+
+        added = []
+        for host in relays:
+            try:
+                await self.rpc.add_transport_from_qr(
+                    self.account_id, f"dcaccount:{host}"
+                )
+                added.append(host)
+                logger.info("Registered chatmail transport on %s", host)
+            except Exception as e:
+                logger.warning("Chatmail relay %s failed: %s", host, e)
+
+        if not added:
+            logger.error(
+                "No chatmail relay accepted a registration (tried: %s)",
+                ", ".join(relays),
+            )
+            return False
+        return True
+
+    async def _publish_invite_link(self) -> None:
+        """Log and persist the SecureJoin invite link.
+
+        Delta Chat needs this link for the initial key exchange — adding the
+        bot's address by hand does not establish an encrypted session. setup.py
+        prints it to a terminal, but with headless onboarding nobody is
+        watching one, so surface it where a systemd/Docker operator will
+        actually find it: the gateway log and a file in the accounts dir.
+        """
+        try:
+            link = await self.rpc.get_chat_securejoin_qr_code(self.account_id, None)
+        except Exception as e:
+            logger.warning("Could not generate SecureJoin invite link: %s", e)
+            return
+
+        if not link:
+            return
+
+        self._invite_link = link
+        logger.info("Delta Chat invite link: %s", link)
+
+        try:
+            path = os.path.join(self._get_dc_config_dir(), "invite.txt")
+            with open(path, "w", encoding="utf-8") as f:
+                f.write(link + "\n")
+            os.chmod(path, 0o600)
+            logger.info("Invite link also written to %s", path)
+        except OSError as e:
+            logger.warning("Could not write invite link to file: %s", e)
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Connect to Delta Chat via RPC server.
@@ -345,16 +513,39 @@ class DeltaChatAdapter(BasePlatformAdapter):
 
             # Get or create account - use first available
             accounts = await self.rpc.get_all_accounts()
+            onboarding = _headless_onboarding()
             if accounts:
                 self.account_id = accounts[0]["id"]
                 logger.info(f"Using Delta Chat account: {self.account_id}")
+            elif onboarding:
+                self.account_id = await self.rpc.add_account()
+                logger.info(f"Created Delta Chat account: {self.account_id}")
             else:
                 logger.error(
                     f"No Delta Chat accounts found in {dc_accounts_path}. "
-                    "Run: python ~/.hermes/plugins/deltachat-platform/setup.py"
+                    "Run: python ~/.hermes/plugins/deltachat-platform/setup.py "
+                    "— or set DELTACHAT_EMAIL to onboard without a terminal "
+                    "(see docs/headless-onboarding.md)"
                 )
                 self._cleanup()
                 return False
+
+            # add_account() persists an account row before any transport is
+            # attached, so a bootstrap that fails half way leaves an unusable
+            # account behind that get_all_accounts() hands back on the next
+            # boot. Gate on is_configured(), never on account existence.
+            if not await self.rpc.is_configured(self.account_id):
+                if not onboarding:
+                    logger.error(
+                        f"Delta Chat account {self.account_id} has no working "
+                        "transport. Run setup.py, or set DELTACHAT_EMAIL to "
+                        "configure one without a terminal."
+                    )
+                    self._cleanup()
+                    return False
+                if not await self._configure_transports(onboarding):
+                    self._cleanup()
+                    return False
 
             # Enable bot mode: auto-accept contact requests
             try:
@@ -366,6 +557,9 @@ class DeltaChatAdapter(BasePlatformAdapter):
             # Start IO for the account to receive events
             await self.rpc.start_io(self.account_id)
             logger.debug(f"Started IO for account {self.account_id}")
+
+            # Needs IO running to produce a usable link.
+            await self._publish_invite_link()
 
             # Start event listener
             self._running = True
@@ -408,6 +602,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
             self._transport = None
         self.rpc = None
         self.account_id = None
+        self._invite_link = None
 
     async def disconnect(self) -> None:
         """Disconnect from Delta Chat."""
