@@ -155,12 +155,12 @@ class MockBasePlatformAdapter:
         return [], content
 
     @staticmethod
-    def filter_media_delivery_paths(media_files):
+    def filter_media_delivery_paths(media_files, session_key: str = ""):
         """Mock base media filter — pass through unchanged."""
         return list(media_files or [])
 
     @staticmethod
-    def filter_local_delivery_paths(file_paths):
+    def filter_local_delivery_paths(file_paths, session_key: str = ""):
         """Mock base local filter — pass through unchanged."""
         return list(file_paths or [])
 
