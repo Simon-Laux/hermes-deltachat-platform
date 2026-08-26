@@ -92,6 +92,8 @@ When converting an existing artifact or HTML file:
 
 ## Step 3: Package it
 
+**Where to write files:** Write all outputs (source files, the `.xdc`, and any build artifacts) to your **current working directory** — run `pwd` to find it. In the Docker sandbox that is `/workspace/`; on other deployments it is wherever the agent runs (`$PWD`). Never write to `/tmp/` — on Docker it is container-local tmpfs the host cannot read. The examples below use `/workspace` as a concrete stand-in; substitute your actual working directory.
+
 ### Create manifest.toml
 
 ```toml
@@ -153,7 +155,7 @@ with zipfile.ZipFile('/workspace/myapp.xdc', 'w', zipfile.ZIP_DEFLATED) as zf:
 "
 ```
 
-`index.html` MUST be at the root of the archive (arcname `'index.html'`, not a subdirectory path). All output files must go to `/workspace/` — **not** `/tmp/`. The `/tmp/` directory is container-local tmpfs and the host cannot read it.
+`index.html` MUST be at the root of the archive (arcname `'index.html'`, not a subdirectory path). All output files must go to your current working directory (`/workspace/` in the Docker sandbox, `$PWD` otherwise) — **not** `/tmp/`. On Docker the `/tmp/` directory is container-local tmpfs and the host cannot read it.
 
 **Always use ZIP format** — `.xdc` is a ZIP file. Never use tar, tar.gz, or any other archive format; webxdc clients will not open them.
 
@@ -183,14 +185,14 @@ Aim for under 1 MB. Under 10 MB is the practical ceiling — beyond that it beco
 
 ### Deliver the file
 
-Write the `.xdc` to `/workspace/`, then emit a MEDIA directive in your response — the adapter maps `/workspace/` paths to the host and calls `send_document`, exactly like Telegram does for any other file. DC core auto-detects `.xdc` and delivers it as a webxdc mini app.
+Write the `.xdc` to your working directory, then emit a MEDIA directive referencing it by **absolute path** — the adapter delivers it via `send_document`, exactly like Telegram does for any other file. (In the Docker sandbox the working directory is `/workspace/`, so the absolute path there is `/workspace/myapp.xdc`.) DC core auto-detects `.xdc` and delivers it as a webxdc mini app.
 
 ```
 Here's your mini app! Tap Start to launch it.
 MEDIA:/workspace/myapp.xdc
 ```
 
-The same works for any other output file type:
+The same works for any other output file type (use its absolute path):
 ```
 Here is your report. MEDIA:/workspace/report.pdf
 ```
