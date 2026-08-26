@@ -244,10 +244,14 @@ def mock_platform_config():
 
 @pytest.fixture
 def mock_rpc():
-    """Create a mock deltachat2.Rpc instance."""
-    rpc = MagicMock()
-    # Make call an async method that returns a coroutine
-    rpc.call = AsyncMock()
-    rpc.start = AsyncMock()
+    """Create a mock of the adapter's _AsyncRpc wrapper.
+
+    The adapter does not call ``rpc.call(...)`` — it calls RPC methods by
+    attribute (``rpc.get_basic_chat_info(...)``), which _AsyncRpc turns into
+    awaitables via run_in_executor. So the mock has to be an AsyncMock, or
+    every un-stubbed attribute yields a plain MagicMock that blows up with
+    "object MagicMock can't be used in 'await' expression".
+    """
+    rpc = AsyncMock()
     rpc.close = Mock()
     return rpc
