@@ -296,6 +296,7 @@ def _is_destructive(method: str) -> bool:
         or method.startswith("remove_")
     )
 
+
 # Cached OpenRPC spec (fetched lazily on first use).
 _spec_cache: Optional[dict] = None
 
@@ -2061,11 +2062,24 @@ def register_rpc_tools(ctx) -> None:
         if method in blocklist or _is_destructive(method):
             return json.dumps({"error": f"'{method}' is blocked"})
 
+        # Check the name against the spec rather than relying on getattr to
+        # raise: deltachat2.Rpc.__getattr__ returns a lambda for *any* name, so
+        # a typo would otherwise reach the server and come back as the generic
+        # failure below, leaving the model no way to correct itself. A spec
+        # that won't load is not a reason to refuse the call.
+        try:
+            known = {m["name"] for m in (await _fetch_spec()).get("methods", [])}
+        except Exception as e:
+            logger.warning("Could not load the RPC spec to validate %s: %s", method, e)
+            known = None
+        if known is not None and method not in known:
+            return json.dumps({
+                "error": f"Unknown method '{method}' — use dc_rpc_spec to browse available methods"
+            })
+
         try:
             result = await getattr(_active_adapter.rpc, method)(*params)
             return json.dumps(result, default=str)
-        except AttributeError:
-            return json.dumps({"error": f"Unknown method '{method}'"})
         except Exception as e:
             # The real error goes to the log, not back to the model: RPC
             # failures can carry account paths and other local detail.

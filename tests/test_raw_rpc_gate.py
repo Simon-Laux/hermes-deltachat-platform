@@ -53,6 +53,18 @@ def raw_rpc_handler():
     return handlers["dc_rpc_call"]
 
 
+@pytest.fixture(autouse=True)
+def stub_spec():
+    """Keep the gate's method-name check off the real deltachat-rpc-server binary."""
+    spec = {"methods": [
+        {"name": "get_basic_chat_info", "params": [{"name": "accountId"}, {"name": "chatId"}]},
+        {"name": "set_config", "params": [{"name": "accountId"}]},
+        {"name": "delete_chat", "params": [{"name": "accountId"}, {"name": "chatId"}]},
+    ]}
+    with patch.object(adapter, "_spec_cache", spec):
+        yield spec
+
+
 @pytest.fixture
 def connected_adapter():
     """Patch in a connected adapter whose every RPC method returns {'ok': True}."""
@@ -128,11 +140,20 @@ class TestRawRpcGate:
         assert result == {"error": "RPC call failed"}
 
     @pytest.mark.asyncio
-    async def test_unknown_method(self, raw_rpc_handler, connected_adapter):
-        del connected_adapter.rpc.nope
-        connected_adapter.rpc.mock_add_spec(["get_basic_chat_info"])
-        result = json.loads(await raw_rpc_handler({"method": "nope", "params": []}))
+    async def test_unknown_method_is_named_as_such(self, raw_rpc_handler, connected_adapter):
+        """deltachat2.Rpc.__getattr__ answers any name, so getattr never raises.
+
+        Without the spec check a typo reaches the server and comes back as the
+        generic failure, leaving the model nothing to correct.
+        """
+        result = json.loads(await raw_rpc_handler({"method": "get_bassic_chat_info", "params": []}))
         assert "Unknown method" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_unloadable_spec_does_not_block_the_call(self, raw_rpc_handler, connected_adapter):
+        with patch.object(adapter, "_fetch_spec", AsyncMock(side_effect=RuntimeError("no binary"))):
+            result = json.loads(await raw_rpc_handler({"method": "get_basic_chat_info", "params": []}))
+        assert result == {"ok": True}
 
     @pytest.mark.asyncio
     async def test_missing_method_arg(self, raw_rpc_handler, connected_adapter):
