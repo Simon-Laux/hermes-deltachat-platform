@@ -132,12 +132,19 @@ class TestRawRpcGate:
         assert any("get_basic_chat_info" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.asyncio
-    async def test_rpc_error_detail_stays_in_the_log(self, raw_rpc_handler, connected_adapter):
+    async def test_rpc_error_is_forwarded_and_logged(self, raw_rpc_handler, connected_adapter, caplog):
+        """The model needs the real message to fix its own call.
+
+        Nothing an error can disclose is out of reach of a tool that already
+        exposes get_message and get_system_info.
+        """
         connected_adapter.rpc.get_basic_chat_info = AsyncMock(
-            side_effect=RuntimeError("/home/someone/.hermes/deltachat-platform/accounts.db locked")
+            side_effect=RuntimeError("This method takes an array of 2 arguments")
         )
-        result = json.loads(await raw_rpc_handler({"method": "get_basic_chat_info", "params": []}))
-        assert result == {"error": "RPC call failed"}
+        with caplog.at_level("ERROR", logger="hermes_plugins.deltachat"):
+            result = json.loads(await raw_rpc_handler({"method": "get_basic_chat_info", "params": []}))
+        assert result == {"error": "This method takes an array of 2 arguments"}
+        assert any("get_basic_chat_info" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_unknown_method_is_named_as_such(self, raw_rpc_handler, connected_adapter):

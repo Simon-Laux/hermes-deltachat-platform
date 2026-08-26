@@ -2064,9 +2064,9 @@ def register_rpc_tools(ctx) -> None:
 
         # Check the name against the spec rather than relying on getattr to
         # raise: deltachat2.Rpc.__getattr__ returns a lambda for *any* name, so
-        # a typo would otherwise reach the server and come back as the generic
-        # failure below, leaving the model no way to correct itself. A spec
-        # that won't load is not a reason to refuse the call.
+        # a typo reaches the server and comes back as a bare "Method not found"
+        # a round-trip later. Catching it here points at dc_rpc_spec instead. A
+        # spec that won't load is not a reason to refuse the call.
         try:
             known = {m["name"] for m in (await _fetch_spec()).get("methods", [])}
         except Exception as e:
@@ -2081,10 +2081,16 @@ def register_rpc_tools(ctx) -> None:
             result = await getattr(_active_adapter.rpc, method)(*params)
             return json.dumps(result, default=str)
         except Exception as e:
-            # The real error goes to the log, not back to the model: RPC
-            # failures can carry account paths and other local detail.
+            # why: the error goes back verbatim, on purpose. It is tempting to
+            # mask it as leaking paths or as an injection channel, but this tool
+            # only exists under DELTACHAT_ENABLE_RAW_RPC, where the model can
+            # already reach get_message/get_contact/get_system_info and pull the
+            # same strings out directly. Blocked methods return above without
+            # ever calling, so no error can name something the caller was
+            # refused. What masking does cost is real: "This method takes an
+            # array of 2 arguments" is how the model fixes its own call.
             logger.error("Raw RPC call %s failed: %s", method, e, exc_info=True)
-            return json.dumps({"error": "RPC call failed"})
+            return json.dumps({"error": str(e)})
 
     async def _chat_spec_handler(args: dict = None, **kwargs) -> str:
         """Return only the chatId-scoped, non-destructive methods."""

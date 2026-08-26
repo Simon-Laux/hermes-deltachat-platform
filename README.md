@@ -128,6 +128,10 @@ DELTACHAT_RAW_RPC_BLOCKLIST=set_config,add_or_update_transport     # never these
 An allowlist, when set, wins over everything else; the blocklist stacks on top of the
 built-in `delete_*` / `remove_*` refusal.
 
+RPC errors come back to the agent verbatim so it can correct a malformed call. That
+discloses nothing a tool with `get_message` and `get_system_info` did not already
+grant, and refused methods never reach the server to produce one.
+
 ---
 
 ## Installation
