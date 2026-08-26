@@ -411,7 +411,11 @@ class DeltaChatAdapter(BasePlatformAdapter):
         Multiple relays are redundancy, not a requirement — one working
         transport is enough to succeed, so individual failures only warn.
         """
-        relays = relays or _auto_relays()
+        if not relays:
+            # _auto_relays() scrapes chatmail.at over blocking urllib with a
+            # 10s timeout — same reason _AsyncRpc exists, keep it off the loop.
+            loop = asyncio.get_running_loop()
+            relays = await loop.run_in_executor(None, _auto_relays)
         logger.info("Onboarding via chatmail relay(s): %s", ", ".join(relays))
 
         added = []

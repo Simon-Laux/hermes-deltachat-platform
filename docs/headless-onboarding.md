@@ -37,8 +37,14 @@ DELTACHAT_EMAIL=auto
 Delta Chat core supports several transports on one account, so `auto` registers
 on **three** relays for redundancy: `nine.testrun.org` as a stable anchor, plus
 two drawn at random from the live list at `chatmail.at/relays`. The anchor is
-always first so your primary address stays predictable across rebuilds; the
-random extras mean a single relay disappearing doesn't take the bot with it.
+registered first, so the account ends up with the same first address across
+rebuilds; the random extras mean a single relay disappearing doesn't take the
+bot with it.
+
+> Note: which of several transports Delta Chat treats as the account's primary
+> address (the one that appears in the invite link) has not been verified here.
+> If you need a specific address, pin a single relay with
+> `DELTACHAT_CHATMAIL_SERVERS` and check `invite.txt` after the first run.
 
 Registration is best-effort per relay — the first one that works is enough, and
 individual failures only warn. Onboarding fails only if *every* relay refuses.
@@ -79,6 +85,12 @@ the adapter surfaces it three ways on every connect:
    cat ~/.hermes/deltachat-platform/invite.txt
    ```
 3. **In memory** as `adapter._invite_link`, for a future `get_status()`.
+
+`invite.txt` is written `0600`, but the same link is also in `gateway.log`,
+which Hermes creates world-readable (`0644`). Treat the link as a capability to
+start an encrypted chat with the bot, not as a secret — anyone who can read the
+gateway log can use it. Access control over who may actually *talk* to the bot
+is a separate concern this adapter does not implement yet.
 
 Open it on your phone, or turn it into a QR code to scan from another device:
 
