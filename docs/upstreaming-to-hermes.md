@@ -154,6 +154,32 @@ to the out-of-tree build.
 
 ---
 
+## 4b. No way for a plugin to surface first-run state
+
+Adapters report health via `BasePlatformAdapter._write_runtime_status_safe()`
+→ `gateway.status.write_runtime_status()` → `gateway_state.json`, read by
+`web_server.py` (`/api/status`), `service_manager.py` and the readiness
+probes. Its signature is a closed set of keyword arguments — `gateway_state`,
+`platform`, `platform_state`, `error_code`, `error_message`,
+`needs_attention`, `retrying_since`, `served_profiles` — with **no free-form
+field**.
+
+That leaves a plugin no way to communicate first-run state that isn't an
+error. Our concrete case is the SecureJoin invite link: the gateway is
+perfectly healthy, but the operator needs a one-off value out of it to pair
+their phone. Today it goes to a file and the log names the path.
+
+Note also that `get_status()` — which the fork implements on the adapter — is
+**not a Hermes hook**. Checked at 0.20.5: `BasePlatformAdapter` has no such
+method, and nothing in `gateway/` or `hermes_cli/` calls
+`adapter.get_status()` (the only `.get_status()` hits are `proxy_cli.py`
+against an unrelated inference-proxy object). It is dead code unless the
+plugin calls it itself. Do not back-port it expecting the gateway to display
+anything.
+
+Worth proposing upstream: an optional `details: dict` passed through
+`write_runtime_status` and rendered in the dashboard's platform card.
+
 ## 5. Upstream fixes worth carrying in (or alongside) the PR
 
 Small, independently useful, and they make the PR read as a contribution

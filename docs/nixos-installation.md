@@ -26,6 +26,13 @@ hermes plugins enable deltachat-platform
 python3 ~/.hermes/plugins/deltachat-platform/setup.py
 ```
 
+Or skip this step entirely — put `DELTACHAT_EMAIL=auto` in `~/.hermes/.env` and
+the adapter registers a chatmail account on first connect, writing the invite
+link to the gateway log and to `invite.txt` in the accounts directory. That is
+the better fit for a declarative or headless NixOS deployment where there is no
+terminal to run the script in; see
+[headless-onboarding.md](headless-onboarding.md).
+
 ### 4. Start the gateway
 
 ```bash

@@ -18,16 +18,22 @@ works without it.
 
 ## 2. Create the Delta Chat account
 
+Interactively — auto-detects your Hermes profiles, fetches the current public
+relay list from `chatmail.at/relays` so you can pick one:
+
 ```bash
 python ~/.hermes/plugins/deltachat-platform/setup.py
 ```
 
-This is interactive: it auto-detects your Hermes profiles, fetches the current
-public relay list from `chatmail.at/relays` so you can pick one, and creates
-the account. You can also supply your own email credentials instead.
+Or without a terminal — add one line to `~/.hermes/.env` and the adapter
+registers the account itself on first connect:
 
-**Without this step the gateway will refuse to connect** — it logs
-`No Delta Chat accounts found` and exits.
+```bash
+echo "DELTACHAT_EMAIL=auto" >> ~/.hermes/.env
+```
+
+Either way is fine; do one of them. **Skip both and the gateway refuses to
+connect**, logging `No Delta Chat accounts found`.
 
 ## 3. Enable and start
 
@@ -38,14 +44,16 @@ hermes gateway start
 
 ## Pair your phone
 
-Setup prints an **invite link**. Scan or tap it in the Delta Chat app — do not
-just add the bot's email address. Delta Chat enforces end-to-end encryption,
-and the invite link carries the key fingerprint needed to establish the
-session; adding the address alone will not work.
+You need the **invite link** — `setup.py` prints it, and the headless path logs
+it and writes it to `invite.txt` in the accounts directory. Scan or tap it in
+the Delta Chat app; do not just add the bot's email address. Delta Chat
+enforces end-to-end encryption, and the invite link carries the key fingerprint
+needed to establish the session; adding the address alone will not work.
 
 ---
 
-Full docs: `README.md`, `docs/troubleshooting.md`, `docs/voice-calls.md`.
+Full docs: `README.md`, `docs/headless-onboarding.md`,
+`docs/troubleshooting.md`, `docs/voice-calls.md`.
 
 <!--
   MAINTAINER NOTE — this file has limited reach.
@@ -70,7 +78,4 @@ Full docs: `README.md`, `docs/troubleshooting.md`, `docs/voice-calls.md`.
   this note is invisible to users — it only costs a blank line in the panel,
   which is why it sits at the end of the file.
 
-  If the manual setup.py step is ever replaced by a headless fallback in
-  connect() (see docs/upstreaming-to-hermes.md), section 2 should become
-  "optional — only if you want to pick a relay yourself".
 -->
