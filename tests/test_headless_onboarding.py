@@ -2,7 +2,7 @@
 
 import os
 import pytest
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
 import adapter as adapter_mod
 from adapter import (
@@ -63,6 +63,45 @@ class TestSetupModuleLoading:
 
     def test_is_cached(self):
         assert adapter_mod._load_setup_module() is adapter_mod._load_setup_module()
+
+    def test_failed_exec_does_not_poison_the_cache(self):
+        """A half-built module must not be served to every later caller.
+
+        The module is registered in sys.modules *before* exec_module runs, so
+        a failing exec has to unregister it again.
+        """
+        import importlib.util as _iu
+        import sys as _sys
+
+        real_spec_from_file = _iu.spec_from_file_location
+
+        def _exploding_spec(name, path):
+            spec = real_spec_from_file(name, path)
+            spec.loader.exec_module = Mock(side_effect=RuntimeError("boom"))
+            return spec
+
+        _sys.modules.pop(adapter_mod._SETUP_MODULE_NAME, None)
+        try:
+            with patch.object(_iu, "spec_from_file_location", _exploding_spec):
+                with pytest.raises(RuntimeError, match="boom"):
+                    adapter_mod._load_setup_module()
+
+            assert adapter_mod._SETUP_MODULE_NAME not in _sys.modules
+            # A later call with a working loader still succeeds.
+            assert hasattr(adapter_mod._load_setup_module(), "get_relay_servers")
+        finally:
+            _sys.modules.pop(adapter_mod._SETUP_MODULE_NAME, None)
+
+    def test_missing_setup_file_raises_importerror(self, monkeypatch, tmp_path):
+        import sys as _sys
+
+        _sys.modules.pop(adapter_mod._SETUP_MODULE_NAME, None)
+        monkeypatch.setattr(adapter_mod, "_plugin_dir", str(tmp_path))
+        try:
+            with pytest.raises(ImportError):
+                adapter_mod._load_setup_module()
+        finally:
+            _sys.modules.pop(adapter_mod._SETUP_MODULE_NAME, None)
 
 
 class TestAutoRelays:
