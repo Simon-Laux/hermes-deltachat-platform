@@ -1014,6 +1014,25 @@ body {{
 
         return files, self._delete_spans(remaining, spans)
 
+    @staticmethod
+    def _base_filter_kwargs(base_fn, session_key: str) -> Dict[str, Any]:
+        """Pass session_key to a base filter only if this core accepts it.
+
+        Hermes grew ``session_key: str = ""`` on filter_media_delivery_paths /
+        filter_local_delivery_paths after 0.15.1 and calls the adapter
+        overrides with it as a keyword, so the overrides must accept it
+        unconditionally.  Forwarding it unconditionally is a different matter:
+        against an older base it raises the very TypeError we are fixing, only
+        pointed the other way.  Ask the installed base what it takes.
+        """
+        import inspect
+
+        try:
+            params = inspect.signature(base_fn).parameters
+        except (TypeError, ValueError):
+            return {}
+        return {"session_key": session_key} if "session_key" in params else {}
+
     def filter_media_delivery_paths(self, media_files, session_key: str = ""):
         """Remap /workspace/ container paths to host cache before validation."""
         from gateway.platforms.base import BasePlatformAdapter
@@ -1028,9 +1047,8 @@ body {{
                     continue
                 logger.warning("Could not resolve container path for delivery: %s", p)
             remapped.append((media_path, is_voice))
-        return BasePlatformAdapter.filter_media_delivery_paths(
-            remapped, session_key=session_key
-        )
+        base_fn = BasePlatformAdapter.filter_media_delivery_paths
+        return base_fn(remapped, **self._base_filter_kwargs(base_fn, session_key))
 
     def filter_local_delivery_paths(self, file_paths, session_key: str = ""):
         """Remap /workspace/ container paths to host cache before validation."""
@@ -1046,9 +1064,8 @@ body {{
                     continue
                 logger.warning("Could not resolve container path for delivery: %s", p)
             remapped.append(file_path)
-        return BasePlatformAdapter.filter_local_delivery_paths(
-            remapped, session_key=session_key
-        )
+        base_fn = BasePlatformAdapter.filter_local_delivery_paths
+        return base_fn(remapped, **self._base_filter_kwargs(base_fn, session_key))
 
     async def _event_listener(self) -> None:
         """Listen for Delta Chat events and forward to Hermes."""

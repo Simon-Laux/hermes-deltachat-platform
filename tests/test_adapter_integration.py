@@ -538,3 +538,38 @@ class TestFilterDeliveryPathsSessionKey:
         )
 
         assert result == ["/home/user/report.pdf"]
+
+    def test_session_key_not_forwarded_to_a_base_without_it(
+        self, platform_config, monkeypatch
+    ):
+        """Hermes 0.15.1's base staticmethods take one positional argument.
+
+        Forwarding session_key to those raises the same TypeError this class
+        exists to prevent, so the override must forward it only when the
+        installed base declares it.
+        """
+        from gateway.platforms.base import BasePlatformAdapter
+
+        def legacy_media(media_files):
+            return list(media_files or [])
+
+        def legacy_local(file_paths):
+            return list(file_paths or [])
+
+        monkeypatch.setattr(
+            BasePlatformAdapter, "filter_media_delivery_paths",
+            staticmethod(legacy_media),
+        )
+        monkeypatch.setattr(
+            BasePlatformAdapter, "filter_local_delivery_paths",
+            staticmethod(legacy_local),
+        )
+
+        adapter = DeltaChatAdapter(platform_config)
+
+        assert adapter.filter_media_delivery_paths(
+            [("/home/user/app.xdc", False)], session_key="agent:main:deltachat:dm:12"
+        ) == [("/home/user/app.xdc", False)]
+        assert adapter.filter_local_delivery_paths(
+            ["/home/user/report.pdf"], session_key="agent:main:deltachat:dm:12"
+        ) == ["/home/user/report.pdf"]
