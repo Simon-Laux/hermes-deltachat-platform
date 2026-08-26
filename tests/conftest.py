@@ -3,6 +3,7 @@
 Provides mocks for Hermes gateway module that match the real API.
 """
 
+import asyncio
 import sys
 import os
 from unittest.mock import MagicMock, Mock, AsyncMock
@@ -107,13 +108,67 @@ class MockBasePlatformAdapter:
         self.platform = platform
         self._connected = False
         self._disconnected = False
+        # Mirrors the real base: _running *is* is_connected, and the fatal-error
+        # trio is what an adapter uses to hand a dead transport back to the
+        # gateway's reconnect watcher.
+        self._running = False
+        self._fatal_error_code = None
+        self._fatal_error_message = None
+        self._fatal_error_retryable = True
+        self._fatal_error_handler = None
+
+    @property
+    def is_connected(self) -> bool:
+        return self._running
+
+    @property
+    def has_fatal_error(self) -> bool:
+        return self._fatal_error_message is not None
+
+    @property
+    def fatal_error_code(self):
+        return self._fatal_error_code
+
+    @property
+    def fatal_error_message(self):
+        return self._fatal_error_message
+
+    @property
+    def fatal_error_retryable(self) -> bool:
+        return self._fatal_error_retryable
+
+    def set_fatal_error_handler(self, handler) -> None:
+        self._fatal_error_handler = handler
+
+    def _set_fatal_error(self, code: str, message: str, *, retryable: bool) -> None:
+        self._running = False
+        self._fatal_error_code = code
+        self._fatal_error_message = message
+        self._fatal_error_retryable = retryable
+
+    async def _notify_fatal_error(self) -> None:
+        handler = self._fatal_error_handler
+        if not handler:
+            return
+        result = handler(self)
+        if asyncio.iscoroutine(result):
+            await result
 
     def _mark_connected(self) -> None:
         """Mark adapter as connected."""
         self._connected = True
+        self._running = True
+        self._fatal_error_code = None
+        self._fatal_error_message = None
+        self._fatal_error_retryable = True
 
     def _mark_disconnected(self) -> None:
         """Mark adapter as disconnected."""
+        self._running = False
+        # The real base refuses to downgrade a recorded fatal error to a plain
+        # "disconnected" status.
+        if self.has_fatal_error:
+            return
         self._disconnected = True
 
     def build_source(
