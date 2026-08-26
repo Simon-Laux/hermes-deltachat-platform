@@ -196,7 +196,8 @@ async def _check_dc_version(rpc) -> bool:
         rpc: DeltaChat2 RPC client
 
     Returns:
-        True if version is compatible, False if too old
+        True if version is compatible, False if it is too old or could not be
+        determined at all. Fail-closed on both counts.
     """
     try:
         # Get system info which includes version
