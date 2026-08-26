@@ -68,6 +68,37 @@ def _parse_relay_list(raw: str) -> List[str]:
     return hosts
 
 
+_SETUP_MODULE_NAME = "deltachat_platform_setup"
+
+
+def _load_setup_module():
+    """Import this plugin's setup.py by explicit path, under a unique name.
+
+    A bare `import setup` would resolve against whatever is first on sys.path
+    — and `setup` is about the most collision-prone module name in Python
+    (every setuptools project root has one). Loading by path removes the
+    ambiguity instead of relying on sys.path ordering.
+    """
+    if _SETUP_MODULE_NAME in sys.modules:
+        return sys.modules[_SETUP_MODULE_NAME]
+
+    import importlib.util
+
+    path = os.path.join(_plugin_dir, "setup.py")
+    spec = importlib.util.spec_from_file_location(_SETUP_MODULE_NAME, path)
+    module = importlib.util.module_from_spec(spec)
+    # Registered before exec_module so a partially-initialised module can't be
+    # loaded twice concurrently.
+    sys.modules[_SETUP_MODULE_NAME] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _get_relay_servers() -> List[str]:
+    """Fetch the live chatmail relay list (blocking HTTP; keep off the loop)."""
+    return _load_setup_module().get_relay_servers()
+
+
 def _auto_relays(count: int = AUTO_RELAY_COUNT) -> List[str]:
     """Pick relays for `DELTACHAT_EMAIL=auto`: the anchor plus random others.
 
@@ -76,9 +107,7 @@ def _auto_relays(count: int = AUTO_RELAY_COUNT) -> List[str]:
     the anchor alone when the relay list can't be fetched.
     """
     try:
-        from setup import get_relay_servers
-
-        available = get_relay_servers()
+        available = _get_relay_servers()
     except Exception as e:
         logger.warning("Could not fetch chatmail relay list (%s)", e)
         available = []
@@ -443,8 +472,14 @@ class DeltaChatAdapter(BasePlatformAdapter):
         Delta Chat needs this link for the initial key exchange — adding the
         bot's address by hand does not establish an encrypted session. setup.py
         prints it to a terminal, but with headless onboarding nobody is
-        watching one, so surface it where a systemd/Docker operator will
-        actually find it: the gateway log and a file in the accounts dir.
+        watching one, so it goes to a 0600 file in the accounts dir and the
+        gateway log points at that file.
+
+        The link is deliberately *not* logged at INFO. Under the `pairing` DM
+        policy, completing SecureJoin is what makes a contact verified — so
+        whoever holds this link can reach the agent. gateway.log is created
+        world-readable (0644), so the link only appears there at DEBUG, or as
+        a last resort when the file cannot be written.
         """
         try:
             link = await self.rpc.get_chat_securejoin_qr_code(self.account_id, None)
@@ -456,16 +491,28 @@ class DeltaChatAdapter(BasePlatformAdapter):
             return
 
         self._invite_link = link
-        logger.info("Delta Chat invite link: %s", link)
+        logger.debug("Delta Chat invite link: %s", link)
 
+        path = os.path.join(self._get_dc_config_dir(), "invite.txt")
         try:
-            path = os.path.join(self._get_dc_config_dir(), "invite.txt")
-            with open(path, "w", encoding="utf-8") as f:
+            # os.open with an explicit mode instead of open()+chmod: no window
+            # where the link sits in a umask-default (usually 0644) file.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
                 f.write(link + "\n")
+            # O_CREAT's mode is ignored when the file already exists.
             os.chmod(path, 0o600)
-            logger.info("Invite link also written to %s", path)
         except OSError as e:
-            logger.warning("Could not write invite link to file: %s", e)
+            # Nothing to point at, so the link itself is the only way to pair.
+            logger.warning(
+                "Could not write invite link to %s (%s). Invite link: %s",
+                path,
+                e,
+                link,
+            )
+            return
+
+        logger.info("Delta Chat invite link written to %s", path)
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Connect to Delta Chat via RPC server.

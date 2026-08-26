@@ -73,26 +73,42 @@ end-to-end encryption, and the initial key exchange needs a SecureJoin invite
 link — adding the bot's email address by hand does not work.
 
 `setup.py` prints that link to your terminal. Headless there is no terminal, so
-the adapter surfaces it three ways on every connect:
+the adapter writes it to **`invite.txt`** in the Delta Chat accounts directory
+(`<HERMES_HOME>/deltachat-platform/`), mode `0600`, and logs the *path* to it:
 
-1. **The gateway log**, at INFO — `journalctl -u hermes` or `docker logs`:
-   ```
-   Delta Chat invite link: OPENPGP4FPR:...#a=bot@nine.testrun.org&...
-   ```
-2. **A file**, `invite.txt` in the Delta Chat accounts directory
-   (`<HERMES_HOME>/deltachat-platform/`), mode `0600`:
-   ```bash
-   cat ~/.hermes/deltachat-platform/invite.txt
-   ```
-3. **In memory** as `adapter._invite_link`, for a future `get_status()`.
+```bash
+cat ~/.hermes/deltachat-platform/invite.txt
+```
 
-`invite.txt` is written `0600`, but the same link is also in `gateway.log`,
-which Hermes creates world-readable (`0644`). Treat the link as a capability to
-start an encrypted chat with the bot, not as a secret — anyone who can read the
-gateway log can use it. Access control over who may actually *talk* to the bot
-is a separate concern this adapter does not implement yet.
+```
+Delta Chat invite link written to /home/you/.hermes/deltachat-platform/invite.txt
+```
 
-Open it on your phone, or turn it into a QR code to scan from another device:
+### Why the link isn't in the log
+
+Treat the invite link as a credential, not just an address.
+
+Under the `pairing` DM policy — the sensible default for a bot — completing
+SecureJoin is *what makes a contact verified*. So anyone holding this link can
+pair with the agent and talk to it. Hermes creates `gateway.log` world-readable
+(`0644`), and logs get shipped to aggregators, pasted into issues and captured
+in support bundles, so the link stays out of it at INFO level.
+
+It is still available when you need it:
+
+- `--log-level DEBUG` logs the full link.
+- If `invite.txt` can't be written, the link is logged at WARNING instead —
+  with no file to point at, that's the only way to pair.
+- In memory as `adapter._invite_link`, for a future `get_status()`.
+
+This is defence in depth, not a guarantee: anyone who can read the accounts
+directory can read the file, and re-running `setup.py` prints the link again.
+It also does **not** substitute for access control over who may talk to the
+bot — `DELTACHAT_ALLOWED_USERS`-style policy is a separate concern this adapter
+does not implement yet. With an allowlist in place, a leaked link is only good
+for pairing; without one, on `pairing` policy, it is effectively agent access.
+
+To pair from another device, turn it into a QR code:
 
 ```bash
 qrencode -t ANSIUTF8 < ~/.hermes/deltachat-platform/invite.txt
@@ -109,6 +125,23 @@ by subprocesses.
 It is **not** cleared when configuration fails, so that a reconnect can retry.
 It is also not removed from `~/.hermes/.env`; this only shortens its lifetime in
 memory.
+
+## Changing the settings later
+
+**The onboarding variables are read only when there is no configured account.**
+Once an account exists and has a working transport, editing `DELTACHAT_EMAIL`
+or `DELTACHAT_CHATMAIL_SERVERS` does nothing — the adapter uses the existing
+account and never compares it against the env.
+
+This is deliberate: the account carries a cryptographic identity your contacts
+have verified, so a changed env var must not silently swap it for a new one.
+It does mean a typo you fix later has no effect on an already-onboarded bot.
+
+To actually move to a different address, either add a transport yourself
+through a Delta Chat client, or delete the accounts directory
+(`<HERMES_HOME>/deltachat-platform/`) and re-onboard from scratch — which gives
+you a new identity and a new invite link, and every existing contact will have
+to pair again.
 
 ## Failure behaviour
 

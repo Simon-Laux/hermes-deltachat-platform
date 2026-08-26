@@ -50,32 +50,46 @@ class TestParseRelayList:
         assert _parse_relay_list("") == []
 
 
+def _relays(*hosts):
+    return patch.object(adapter_mod, "_get_relay_servers", return_value=list(hosts))
+
+
+class TestSetupModuleLoading:
+    def test_loads_our_setup_not_whatever_is_on_syspath(self):
+        """`setup` is a collision-prone name; we load ours by explicit path."""
+        module = adapter_mod._load_setup_module()
+        assert module.__file__ == os.path.join(adapter_mod._plugin_dir, "setup.py")
+        assert hasattr(module, "get_relay_servers")
+
+    def test_is_cached(self):
+        assert adapter_mod._load_setup_module() is adapter_mod._load_setup_module()
+
+
 class TestAutoRelays:
     def test_anchor_first_then_random_others(self):
-        with patch(
-            "setup.get_relay_servers",
-            return_value=[ANCHOR_RELAY, "b.org", "c.org", "d.org"],
-        ):
+        with _relays(ANCHOR_RELAY, "b.org", "c.org", "d.org"):
             relays = _auto_relays(count=3)
         assert relays[0] == ANCHOR_RELAY
         assert len(relays) == 3
         assert set(relays[1:]) <= {"b.org", "c.org", "d.org"}
 
     def test_no_duplicate_anchor(self):
-        with patch("setup.get_relay_servers", return_value=[ANCHOR_RELAY, "b.org"]):
+        with _relays(ANCHOR_RELAY, "b.org"):
             relays = _auto_relays(count=3)
         assert relays.count(ANCHOR_RELAY) == 1
 
     def test_short_list_is_not_padded(self):
-        with patch("setup.get_relay_servers", return_value=[ANCHOR_RELAY]):
+        with _relays(ANCHOR_RELAY):
             assert _auto_relays(count=3) == [ANCHOR_RELAY]
 
     def test_scrape_failure_falls_back_to_anchor(self):
-        with patch("setup.get_relay_servers", side_effect=OSError("no network")):
+        with patch.object(
+            adapter_mod, "_get_relay_servers", side_effect=OSError("no network")
+        ):
             assert _auto_relays(count=3) == [ANCHOR_RELAY]
 
     def test_count_of_one_is_anchor_only(self):
-        with patch("setup.get_relay_servers", return_value=[ANCHOR_RELAY, "b.org"]):
+        with _relays(ANCHOR_RELAY, "b.org"):
             assert _auto_relays(count=1) == [ANCHOR_RELAY]
 
 
@@ -178,22 +192,51 @@ class TestChatmailTransports:
         )
 
 
+LINK = "OPENPGP4FPR:ABC#a=bot@x.org"
+
+
 class TestInviteLink:
     @pytest.mark.asyncio
-    async def test_logs_and_writes_link(self, adapter, tmp_path, caplog):
+    async def test_writes_0600_file_and_logs_only_its_path(
+        self, adapter, tmp_path, caplog
+    ):
         adapter._dc_config_dir = str(tmp_path)
-        adapter.rpc.get_chat_securejoin_qr_code = AsyncMock(
-            return_value="OPENPGP4FPR:ABC#a=bot@x.org"
-        )
+        adapter.rpc.get_chat_securejoin_qr_code = AsyncMock(return_value=LINK)
 
         with caplog.at_level("INFO"):
             await adapter._publish_invite_link()
 
         invite = tmp_path / "invite.txt"
-        assert invite.read_text().strip() == "OPENPGP4FPR:ABC#a=bot@x.org"
+        assert invite.read_text().strip() == LINK
         assert invite.stat().st_mode & 0o777 == 0o600
-        assert adapter._invite_link == "OPENPGP4FPR:ABC#a=bot@x.org"
-        assert "OPENPGP4FPR:ABC" in caplog.text
+        assert adapter._invite_link == LINK
+        # gateway.log is world-readable; the link must not land there at INFO.
+        assert LINK not in caplog.text
+        assert str(invite) in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_link_is_available_at_debug(self, adapter, tmp_path, caplog):
+        adapter._dc_config_dir = str(tmp_path)
+        adapter.rpc.get_chat_securejoin_qr_code = AsyncMock(return_value=LINK)
+
+        with caplog.at_level("DEBUG"):
+            await adapter._publish_invite_link()
+
+        assert LINK in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_tightens_mode_on_a_preexisting_file(self, adapter, tmp_path):
+        """O_CREAT's mode is ignored when the file already exists."""
+        adapter._dc_config_dir = str(tmp_path)
+        stale = tmp_path / "invite.txt"
+        stale.write_text("old\n")
+        stale.chmod(0o644)
+        adapter.rpc.get_chat_securejoin_qr_code = AsyncMock(return_value=LINK)
+
+        await adapter._publish_invite_link()
+
+        assert stale.read_text().strip() == LINK
+        assert stale.stat().st_mode & 0o777 == 0o600
 
     @pytest.mark.asyncio
     async def test_rpc_failure_is_not_fatal(self, adapter, tmp_path):
@@ -206,11 +249,15 @@ class TestInviteLink:
         assert not (tmp_path / "invite.txt").exists()
 
     @pytest.mark.asyncio
-    async def test_unwritable_dir_is_not_fatal(self, adapter, tmp_path):
+    async def test_unwritable_dir_falls_back_to_logging_the_link(
+        self, adapter, tmp_path, caplog
+    ):
         adapter._dc_config_dir = str(tmp_path / "does-not-exist")
-        adapter.rpc.get_chat_securejoin_qr_code = AsyncMock(return_value="LINK")
+        adapter.rpc.get_chat_securejoin_qr_code = AsyncMock(return_value=LINK)
 
-        await adapter._publish_invite_link()
+        with caplog.at_level("WARNING"):
+            await adapter._publish_invite_link()
 
-        # Link still cached in memory even though persisting it failed.
-        assert adapter._invite_link == "LINK"
+        # No file to point at, so the link itself is the only way to pair.
+        assert LINK in caplog.text
+        assert adapter._invite_link == LINK
