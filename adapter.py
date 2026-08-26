@@ -7,11 +7,12 @@ import functools
 import html
 import json
 import os
+import random
 import secrets
 import sys
 import asyncio
 import logging
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 
 # Add vendor directory to sys.path so vendored deltachat2 can be imported
 _plugin_dir = os.path.dirname(os.path.abspath(__file__))
@@ -41,6 +42,114 @@ if os.getenv("DELTACHAT_DEBUG"):
 # Minimum required Delta Chat core version
 # Plugin will NOT connect with older versions
 MIN_DC_VERSION = "2.51.0"
+
+# ---------------------------------------------------------------------------
+# Headless onboarding
+# ---------------------------------------------------------------------------
+# Creating an account is a side effect with a cost outside this machine: it
+# registers on somebody else's chatmail relay. So it is strictly opt-in — with
+# no onboarding env var set we keep the old behaviour of refusing to start and
+# pointing at setup.py. An accounts dir can look empty for boring reasons (wrong
+# HERMES_HOME, unmounted volume), and silently replacing an identity that
+# contacts have already verified is worse than refusing to boot.
+
+# Registered first in auto mode so the account gets the same first address
+# across rebuilds; the extra relays are drawn at random purely for redundancy.
+# Which transport DC then treats as the account's *primary* address is not
+# verified here — see docs/headless-onboarding.md.
+ANCHOR_RELAY = "nine.testrun.org"
+AUTO_RELAY_COUNT = 3
+
+
+def _parse_relay_list(raw: str) -> List[str]:
+    """Split a comma-separated relay list into bare hostnames."""
+    hosts = []
+    for chunk in raw.split(","):
+        host = chunk.strip().replace("https://", "").strip("/")
+        if host and host not in hosts:
+            hosts.append(host)
+    return hosts
+
+
+_SETUP_MODULE_NAME = "deltachat_platform_setup"
+
+
+def _load_setup_module():
+    """Import this plugin's setup.py by explicit path, under a unique name.
+
+    A bare `import setup` would resolve against whatever is first on sys.path
+    — and `setup` is about the most collision-prone module name in Python
+    (every setuptools project root has one). Loading by path removes the
+    ambiguity instead of relying on sys.path ordering.
+    """
+    if _SETUP_MODULE_NAME in sys.modules:
+        return sys.modules[_SETUP_MODULE_NAME]
+
+    import importlib.util
+
+    path = os.path.join(_plugin_dir, "setup.py")
+    # spec_from_file_location happily builds a spec for a path that does not
+    # exist; the failure only surfaces as FileNotFoundError inside
+    # exec_module. Check up front so callers get a coherent ImportError.
+    if not os.path.isfile(path):
+        raise ImportError(f"Plugin setup module not found at {path}")
+
+    spec = importlib.util.spec_from_file_location(_SETUP_MODULE_NAME, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load plugin setup module from {path}")
+
+    module = importlib.util.module_from_spec(spec)
+    # Registered before exec_module so a partially-initialised module can't be
+    # loaded twice concurrently — but pulled back out if exec fails, or the
+    # cache would serve that half-built module to every later caller.
+    sys.modules[_SETUP_MODULE_NAME] = module
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(_SETUP_MODULE_NAME, None)
+        raise
+    return module
+
+
+def _get_relay_servers() -> List[str]:
+    """Fetch the live chatmail relay list (blocking HTTP; keep off the loop)."""
+    return _load_setup_module().get_relay_servers()
+
+
+def _auto_relays(count: int = AUTO_RELAY_COUNT) -> List[str]:
+    """Pick relays for `DELTACHAT_EMAIL=auto`: the anchor plus random others.
+
+    Delta Chat core supports several transports on one account, so registering
+    on more than one relay buys redundancy if a relay goes away. Falls back to
+    the anchor alone when the relay list can't be fetched.
+    """
+    try:
+        available = _get_relay_servers()
+    except Exception as e:
+        logger.warning("Could not fetch chatmail relay list (%s)", e)
+        available = []
+
+    others = [h for h in available if h != ANCHOR_RELAY]
+    random.shuffle(others)
+    return [ANCHOR_RELAY] + others[: max(0, count - 1)]
+
+
+def _headless_onboarding() -> Optional[Dict[str, Any]]:
+    """Return onboarding parameters, or None when not opted in.
+
+    - DELTACHAT_EMAIL=<address>  -> configure that mailbox (needs a password)
+    - DELTACHAT_EMAIL=auto       -> mint a chatmail account
+    - DELTACHAT_CHATMAIL_SERVERS -> mint a chatmail account on those relays
+    """
+    email = (os.getenv("DELTACHAT_EMAIL") or "").strip()
+    servers = (os.getenv("DELTACHAT_CHATMAIL_SERVERS") or "").strip()
+
+    if not email and not servers:
+        return None
+    if email and email.lower() != "auto":
+        return {"mode": "email", "email": email}
+    return {"mode": "chatmail", "relays": _parse_relay_list(servers)}
+
 
 # Lazy import to avoid dependency issues if deltachat2 not installed
 _DC2_AVAILABLE = None
@@ -87,7 +196,8 @@ async def _check_dc_version(rpc) -> bool:
         rpc: DeltaChat2 RPC client
 
     Returns:
-        True if version is compatible, False if too old
+        True if version is compatible, False if it is too old or could not be
+        determined at all. Fail-closed on both counts.
     """
     try:
         # Get system info which includes version
@@ -113,9 +223,13 @@ async def _check_dc_version(rpc) -> bool:
         return True
 
     except Exception as e:
-        logger.warning(f"Could not check Delta Chat version: {e}")
-        # Don't block connection for version check failures
-        return True
+        # Refuse rather than fall through. A malformed or missing version
+        # string is already handled — _parse_version returns (0, 0, 0), which
+        # compares as too old above. Reaching here means get_system_info()
+        # itself raised, i.e. the RPC transport is broken, and every call after
+        # this one would fail too. One clear error beats the cascade.
+        logger.error(f"Could not check Delta Chat version: {e}")
+        return False
 
 
 class _AsyncRpc:
@@ -260,6 +374,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._running = False
         self._dc_config_dir: Optional[str] = None
         self._call_manager = None
+        self._invite_link: Optional[str] = None
 
 
 
@@ -294,6 +409,132 @@ class DeltaChatAdapter(BasePlatformAdapter):
 
         # Default - assume in PATH
         return "deltachat-rpc-server"
+
+    @staticmethod
+    def _forget_password() -> None:
+        """Drop DELTACHAT_PASSWORD from the process environment.
+
+        Delta Chat core has persisted its own copy of the credentials by the
+        time a transport is configured, so nothing downstream needs the plain
+        value — but os.environ is readable by anything running in this process
+        (including agent tooling) and is inherited by subprocesses.
+
+        Only called after a *successful* configure: on failure the value has to
+        survive so that a later reconnect can retry.
+        """
+        if os.environ.pop("DELTACHAT_PASSWORD", None) is not None:
+            logger.debug("Cleared DELTACHAT_PASSWORD from the process environment")
+
+    async def _configure_transports(self, onboarding: Dict[str, Any]) -> bool:
+        """Attach a transport to the account from env-var config."""
+        if onboarding["mode"] == "email":
+            return await self._configure_email_transport(onboarding["email"])
+        return await self._configure_chatmail_transports(onboarding["relays"])
+
+    async def _configure_email_transport(self, email: str) -> bool:
+        """Configure an existing mailbox as the account transport."""
+        password = os.getenv("DELTACHAT_PASSWORD") or ""
+        if not password:
+            logger.error(
+                "DELTACHAT_EMAIL is set to %s but DELTACHAT_PASSWORD is empty. "
+                "Use DELTACHAT_EMAIL=auto for a chatmail account instead.",
+                email,
+            )
+            return False
+
+        try:
+            # add_or_update_transport configures and blocks until finished;
+            # the separate configure() call is deprecated as of DC 2025-02.
+            await self.rpc.add_or_update_transport(
+                self.account_id, {"addr": email, "password": password}
+            )
+        except Exception as e:
+            logger.error("Could not configure transport for %s: %s", email, e)
+            return False
+
+        self._forget_password()
+        logger.info("Configured Delta Chat transport for %s", email)
+        return True
+
+    async def _configure_chatmail_transports(self, relays: List[str]) -> bool:
+        """Register on one or more chatmail relays.
+
+        Multiple relays are redundancy, not a requirement — one working
+        transport is enough to succeed, so individual failures only warn.
+        """
+        if not relays:
+            # _auto_relays() scrapes chatmail.at over blocking urllib with a
+            # 10s timeout — same reason _AsyncRpc exists, keep it off the loop.
+            loop = asyncio.get_running_loop()
+            relays = await loop.run_in_executor(None, _auto_relays)
+        logger.info("Onboarding via chatmail relay(s): %s", ", ".join(relays))
+
+        added = []
+        for host in relays:
+            try:
+                await self.rpc.add_transport_from_qr(
+                    self.account_id, f"dcaccount:{host}"
+                )
+                added.append(host)
+                logger.info("Registered chatmail transport on %s", host)
+            except Exception as e:
+                logger.warning("Chatmail relay %s failed: %s", host, e)
+
+        if not added:
+            logger.error(
+                "No chatmail relay accepted a registration (tried: %s)",
+                ", ".join(relays),
+            )
+            return False
+        return True
+
+    async def _publish_invite_link(self) -> None:
+        """Log and persist the SecureJoin invite link.
+
+        Delta Chat needs this link for the initial key exchange — adding the
+        bot's address by hand does not establish an encrypted session. setup.py
+        prints it to a terminal, but with headless onboarding nobody is
+        watching one, so it goes to a 0600 file in the accounts dir and the
+        gateway log points at that file.
+
+        The link is deliberately *not* logged at INFO. Under the `pairing` DM
+        policy, completing SecureJoin is what makes a contact verified — so
+        whoever holds this link can reach the agent. gateway.log is created
+        world-readable (0644), so the link only appears there at DEBUG, or as
+        a last resort when the file cannot be written.
+        """
+        try:
+            link = await self.rpc.get_chat_securejoin_qr_code(self.account_id, None)
+        except Exception as e:
+            logger.warning("Could not generate SecureJoin invite link: %s", e)
+            return
+
+        if not link:
+            return
+
+        self._invite_link = link
+        logger.debug("Delta Chat invite link: %s", link)
+
+        path = os.path.join(self._get_dc_config_dir(), "invite.txt")
+        try:
+            # os.open with an explicit mode instead of open()+chmod: no window
+            # where the link sits in a umask-default (usually 0644) file.
+            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                f.write(link + "\n")
+            # O_CREAT's mode is ignored when the file already exists.
+            os.chmod(path, 0o600)
+        except OSError as e:
+            # Nothing to point at, so the link itself is the only way to pair.
+            logger.warning(
+                "Could not write invite link to %s (%s). Invite link: %s",
+                path,
+                e,
+                link,
+            )
+            return
+
+        logger.info("Delta Chat invite link written to %s", path)
 
     async def connect(self, *, is_reconnect: bool = False) -> bool:
         """Connect to Delta Chat via RPC server.
@@ -345,16 +586,39 @@ class DeltaChatAdapter(BasePlatformAdapter):
 
             # Get or create account - use first available
             accounts = await self.rpc.get_all_accounts()
+            onboarding = _headless_onboarding()
             if accounts:
                 self.account_id = accounts[0]["id"]
                 logger.info(f"Using Delta Chat account: {self.account_id}")
+            elif onboarding:
+                self.account_id = await self.rpc.add_account()
+                logger.info(f"Created Delta Chat account: {self.account_id}")
             else:
                 logger.error(
                     f"No Delta Chat accounts found in {dc_accounts_path}. "
-                    "Run: python ~/.hermes/plugins/deltachat-platform/setup.py"
+                    "Run: python ~/.hermes/plugins/deltachat-platform/setup.py "
+                    "— or set DELTACHAT_EMAIL to onboard without a terminal "
+                    "(see docs/headless-onboarding.md)"
                 )
                 self._cleanup()
                 return False
+
+            # add_account() persists an account row before any transport is
+            # attached, so a bootstrap that fails half way leaves an unusable
+            # account behind that get_all_accounts() hands back on the next
+            # boot. Gate on is_configured(), never on account existence.
+            if not await self.rpc.is_configured(self.account_id):
+                if not onboarding:
+                    logger.error(
+                        f"Delta Chat account {self.account_id} has no working "
+                        "transport. Run setup.py, or set DELTACHAT_EMAIL to "
+                        "configure one without a terminal."
+                    )
+                    self._cleanup()
+                    return False
+                if not await self._configure_transports(onboarding):
+                    self._cleanup()
+                    return False
 
             # Enable bot mode: auto-accept contact requests
             try:
@@ -366,6 +630,9 @@ class DeltaChatAdapter(BasePlatformAdapter):
             # Start IO for the account to receive events
             await self.rpc.start_io(self.account_id)
             logger.debug(f"Started IO for account {self.account_id}")
+
+            # Needs IO running to produce a usable link.
+            await self._publish_invite_link()
 
             # Start event listener
             self._running = True
@@ -408,6 +675,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
             self._transport = None
         self.rpc = None
         self.account_id = None
+        self._invite_link = None
 
     async def disconnect(self) -> None:
         """Disconnect from Delta Chat."""
@@ -835,7 +1103,8 @@ body {{
     def _container_workspace_to_host(container_path: str) -> Optional[str]:
         """Map a /workspace/<rel> container path to its host-side sandbox path.
 
-        Returns None when the path is not under /workspace/.
+        Returns None when the path is not under /workspace/, or when the
+        resolved target escapes the sandbox workspace root (path traversal).
         """
         from pathlib import Path
 
@@ -849,7 +1118,12 @@ body {{
         except ImportError:
             from gateway.config import get_hermes_home
             sandbox_workspace = Path(get_hermes_home()) / "sandboxes" / "docker" / "default" / "workspace"
-        return str(sandbox_workspace / rel)
+        root = sandbox_workspace.resolve()
+        candidate = (root / rel).resolve()
+        if not candidate.is_relative_to(root):
+            logger.warning("Rejected container path escaping workspace: %s", p)
+            return None
+        return str(candidate)
 
     def _copy_container_file_to_cache(self, container_path: str) -> Optional[str]:
         """Copy a /workspace/ container file to the Hermes docs cache.
@@ -877,6 +1151,71 @@ body {{
         logger.info("Copied container output %s → %s", host_path.name, dest)
         return str(dest)
 
+    @staticmethod
+    def _mask_for_scan(text: str) -> str:
+        """Blank out code blocks / quotes / JSON strings before scanning.
+
+        The base extractors mask these spans so that a path merely *shown* in
+        a code sample is never delivered as an attachment; our .xdc extractors
+        have to do the same or the skill's own `/workspace/myapp.xdc` examples
+        get cut out of the reply and mailed to the user.  Masking is
+        offset-preserving (chars → spaces), so match spans stay valid against
+        the unmasked text.
+
+        The base helpers are private, so a future core may drop or rename
+        them; falling back to the verbatim text only costs false positives.
+        """
+        from gateway.platforms.base import BasePlatformAdapter
+
+        for name in ("_mask_protected_spans", "_mask_json_string_media"):
+            masker = getattr(BasePlatformAdapter, name, None)
+            if masker:
+                text = masker(text)
+        return text
+
+    @classmethod
+    def _find_xdc_paths(cls, pattern, text: str):
+        """Return [(path, span)] for `pattern` matches outside protected spans.
+
+        Group 1 is the path, group 0 the span to delete from the text.
+        """
+        masked = cls._mask_for_scan(text)
+        return [
+            (text[m.start(1):m.end(1)].strip(), m.span())
+            for m in pattern.finditer(masked)
+        ]
+
+    @staticmethod
+    def _delete_spans(text: str, spans) -> str:
+        """Delete `spans` from `text`, back to front so offsets stay valid.
+
+        str.replace() would also strip an identical path elsewhere in the
+        message — including inside the code block we just took care to mask.
+        """
+        chars = list(text)
+        for start, end in sorted(spans, reverse=True):
+            del chars[start:end]
+        return "".join(chars).strip()
+
+    @staticmethod
+    def _xdc_path_is_deliverable(path: str) -> bool:
+        """True for a bare .xdc path worth handing to the delivery pipeline.
+
+        /workspace/ paths are container-side and never exist on the host, so
+        they are taken on faith and resolved by filter_local_delivery_paths
+        later.  Everything else must actually exist — the base extractor
+        applies the same os.path.isfile() guard, and without it a path merely
+        mentioned in prose is cut from the reply text and pushed at the user
+        as an attachment.
+        """
+        if path.startswith("/workspace/"):
+            return True
+        try:
+            return os.path.isfile(os.path.expanduser(path))
+        except (OSError, RuntimeError, ValueError):
+            # expanduser raises ValueError("embedded null byte") for ~\x00.
+            return False
+
     def extract_media(self, content: str):
         """Extend base extract_media to also handle .xdc MEDIA tags.
 
@@ -884,46 +1223,85 @@ body {{
         misses it.  We catch those tags here so they flow through the normal
         filter_media_delivery_paths → send_document pipeline, exactly like
         Telegram handles any other document type.
+
+        An explicit MEDIA: tag is an instruction, not a mention, so unlike
+        extract_local_files below there is no isfile() guard — a typo'd path
+        should surface as "skipped unsafe path" in the log rather than be
+        silently left in the text as if it were prose.
         """
         import re
         from gateway.platforms.base import BasePlatformAdapter
 
         media_files, remaining = BasePlatformAdapter.extract_media(content)
 
+        # Scan the base's cleaned text rather than `content`: it never removes
+        # .xdc tags (wrong extension set), so nothing is missed, and the spans
+        # stay valid for the deletion below.
         xdc_re = re.compile(
             r'[`"\']?MEDIA:\s*[`"\']?((?:~/|/)[\w./\- ]+\.xdc)[`"\']?',
             re.IGNORECASE,
         )
-        for match in xdc_re.finditer(content):
-            path = match.group(1).strip()
+        spans = []
+        for path, span in self._find_xdc_paths(xdc_re, remaining):
             if not any(p == path for p, _ in media_files):
                 media_files.append((path, False))
-            remaining = remaining.replace(match.group(0), "").strip()
+            spans.append(span)
 
-        return media_files, remaining
+        return media_files, self._delete_spans(remaining, spans)
 
     def extract_local_files(self, content: str):
-        """Extend base to also pick up bare /workspace/*.xdc paths.
+        """Extend base to also pick up bare .xdc paths.
 
-        The base staticmethod checks os.path.isfile() on the host — container
-        paths like /workspace/app.xdc don't exist there, so we add them
-        explicitly.  filter_local_delivery_paths then does the host mapping.
+        .xdc is not in Hermes's MEDIA_DELIVERY_EXTS, so the base staticmethod
+        never picks up bare .xdc paths.  We add them explicitly here for both
+        deployment shapes:
+          * Docker sandbox container paths like /workspace/app.xdc, which don't
+            exist on the host — filter_local_delivery_paths then maps them to
+            the host sandbox before validation.
+          * Agent-workspace paths on non-Docker deployments (absolute /... or
+            home ~/... paths already visible on the host) — these flow
+            untouched to the base validator, which enforces the denylist.
+
+        A bare path is a guess at intent, not an instruction, so candidates
+        must clear _xdc_path_is_deliverable before they are removed from the
+        text; anything else stays visible as ordinary prose.
         """
         import re
         from gateway.platforms.base import BasePlatformAdapter
 
         files, remaining = BasePlatformAdapter.extract_local_files(content)
 
-        xdc_re = re.compile(r'(?<![/:\w.])(/workspace/[\w./\-]+\.xdc)\b', re.IGNORECASE)
-        for match in xdc_re.finditer(content):
-            path = match.group(1)
+        xdc_re = re.compile(r'(?<![/:\w.])((?:~/|/)[\w./\-]+\.xdc)\b', re.IGNORECASE)
+        spans = []
+        for path, span in self._find_xdc_paths(xdc_re, remaining):
+            if not self._xdc_path_is_deliverable(path):
+                continue
             if path not in files:
                 files.append(path)
-                remaining = remaining.replace(match.group(0), "").strip()
+            spans.append(span)
 
-        return files, remaining
+        return files, self._delete_spans(remaining, spans)
 
-    def filter_media_delivery_paths(self, media_files):
+    @staticmethod
+    def _base_filter_kwargs(base_fn, session_key: str) -> Dict[str, Any]:
+        """Pass session_key to a base filter only if this core accepts it.
+
+        Hermes grew ``session_key: str = ""`` on filter_media_delivery_paths /
+        filter_local_delivery_paths after 0.15.1 and calls the adapter
+        overrides with it as a keyword, so the overrides must accept it
+        unconditionally.  Forwarding it unconditionally is a different matter:
+        against an older base it raises the very TypeError we are fixing, only
+        pointed the other way.  Ask the installed base what it takes.
+        """
+        import inspect
+
+        try:
+            params = inspect.signature(base_fn).parameters
+        except (TypeError, ValueError):
+            return {}
+        return {"session_key": session_key} if "session_key" in params else {}
+
+    def filter_media_delivery_paths(self, media_files, session_key: str = ""):
         """Remap /workspace/ container paths to host cache before validation."""
         from gateway.platforms.base import BasePlatformAdapter
 
@@ -937,9 +1315,10 @@ body {{
                     continue
                 logger.warning("Could not resolve container path for delivery: %s", p)
             remapped.append((media_path, is_voice))
-        return BasePlatformAdapter.filter_media_delivery_paths(remapped)
+        base_fn = BasePlatformAdapter.filter_media_delivery_paths
+        return base_fn(remapped, **self._base_filter_kwargs(base_fn, session_key))
 
-    def filter_local_delivery_paths(self, file_paths):
+    def filter_local_delivery_paths(self, file_paths, session_key: str = ""):
         """Remap /workspace/ container paths to host cache before validation."""
         from gateway.platforms.base import BasePlatformAdapter
 
@@ -952,9 +1331,9 @@ body {{
                     remapped.append(cached)
                     continue
                 logger.warning("Could not resolve container path for delivery: %s", p)
-            else:
-                remapped.append(file_path)
-        return BasePlatformAdapter.filter_local_delivery_paths(remapped)
+            remapped.append(file_path)
+        base_fn = BasePlatformAdapter.filter_local_delivery_paths
+        return base_fn(remapped, **self._base_filter_kwargs(base_fn, session_key))
 
     async def _event_listener(self) -> None:
         """Listen for Delta Chat events and forward to Hermes."""
@@ -1589,9 +1968,10 @@ def register_platform(ctx):
             "You CAN build and send webxdc mini apps and other files (PDF, HTML, etc.). "
             "MANDATORY: before attempting to build any webxdc app, you MUST first call "
             "skill_view('plugin:deltachat-platform:webxdc-converter') to load the build instructions. "
-            "For file delivery from the Docker sandbox: write output files to /workspace/ (NOT /tmp/), "
-            "then use a MEDIA directive — e.g. 'MEDIA:/workspace/app.xdc'. "
-            "The adapter maps /workspace/ paths to the host and sends via send_document. "
+            "For file delivery: write output files to your current working directory "
+            "(run `pwd` to find it), NOT /tmp/. "
+            "Then reference the file by ABSOLUTE path in a MEDIA directive — e.g. 'MEDIA:/abs/path/app.xdc'. "
+            "In the Docker sandbox the working directory is /workspace/, so there it is 'MEDIA:/workspace/app.xdc'. "
             "DC core auto-detects .xdc as webxdc — just send it as a regular file. "
             "Each message ends with a [dc:chat=<token>] metadata tag. "
             "IGNORE this tag during normal conversation — it is only needed if you call dc_safe_rpc_call. "

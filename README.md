@@ -62,6 +62,11 @@ python ~/.hermes/plugins/deltachat-platform/setup.py
 hermes gateway start
 ```
 
+No terminal to run step 5 in (Docker, systemd, NixOS)? Set `DELTACHAT_EMAIL=auto`
+in `~/.hermes/.env` instead and skip it — the adapter registers a chatmail
+account on first connect and logs the invite link. See
+[docs/headless-onboarding.md](docs/headless-onboarding.md).
+
 The setup script prints an **invite link** for your new agent. Scan or tap it in the Delta Chat app on your phone — this is required because Delta Chat enforces end-to-end encryption, and the invite link carries the key fingerprint needed to establish an encrypted session. Adding the address alone won't work.
 
 ---
@@ -173,6 +178,8 @@ python ~/.hermes/plugins/deltachat-platform/setup.py
 ```
 
 The script auto-detects your Hermes profiles, lets you pick one, creates the DC account, and prints an **invite link**. Scan or tap it in Delta Chat — do not just add the email address manually, as the invite link is required for encrypted key exchange.
+
+**Or onboard without a terminal.** Set `DELTACHAT_EMAIL=auto` (chatmail account) or `DELTACHAT_EMAIL` + `DELTACHAT_PASSWORD` (your own mailbox) in `~/.hermes/.env`, and the adapter configures the account itself on first connect — no `setup.py` run needed. The invite link is written to the gateway log and to `invite.txt` in the accounts directory. Full details, including relay selection and password handling, in [docs/headless-onboarding.md](docs/headless-onboarding.md).
 
 ### 5. Start the gateway
 ```bash

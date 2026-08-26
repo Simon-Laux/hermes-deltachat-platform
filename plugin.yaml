@@ -12,3 +12,22 @@ optional_env:
     description: "Default chat for cron delivery"
     prompt: "Home chat"
     password: false
+  # Headless onboarding — setting either of the two below opts in, and the
+  # adapter creates its own account on first connect instead of requiring
+  # setup.py. See docs/headless-onboarding.md.
+  - name: DELTACHAT_EMAIL
+    description: "Email address for the bot account, or 'auto' to register a free chatmail account on first connect. Leave unset to onboard interactively with setup.py instead."
+    prompt: "Bot email address (or 'auto')"
+    password: false
+  - name: DELTACHAT_PASSWORD
+    description: "Password for DELTACHAT_EMAIL. Not needed when DELTACHAT_EMAIL=auto. Cleared from the process environment once the transport is configured."
+    prompt: "Bot email password"
+    # Both keys on purpose: hermes_cli/config.py's wizard reads `password`,
+    # while plugins_cmd.py's install-time prompt reads `secret`. Setting only
+    # one means the value is echoed in plaintext by the other code path.
+    password: true
+    secret: true
+  - name: DELTACHAT_CHATMAIL_SERVERS
+    description: "Comma-separated chatmail relays to register on when DELTACHAT_EMAIL=auto (e.g. nine.testrun.org,mehl.cloud). Unset picks nine.testrun.org plus two random relays from chatmail.at/relays for redundancy."
+    prompt: "Chatmail relays (comma-separated)"
+    password: false

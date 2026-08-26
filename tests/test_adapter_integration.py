@@ -91,17 +91,25 @@ class TestRPCServerPath:
 class TestVersionCheckIntegration:
     """Test version check with mocked RPC."""
 
+    # _check_dc_version calls rpc.get_system_info() and reads
+    # "deltachat_core_version" — mocking rpc.call or "deltachat_version"
+    # instead just exercises the except branch.
+
     @pytest.mark.asyncio
     async def test_version_compatible(self, mock_rpc):
         """Test version check with compatible version."""
-        mock_rpc.call = AsyncMock(return_value={"deltachat_version": MIN_DC_VERSION})
+        mock_rpc.get_system_info = AsyncMock(
+            return_value={"deltachat_core_version": MIN_DC_VERSION}
+        )
         result = await _check_dc_version(mock_rpc)
         assert result is True
 
     @pytest.mark.asyncio
     async def test_version_too_old(self, mock_rpc, caplog):
         """Test version check with too old version."""
-        mock_rpc.call = AsyncMock(return_value={"deltachat_version": "1.0.0"})
+        mock_rpc.get_system_info = AsyncMock(
+            return_value={"deltachat_core_version": "1.0.0"}
+        )
         with caplog.at_level("ERROR"):
             result = await _check_dc_version(mock_rpc)
         assert result is False
@@ -110,11 +118,28 @@ class TestVersionCheckIntegration:
     @pytest.mark.asyncio
     async def test_version_newer_warns(self, mock_rpc, caplog):
         """Test version check with newer version warns but allows."""
-        mock_rpc.call = AsyncMock(return_value={"deltachat_version": "3.0.0"})
+        mock_rpc.get_system_info = AsyncMock(
+            return_value={"deltachat_core_version": "3.0.0"}
+        )
         with caplog.at_level("WARNING"):
             result = await _check_dc_version(mock_rpc)
         assert result is True
         assert "newer than" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_missing_version_key_refuses(self, mock_rpc):
+        """A missing key defaults to 0.0.0, which is too old — fail closed."""
+        mock_rpc.get_system_info = AsyncMock(return_value={})
+        assert await _check_dc_version(mock_rpc) is False
+
+    @pytest.mark.asyncio
+    async def test_rpc_failure_refuses(self, mock_rpc, caplog):
+        """A broken RPC transport must refuse, not fall through as compatible."""
+        mock_rpc.get_system_info = AsyncMock(side_effect=RuntimeError("transport closed"))
+        with caplog.at_level("ERROR"):
+            result = await _check_dc_version(mock_rpc)
+        assert result is False
+        assert "Could not check Delta Chat version" in caplog.text
 
 
 class TestSendMessage:
@@ -510,3 +535,66 @@ class TestLocationSending:
 
         assert result.success is False
         assert "not connected" in result.error.lower()
+
+
+class TestFilterDeliveryPathsSessionKey:
+    """Regression: Hermes core calls these on the adapter instance as
+    self.filter_media_delivery_paths(media_files, session_key=session_key) /
+    self.filter_local_delivery_paths(file_paths, session_key=session_key).
+    Without a matching session_key parameter, every reply containing a
+    MEDIA directive or local file path crashes with
+    TypeError: ...filter_media_delivery_paths() got an unexpected keyword
+    argument 'session_key'."""
+
+    def test_filter_media_delivery_paths_accepts_session_key(self, platform_config):
+        adapter = DeltaChatAdapter(platform_config)
+
+        result = adapter.filter_media_delivery_paths(
+            [("/home/user/app.xdc", False)], session_key="agent:main:deltachat:dm:12"
+        )
+
+        assert result == [("/home/user/app.xdc", False)]
+
+    def test_filter_local_delivery_paths_accepts_session_key(self, platform_config):
+        adapter = DeltaChatAdapter(platform_config)
+
+        result = adapter.filter_local_delivery_paths(
+            ["/home/user/report.pdf"], session_key="agent:main:deltachat:dm:12"
+        )
+
+        assert result == ["/home/user/report.pdf"]
+
+    def test_session_key_not_forwarded_to_a_base_without_it(
+        self, platform_config, monkeypatch
+    ):
+        """Hermes 0.15.1's base staticmethods take one positional argument.
+
+        Forwarding session_key to those raises the same TypeError this class
+        exists to prevent, so the override must forward it only when the
+        installed base declares it.
+        """
+        from gateway.platforms.base import BasePlatformAdapter
+
+        def legacy_media(media_files):
+            return list(media_files or [])
+
+        def legacy_local(file_paths):
+            return list(file_paths or [])
+
+        monkeypatch.setattr(
+            BasePlatformAdapter, "filter_media_delivery_paths",
+            staticmethod(legacy_media),
+        )
+        monkeypatch.setattr(
+            BasePlatformAdapter, "filter_local_delivery_paths",
+            staticmethod(legacy_local),
+        )
+
+        adapter = DeltaChatAdapter(platform_config)
+
+        assert adapter.filter_media_delivery_paths(
+            [("/home/user/app.xdc", False)], session_key="agent:main:deltachat:dm:12"
+        ) == [("/home/user/app.xdc", False)]
+        assert adapter.filter_local_delivery_paths(
+            ["/home/user/report.pdf"], session_key="agent:main:deltachat:dm:12"
+        ) == ["/home/user/report.pdf"]

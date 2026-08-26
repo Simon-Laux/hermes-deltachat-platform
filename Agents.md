@@ -17,16 +17,64 @@ nix develop --command deltachat-rpc-server --openrpc  # inspect RPC spec
 
 ## Finding Hermes Source
 
-Hermes is installed in the nix store. To compare against other platform adapters:
+### Locating your installed Hermes
+
+Always derive the path — never copy a store hash out of this file. Hashes
+change on every rebuild, and different people run different Hermes versions.
+
+The catch: `hermes` on PATH resolves to a *wrapper* derivation containing
+`bin/`, `share/` and `ui-tui/` but **no `lib/`**, so grepping it for Python
+source silently finds nothing. The code lives in a separate store path:
+
+```bash
+hermes --version
+readlink -f "$(which hermes)"          # the wrapper — not what you want to grep
+# the Python source, via the wrapper's runtime closure:
+find $(nix-store -qR "$(readlink -f "$(which hermes)")" | grep -E 'hermes-agent-[0-9]') \
+     -maxdepth 3 -name site-packages -type d
+```
+
+Non-nix installs (pip/venv) have no such split — `python -c 'import gateway,
+os; print(os.path.dirname(os.path.dirname(gateway.__file__)))'` gets you
+there.
+
+What's worth reading in there:
 
 ```
-/nix/store/5naa7x31xmvsj1bqqrgjzqsas99j7pc8-hermes-agent-0.15.1/lib/python3.12/site-packages/gateway/
-  platforms/base.py       # base adapter class, MessageEvent, MessageType
-  platforms/telegram.py   # reference for voice/image/location sending
-  platforms/matrix.py     # reference for read receipts
-  platforms/bluebubbles.py
-  platforms/signal.py
+gateway/platforms/base.py       # base adapter class, MessageEvent, MessageType
+gateway/platforms/telegram.py   # reference for voice/image/location sending
+gateway/platforms/matrix.py     # reference for read receipts
+gateway/platforms/bluebubbles.py
+gateway/platforms/signal.py
+gateway/run.py                  # how inbound events are routed by message_type
+hermes_cli/                     # plugin install/config CLI, manifest handling
 ```
+
+Anything in this repo citing a Hermes `file:line` is pinned to whatever
+version its author ran, so re-check line numbers before trusting them — the
+`hermes_cli` internals in particular move a lot between releases.
+
+### Reading a different Hermes version without installing it
+
+Useful when checking whether behaviour we depend on changed in a release you
+don't run. Upstream is public at `github:NousResearch/hermes-agent`; if `gh
+api` or `raw.githubusercontent.com` are rate-limited (HTTP 429 through some
+proxies), nix's fetcher takes a different route and works:
+
+```bash
+nix flake prefetch github:NousResearch/hermes-agent/<tag> --json
+# .storePath -> a full source tree
+```
+
+Notes:
+- Tags are date-based (`v2026.8.19`); the real semver is in `pyproject.toml`
+  (that tag is 0.20.5).
+- PyPI's `hermes-agent` lags GitHub — prefer a tag over the PyPI version.
+- The prefetched path is not a GC root; re-run the prefetch to get it back
+  (same rev → same path).
+
+See `docs/upstreaming-to-hermes.md` for a worked example of comparing an
+installed Hermes against a newer one.
 
 ## Logging
 
