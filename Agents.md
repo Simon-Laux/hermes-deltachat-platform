@@ -17,16 +17,53 @@ nix develop --command deltachat-rpc-server --openrpc  # inspect RPC spec
 
 ## Finding Hermes Source
 
-Hermes is installed in the nix store. To compare against other platform adapters:
+### The version we actually run — 0.15.1
+
+`hermes` on PATH resolves to a wrapper; the Python code lives in a *different*
+store path than the wrapper. When checking behaviour against what is really
+installed, use the site-packages path:
 
 ```
-/nix/store/5naa7x31xmvsj1bqqrgjzqsas99j7pc8-hermes-agent-0.15.1/lib/python3.12/site-packages/gateway/
-  platforms/base.py       # base adapter class, MessageEvent, MessageType
-  platforms/telegram.py   # reference for voice/image/location sending
-  platforms/matrix.py     # reference for read receipts
-  platforms/bluebubbles.py
-  platforms/signal.py
+/nix/store/5naa7x31xmvsj1bqqrgjzqsas99j7pc8-hermes-agent-0.15.1/lib/python3.12/site-packages/
+  gateway/platforms/base.py       # base adapter class, MessageEvent, MessageType
+  gateway/platforms/telegram.py   # reference for voice/image/location sending
+  gateway/platforms/matrix.py     # reference for read receipts
+  gateway/platforms/bluebubbles.py
+  gateway/platforms/signal.py
+  hermes_cli/                     # plugin install/config CLI
 ```
+
+The wrapper (`bin/hermes`, plus `share/` and `ui-tui/`) is the other path,
+`/nix/store/h5w63b5x0fj882sr1xpdfnqdrj37qgzz-hermes-agent-0.15.1/` — it has no
+`lib/`, so grepping it for Python source finds nothing. Re-derive both if the
+profile is rebuilt:
+
+```bash
+readlink -f "$(which hermes)"                     # -> the h5w63b… wrapper
+hermes --version
+```
+
+### Reading a newer Hermes without installing it
+
+Upstream is public at `github:NousResearch/hermes-agent`, but the sandbox's HTTP
+proxy rate-limits `gh api` and `raw.githubusercontent.com` (HTTP 429). Nix uses a
+different fetcher and works:
+
+```bash
+nix flake prefetch github:NousResearch/hermes-agent/v2026.8.19 --json
+# -> /nix/store/ypgrl16c8ijc0bb260afvlszzp53zhih-source   (0.20.5, full source tree)
+```
+
+That path is a GC root only until the next `nix-collect-garbage`; re-run the
+prefetch to get it back (same rev → same path). PyPI's `hermes-agent` lags
+GitHub — it was on 0.19.0 when GitHub was on 0.20.5 — so prefer the tag.
+Check `pyproject.toml` for the real semver; the git tags are date-based
+(`v2026.8.19` == 0.20.5).
+
+Useful when deciding whether a Hermes-side behaviour we depend on has changed —
+`gateway/run.py` call shapes, `gateway/platforms/base.py` signatures, and the
+`hermes_cli/` plugin manifest handling all move between releases. See
+`docs/fork-backport-notes.md` for a worked example.
 
 ## Logging
 

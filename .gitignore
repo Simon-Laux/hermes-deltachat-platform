@@ -71,3 +71,6 @@ venv.bak/
 .env
 logs/
 sessions/
+
+# Scratch notes — fork survey, not ready to publish
+docs/fork-backport-notes.md
