@@ -371,6 +371,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._transport = None
         self.account_id: Optional[int] = None
         self._event_loop_task: Optional[asyncio.Task] = None
+        self._fatal_notify_task: Optional[asyncio.Task] = None
         self._running = False
         self._dc_config_dir: Optional[str] = None
         self._call_manager = None
@@ -1335,8 +1336,23 @@ body {{
         base_fn = BasePlatformAdapter.filter_local_delivery_paths
         return base_fn(remapped, **self._base_filter_kwargs(base_fn, session_key))
 
+    def _rpc_server_exit_code(self) -> Optional[int]:
+        """Exit code of the deltachat-rpc-server subprocess, or None if alive.
+
+        IOTransport only binds `.process` once start() has been called, so a
+        missing attribute means "not started yet", not "dead".
+        """
+        process = getattr(self._transport, "process", None)
+        if process is None:
+            return None
+        return process.poll()
+
     async def _event_listener(self) -> None:
-        """Listen for Delta Chat events and forward to Hermes."""
+        """Listen for Delta Chat events and forward to Hermes.
+
+        Retries transient RPC errors in place, but gives up the moment the
+        deltachat-rpc-server subprocess is gone — see _handle_listener_error.
+        """
         while self._running:
             try:
                 if self.account_id:
@@ -1346,8 +1362,49 @@ body {{
             except asyncio.CancelledError:
                 break
             except Exception as e:
-                logger.error(f"Event listener error: {e}")
-                await asyncio.sleep(1)
+                if not await self._handle_listener_error(e):
+                    break
+
+    async def _handle_listener_error(self, exc: Exception) -> bool:
+        """Return True to keep polling, False to stop.
+
+        Stopping matters because of how the vendored transport fails. When
+        deltachat-rpc-server exits, its reader thread hits EOF, resolves every
+        in-flight call with "RPC server disconnected" and then *clears* the
+        pending map (vendor/deltachat2/transport.py). So the first call after
+        the process dies raises — and the next one enqueues a request nobody
+        will ever answer and blocks forever, because _Result.wait() is a bare
+        threading.Event.wait() with no timeout.
+
+        That is not a crash and not a busy loop: it is a permanent silent hang
+        in a thread-pool worker, with is_connected still reporting True. Retry
+        logic cannot fix it, and no supervisor can catch it, because no
+        exception is ever raised again. The only way out is to notice the dead
+        subprocess in this one-error window and hand the adapter back to the
+        gateway, which rebuilds it — respawning the RPC server in the process.
+        """
+        exit_code = self._rpc_server_exit_code()
+        if exit_code is None:
+            logger.error(f"Event listener error: {exc}")
+            await asyncio.sleep(1)
+            return True
+
+        logger.error(
+            "deltachat-rpc-server exited (code %s); stopping the event listener "
+            "before it blocks forever on a dead transport. Last error: %s",
+            exit_code,
+            exc,
+        )
+        if self.is_connected:
+            self._set_fatal_error(
+                "rpc_server_died",
+                f"deltachat-rpc-server exited with code {exit_code}",
+                retryable=True,
+            )
+            # Own task: the gateway's fatal handler calls disconnect(), which
+            # cancels this very task. Awaiting it here would cancel us mid-exit.
+            self._fatal_notify_task = asyncio.create_task(self._notify_fatal_error())
+        return False
 
     async def _handle_dc_event(self, event: Dict[str, Any]) -> None:
         """Handle a Delta Chat event and convert to Hermes MessageEvent.
