@@ -852,7 +852,7 @@ body {{
             sandbox_workspace = Path(get_hermes_home()) / "sandboxes" / "docker" / "default" / "workspace"
         root = sandbox_workspace.resolve()
         candidate = (root / rel).resolve()
-        if candidate != root and not candidate.is_relative_to(root):
+        if not candidate.is_relative_to(root):
             logger.warning("Rejected container path escaping workspace: %s", p)
             return None
         return str(candidate)
@@ -883,6 +883,71 @@ body {{
         logger.info("Copied container output %s → %s", host_path.name, dest)
         return str(dest)
 
+    @staticmethod
+    def _mask_for_scan(text: str) -> str:
+        """Blank out code blocks / quotes / JSON strings before scanning.
+
+        The base extractors mask these spans so that a path merely *shown* in
+        a code sample is never delivered as an attachment; our .xdc extractors
+        have to do the same or the skill's own `/workspace/myapp.xdc` examples
+        get cut out of the reply and mailed to the user.  Masking is
+        offset-preserving (chars → spaces), so match spans stay valid against
+        the unmasked text.
+
+        The base helpers are private, so a future core may drop or rename
+        them; falling back to the verbatim text only costs false positives.
+        """
+        from gateway.platforms.base import BasePlatformAdapter
+
+        for name in ("_mask_protected_spans", "_mask_json_string_media"):
+            masker = getattr(BasePlatformAdapter, name, None)
+            if masker:
+                text = masker(text)
+        return text
+
+    @classmethod
+    def _find_xdc_paths(cls, pattern, text: str):
+        """Return [(path, span)] for `pattern` matches outside protected spans.
+
+        Group 1 is the path, group 0 the span to delete from the text.
+        """
+        masked = cls._mask_for_scan(text)
+        return [
+            (text[m.start(1):m.end(1)].strip(), m.span())
+            for m in pattern.finditer(masked)
+        ]
+
+    @staticmethod
+    def _delete_spans(text: str, spans) -> str:
+        """Delete `spans` from `text`, back to front so offsets stay valid.
+
+        str.replace() would also strip an identical path elsewhere in the
+        message — including inside the code block we just took care to mask.
+        """
+        chars = list(text)
+        for start, end in sorted(spans, reverse=True):
+            del chars[start:end]
+        return "".join(chars).strip()
+
+    @staticmethod
+    def _xdc_path_is_deliverable(path: str) -> bool:
+        """True for a bare .xdc path worth handing to the delivery pipeline.
+
+        /workspace/ paths are container-side and never exist on the host, so
+        they are taken on faith and resolved by filter_local_delivery_paths
+        later.  Everything else must actually exist — the base extractor
+        applies the same os.path.isfile() guard, and without it a path merely
+        mentioned in prose is cut from the reply text and pushed at the user
+        as an attachment.
+        """
+        if path.startswith("/workspace/"):
+            return True
+        try:
+            return os.path.isfile(os.path.expanduser(path))
+        except (OSError, RuntimeError, ValueError):
+            # expanduser raises ValueError("embedded null byte") for ~\x00.
+            return False
+
     def extract_media(self, content: str):
         """Extend base extract_media to also handle .xdc MEDIA tags.
 
@@ -890,23 +955,31 @@ body {{
         misses it.  We catch those tags here so they flow through the normal
         filter_media_delivery_paths → send_document pipeline, exactly like
         Telegram handles any other document type.
+
+        An explicit MEDIA: tag is an instruction, not a mention, so unlike
+        extract_local_files below there is no isfile() guard — a typo'd path
+        should surface as "skipped unsafe path" in the log rather than be
+        silently left in the text as if it were prose.
         """
         import re
         from gateway.platforms.base import BasePlatformAdapter
 
         media_files, remaining = BasePlatformAdapter.extract_media(content)
 
+        # Scan the base's cleaned text rather than `content`: it never removes
+        # .xdc tags (wrong extension set), so nothing is missed, and the spans
+        # stay valid for the deletion below.
         xdc_re = re.compile(
             r'[`"\']?MEDIA:\s*[`"\']?((?:~/|/)[\w./\- ]+\.xdc)[`"\']?',
             re.IGNORECASE,
         )
-        for match in xdc_re.finditer(content):
-            path = match.group(1).strip()
+        spans = []
+        for path, span in self._find_xdc_paths(xdc_re, remaining):
             if not any(p == path for p, _ in media_files):
                 media_files.append((path, False))
-            remaining = remaining.replace(match.group(0), "").strip()
+            spans.append(span)
 
-        return media_files, remaining
+        return media_files, self._delete_spans(remaining, spans)
 
     def extract_local_files(self, content: str):
         """Extend base to also pick up bare .xdc paths.
@@ -920,6 +993,10 @@ body {{
           * Agent-workspace paths on non-Docker deployments (absolute /... or
             home ~/... paths already visible on the host) — these flow
             untouched to the base validator, which enforces the denylist.
+
+        A bare path is a guess at intent, not an instruction, so candidates
+        must clear _xdc_path_is_deliverable before they are removed from the
+        text; anything else stays visible as ordinary prose.
         """
         import re
         from gateway.platforms.base import BasePlatformAdapter
@@ -927,13 +1004,15 @@ body {{
         files, remaining = BasePlatformAdapter.extract_local_files(content)
 
         xdc_re = re.compile(r'(?<![/:\w.])((?:~/|/)[\w./\-]+\.xdc)\b', re.IGNORECASE)
-        for match in xdc_re.finditer(content):
-            path = match.group(1)
+        spans = []
+        for path, span in self._find_xdc_paths(xdc_re, remaining):
+            if not self._xdc_path_is_deliverable(path):
+                continue
             if path not in files:
                 files.append(path)
-                remaining = remaining.replace(match.group(0), "").strip()
+            spans.append(span)
 
-        return files, remaining
+        return files, self._delete_spans(remaining, spans)
 
     def filter_media_delivery_paths(self, media_files):
         """Remap /workspace/ container paths to host cache before validation."""
@@ -964,8 +1043,7 @@ body {{
                     remapped.append(cached)
                     continue
                 logger.warning("Could not resolve container path for delivery: %s", p)
-            else:
-                remapped.append(file_path)
+            remapped.append(file_path)
         return BasePlatformAdapter.filter_local_delivery_paths(remapped)
 
     async def _event_listener(self) -> None:

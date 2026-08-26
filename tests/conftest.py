@@ -164,6 +164,25 @@ class MockBasePlatformAdapter:
         """Mock base local filter — pass through unchanged."""
         return list(file_paths or [])
 
+    @staticmethod
+    def _mask_protected_spans(content: str) -> str:
+        """Minimal stand-in for the real span masker.
+
+        The real one also handles blockquotes and spares backtick-quoted
+        MEDIA: paths; fenced and inline code is enough to pin the contract
+        the adapter depends on — masking is offset-preserving, so match
+        spans stay valid against the unmasked text.
+        """
+        import re
+
+        chars = list(content)
+        for pattern in (r"```[^\n]*\n.*?```", r"`[^`\n]+`"):
+            for m in re.finditer(pattern, content, re.DOTALL):
+                for i in range(m.start(), m.end()):
+                    if chars[i] != "\n":
+                        chars[i] = " "
+        return "".join(chars)
+
 
 class MockGatewayBase:
     """Mock of gateway.platforms.base module."""
