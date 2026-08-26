@@ -74,3 +74,6 @@ sessions/
 
 # Scratch notes — fork survey, not ready to publish
 docs/fork-backport-notes.md
+
+# git worktrees for parallel branches
+.worktrees/
