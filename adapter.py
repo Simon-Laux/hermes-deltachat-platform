@@ -49,11 +49,14 @@ MIN_DC_VERSION = "2.51.0"
 # Creating an account is a side effect with a cost outside this machine: it
 # registers on somebody else's chatmail relay. So it is strictly opt-in — with
 # no onboarding env var set we keep the old behaviour of refusing to start and
-# pointing at setup.py, rather than silently minting an account because
-# DELTACHAT_DATA_DIR was mistyped and the accounts dir looks empty.
+# pointing at setup.py. An accounts dir can look empty for boring reasons (wrong
+# HERMES_HOME, unmounted volume), and silently replacing an identity that
+# contacts have already verified is worse than refusing to boot.
 
-# Anchored first in auto mode so the primary address is predictable across
-# rebuilds; the extra relays are drawn at random purely for redundancy.
+# Registered first in auto mode so the account gets the same first address
+# across rebuilds; the extra relays are drawn at random purely for redundancy.
+# Which transport DC then treats as the account's *primary* address is not
+# verified here — see docs/headless-onboarding.md.
 ANCHOR_RELAY = "nine.testrun.org"
 AUTO_RELAY_COUNT = 3
 
@@ -85,12 +88,26 @@ def _load_setup_module():
     import importlib.util
 
     path = os.path.join(_plugin_dir, "setup.py")
+    # spec_from_file_location happily builds a spec for a path that does not
+    # exist; the failure only surfaces as FileNotFoundError inside
+    # exec_module. Check up front so callers get a coherent ImportError.
+    if not os.path.isfile(path):
+        raise ImportError(f"Plugin setup module not found at {path}")
+
     spec = importlib.util.spec_from_file_location(_SETUP_MODULE_NAME, path)
+    if spec is None or spec.loader is None:
+        raise ImportError(f"Could not load plugin setup module from {path}")
+
     module = importlib.util.module_from_spec(spec)
     # Registered before exec_module so a partially-initialised module can't be
-    # loaded twice concurrently.
+    # loaded twice concurrently — but pulled back out if exec fails, or the
+    # cache would serve that half-built module to every later caller.
     sys.modules[_SETUP_MODULE_NAME] = module
-    spec.loader.exec_module(module)
+    try:
+        spec.loader.exec_module(module)
+    except Exception:
+        sys.modules.pop(_SETUP_MODULE_NAME, None)
+        raise
     return module
 
 
