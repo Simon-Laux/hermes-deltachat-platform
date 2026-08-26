@@ -1511,6 +1511,17 @@ body {{
         base_fn = BasePlatformAdapter.filter_local_delivery_paths
         return base_fn(remapped, **self._base_filter_kwargs(base_fn, session_key))
 
+    def _rpc_server_exit_code(self) -> Optional[int]:
+        """Exit code of the deltachat-rpc-server subprocess, or None if alive.
+
+        IOTransport only binds `.process` once start() has been called, so a
+        missing attribute means "not started yet", not "dead".
+        """
+        process = getattr(self._transport, "process", None)
+        if process is None:
+            return None
+        return process.poll()
+
     async def _event_listener(self) -> None:
         """Listen for Delta Chat events and forward to Hermes.
 
@@ -1518,6 +1529,10 @@ body {{
         adapter is deaf: DC keeps queueing events and nothing drains them. That
         used to be silent and permanent. Now it is escalated to the gateway,
         which owns supervision (see _escalate_listener_death).
+
+        Transient RPC errors are retried in place, but the loop gives up the
+        moment the deltachat-rpc-server subprocess is gone — see
+        _handle_listener_error.
         """
         try:
             while self._running:
@@ -1531,16 +1546,20 @@ body {{
                     # runs, and escalates only if this was not a teardown.
                     raise
                 except Exception as e:
-                    logger.error(f"Event listener error: {e}")
-                    await asyncio.sleep(1)
+                    if not await self._handle_listener_error(e):
+                        break
         finally:
-            # is_connected is the base class's self._running, which _cleanup()
-            # and _mark_disconnected() both clear — so a deliberate teardown
-            # falls through here without escalating.
+            # is_connected is the base class's self._running, which _cleanup(),
+            # _mark_disconnected() and _set_fatal_error() all clear — so a
+            # deliberate teardown, or an escalation _handle_listener_error has
+            # already made, falls through here without escalating again.
             if self.is_connected:
-                self._escalate_listener_death()
+                self._escalate_listener_death(
+                    "event_listener_stopped",
+                    "Delta Chat event listener stopped while connected",
+                )
 
-    def _escalate_listener_death(self) -> None:
+    def _escalate_listener_death(self, code: str, message: str) -> None:
         """Report a dead event listener to the gateway and let it recover us.
 
         Hermes owns supervision: _handle_adapter_fatal_error drops this adapter
@@ -1554,12 +1573,12 @@ body {{
         here: the gateway's fatal handler calls back into disconnect(), which
         cancels *this* task. Awaiting that from inside the task would cancel us
         mid-teardown, and _cleanup()'s cancel would be a task cancelling itself.
+
+        retryable=True either way: a stopped listener or a dead RPC server is
+        recovered by rebuilding the adapter, so the platform must not be
+        written off.
         """
-        self._set_fatal_error(
-            "event_listener_stopped",
-            "Delta Chat event listener stopped while connected",
-            retryable=True,
-        )
+        self._set_fatal_error(code, message, retryable=True)
         # Held on the instance so the task isn't garbage-collected mid-flight.
         self._fatal_notify_task = asyncio.create_task(self._notify_fatal_error())
 
@@ -1587,6 +1606,41 @@ body {{
             chat_id,
             error or "unknown",
         )
+
+    async def _handle_listener_error(self, exc: Exception) -> bool:
+        """Return True to keep polling, False to stop.
+
+        Once deltachat-rpc-server has exited there is nothing left to retry
+        against: the vendored transport (vendor/deltachat2/transport.py) fails
+        every further call with "RPC server disconnected", so without this
+        check the listener would log that error once a second forever while
+        is_connected still reports True. Retrying cannot fix it and the adapter
+        cannot restart the server itself (see _escalate_listener_death), so
+        hand the adapter back to the gateway, which rebuilds it — respawning
+        the RPC server in the process.
+
+        The exit can lag the error slightly: the server's pipes close before
+        poll() sees it exit. Then we retry once, and the transport fails that
+        call within a second, by which time poll() reports the exit.
+        """
+        exit_code = self._rpc_server_exit_code()
+        if exit_code is None:
+            logger.error(f"Event listener error: {exc}")
+            await asyncio.sleep(1)
+            return True
+
+        logger.error(
+            "deltachat-rpc-server exited (code %s); stopping the event listener "
+            "and handing the adapter back to the gateway. Last error: %s",
+            exit_code,
+            exc,
+        )
+        if self.is_connected:
+            self._escalate_listener_death(
+                "rpc_server_died",
+                f"deltachat-rpc-server exited with code {exit_code}",
+            )
+        return False
 
     async def _handle_dc_event(self, event: Dict[str, Any]) -> None:
         """Handle a Delta Chat event and convert to Hermes MessageEvent.
