@@ -1349,6 +1349,31 @@ body {{
                 logger.error(f"Event listener error: {e}")
                 await asyncio.sleep(1)
 
+    async def _log_failed_message(self, event: Dict[str, Any]) -> None:
+        """Log a MSG_FAILED event with the reason DC recorded, not just an id.
+
+        The event itself carries only chatId/msgId, so the human-readable cause
+        lives on the message snapshot's `error` field and needs a second RPC.
+        That call can itself fail (the message may already be gone, or the
+        transport may be the reason we got here), so a missing reason must not
+        turn a delivery failure into an exception on the event loop.
+        """
+        msg_id = event.get("msg_id")
+        chat_id = event.get("chat_id")
+        error = None
+        try:
+            msg = await self.rpc.get_message(self.account_id, int(msg_id))
+            error = msg.get("error")
+        except Exception as e:
+            logger.debug("Could not fetch error text for failed msg %s: %s", msg_id, e)
+
+        logger.warning(
+            "Message failed: msg_id=%s chat_id=%s reason=%s",
+            msg_id,
+            chat_id,
+            error or "unknown",
+        )
+
     async def _handle_dc_event(self, event: Dict[str, Any]) -> None:
         """Handle a Delta Chat event and convert to Hermes MessageEvent.
 
@@ -1364,7 +1389,7 @@ body {{
         elif event_kind == EventType.MSG_DELIVERED:
             logger.debug(f"Message delivered: {event.get('msg_id')}")
         elif event_kind == EventType.MSG_FAILED:
-            logger.warning(f"Message failed: {event.get('msg_id')}")
+            await self._log_failed_message(event)
         elif event_kind == EventType.INCOMING_CALL:
             if self._call_manager:
                 asyncio.create_task(self._call_manager.handle_incoming_call(event))
@@ -1674,180 +1699,6 @@ body {{
         else:
             logger.debug(f"Unhandled view_type={view_type}, file={filename}")
 
-    async def _handle_audio_message_UNUSED(
-        self, msg: Dict, chat_id: str, msg_id: str, filename: str
-    ) -> None:
-        # KEPT FOR REFERENCE ONLY — superseded by _handle_non_text_message
-        # which emits MessageType.VOICE/AUDIO with media_urls and lets Hermes STT handle it.
-        """Handle audio/voice message by transcribing and forwarding as text.
-
-        Args:
-            msg: Delta Chat message dictionary
-            chat_id: Chat ID (string representation)
-            msg_id: Message ID (string representation)
-            filename: Local filepath to audio file
-        """
-        import os
-
-        logger.info(f"_handle_audio_message START: chat_id={chat_id}, msg_id={msg_id}, filename={filename}")
-        logger.info(f"Original filename: {filename}")
-        logger.info(f"File exists at original path: {os.path.exists(filename)}")
-        if filename:
-            logger.info(f"Absolute path: {os.path.abspath(filename)}")
-            logger.info(f"Filename basename: {os.path.basename(filename)}")
-        logger.info(f"Message data: msg_type={msg.get('msg_type')}, from_id={msg.get('from_id')}, timestamp={msg.get('timestamp')}")
-
-        if not filename:
-            logger.warning("_handle_audio_message: No filename in audio message, cannot process")
-            return
-
-        # For Delta Chat, the file might be in blob directory
-        if not os.path.exists(filename):
-            logger.info("_handle_audio_message: File not at original path, searching blob directory...")
-            dc_blob_dir = os.path.join(self._get_dc_config_dir(), "blobs")
-            logger.info(f"Blob directory: {dc_blob_dir}, exists: {os.path.exists(dc_blob_dir)}")
-            if os.path.exists(dc_blob_dir):
-                blob_path = os.path.join(dc_blob_dir, os.path.basename(filename))
-                logger.info(f"Trying blob path: {blob_path}, exists: {os.path.exists(blob_path)}")
-                if os.path.exists(blob_path):
-                    filename = blob_path
-                    logger.info(f"Found file in blob dir: {filename}")
-                else:
-                    blob_path_no_ext = os.path.join(dc_blob_dir, os.path.splitext(os.path.basename(filename))[0])
-                    logger.info(f"Trying blob path (no ext): {blob_path_no_ext}, exists: {os.path.exists(blob_path_no_ext)}")
-                    if os.path.exists(blob_path_no_ext):
-                        filename = blob_path_no_ext
-                        logger.info(f"Found file in blob dir (no ext): {filename}")
-
-        if not os.path.exists(filename):
-            logger.error(f"_handle_audio_message: Audio file not found at any location: {filename}")
-            logger.error("_handle_audio_message: Cannot transcribe - file unavailable")
-            # Still notify about the voice message
-            from_id = msg.get("from_id")
-            user_name = f"Contact {from_id}" if from_id else "Unknown"
-            chat_type = "group" if msg.get("is_group", False) else "dm"
-            try:
-                chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
-                chat_name = chat.get("name", f"Chat {chat_id}")
-            except Exception:
-                chat_name = f"Chat {chat_id}"
-            source = self.build_source(
-                chat_id=str(chat_id),
-                chat_name=chat_name,
-                chat_type=chat_type,
-                user_id=str(from_id) if from_id else "unknown",
-                user_name=user_name,
-            )
-            from gateway.platforms.base import MessageEvent, MessageType
-            message_event = MessageEvent(
-                text=f"[Voice message from {user_name}]",
-                message_type=MessageType.TEXT,
-                source=source,
-                message_id=str(msg_id),
-                metadata={"chat_id": str(chat_id), "msg_type": "voice"},
-            )
-            logger.info("_handle_audio_message: Forwarding notification message (no file)")
-            await self.handle_message(message_event)
-            return
-
-        # File exists - get stats
-        file_size = os.path.getsize(filename)
-        logger.info(f"_handle_audio_message: Audio file found: {filename}, size={file_size} bytes")
-        logger.info(f"_handle_audio_message: Transcribing audio message: {filename}")
-
-        # Get sender info
-        from_id = msg.get("from_id")
-        if from_id:
-            try:
-                contact = await self.rpc.get_contact(self.account_id, int(from_id))
-                user_name = (contact.get("name") or contact.get("display_name")
-                             or contact.get("name_and_addr") or f"Contact {from_id}")
-            except Exception:
-                user_name = f"Contact {from_id}"
-        else:
-            user_name = "Unknown"
-
-        # Get chat info
-        chat_name = ""
-        try:
-            chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
-            chat_name = chat.get("name", f"Chat {chat_id}")
-        except Exception:
-            chat_name = f"Chat {chat_id}"
-
-        # Try to transcribe
-        transcribed_text = None
-        transcription_attempted = False
-        logger.info("_handle_audio_message: Checking for LLM transcription capability...")
-        try:
-            # Try Hermes STT
-            try:
-                from gateway.llm import llm
-                logger.info(f"_handle_audio_message: llm module imported, type={type(llm)}")
-                has_transcribe = hasattr(llm, 'transcribe_audio_file')
-                logger.info(f"_handle_audio_message: llm.transcribe_audio_file available: {has_transcribe}")
-                if has_transcribe:
-                    transcription_attempted = True
-                    logger.info("_handle_audio_message: Calling llm.transcribe_audio_file...")
-                    transcription_result = await llm.transcribe_audio_file(filename)
-                    logger.info(f"_handle_audio_message: Transcription result: {transcription_result}")
-                    if transcription_result and transcription_result.get("text"):
-                        transcribed_text = transcription_result["text"]
-                        logger.info(f"_handle_audio_message: Transcribed text (first 200 chars): {transcribed_text[:200]}")
-                    else:
-                        logger.warning("_handle_audio_message: Transcription returned empty or no text field")
-                else:
-                    logger.warning("_handle_audio_message: LLM does NOT have transcribe_audio_file method")
-            except Exception as e:
-                import traceback
-                logger.warning(f"_handle_audio_message: llm.transcribe_audio_file failed: {e}")
-                logger.debug(f"_handle_audio_message: llm.transcribe_audio_file traceback:\n{traceback.format_exc()}")
-        except Exception as e:
-            import traceback
-            logger.warning(f"_handle_audio_message: Transcription outer exception: {e}")
-            logger.debug(f"_handle_audio_message: Transcription traceback:\n{traceback.format_exc()}")
-
-        # Build response
-        chat_type = "group" if msg.get("is_group", False) else "dm"
-        source = self.build_source(
-            chat_id=str(chat_id),
-            chat_name=chat_name,
-            chat_type=chat_type,
-            user_id=str(from_id) if from_id else "unknown",
-            user_name=user_name,
-        )
-
-        from gateway.platforms.base import MessageEvent, MessageType
-
-        if transcribed_text:
-            full_text = f"[Voice message from {user_name}]: {transcribed_text}"
-            logger.info("_handle_audio_message: SUCCESS - voice message transcribed and will be forwarded")
-        else:
-            full_text = f"[Voice message from {user_name}]"
-            if transcription_attempted:
-                logger.warning("_handle_audio_message: Transcription attempted but returned no text")
-            else:
-                logger.warning("_handle_audio_message: NO TRANSCRIPTION - llm.transcribe_audio_file not available, file will be forwarded as notification only")
-
-        logger.debug(f"_handle_audio_message: Final message text: {full_text[:150]}")
-        message_event = MessageEvent(
-            text=full_text,
-            message_type=MessageType.TEXT,
-            source=source,
-            message_id=str(msg_id),
-            metadata={
-                "chat_id": str(chat_id),
-                "from_id": str(from_id) if from_id else "unknown",
-                "filename": filename,
-                "msg_type": "voice",
-                "timestamp": msg.get("timestamp"),
-                "transcribed": transcribed_text is not None,
-                "file_size": file_size,
-            },
-        )
-        logger.info("_handle_audio_message: Forwarding message to Hermes...")
-        await self.handle_message(message_event)
-        logger.info("_handle_audio_message: COMPLETE - Audio message handled successfully")
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Get metadata for a chat.
 
