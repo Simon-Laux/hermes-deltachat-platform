@@ -53,15 +53,6 @@ def scrape_relay_servers(timeout: int = 10) -> List[str]:
         return [FALLBACK_RELAY]
 
 
-def get_relay_servers() -> List[str]:
-    """Get list of available relay servers.
-
-    Returns:
-        List of relay server addresses
-    """
-    return scrape_relay_servers()
-
-
 class DeltaChatAccountSetup:
     """Helper for setting up Delta Chat accounts."""
 
@@ -115,81 +106,9 @@ class DeltaChatAccountSetup:
             account_id = accounts[0]["id"]
             print(f"\nUsing existing account: {account_id}")
 
-        # Check if transport is configured
         if not self.rpc.is_configured(account_id):
             print("\nTransport not configured, setting up...")
-
-            # Ask for account type
-            while True:
-                print("\nCreate account using:")
-                print("-" * 40)
-                print("1. Public relay (recommended - no personal info needed)")
-                print("2. Existing email credentials")
-
-                account_type = input("\nSelect option [1/2, default=1]: ").strip()
-
-                if not account_type or account_type == "1":
-                    # Public relay
-                    servers = get_relay_servers()
-
-                    # Strip https:// for display
-                    display_servers = [s.replace("https://", "") for s in servers]
-
-                    print("\nSelect relay server:")
-                    print("-" * 40)
-                    print(f"  1. {display_servers[0]} (default)")
-                    for i, server in enumerate(display_servers[1:], 2):
-                        print(f"  {i}. {server}")
-                    print(f"  {len(servers) + 1}. Enter custom relay server")
-
-                    relay_choice = input(
-                        f"\nSelect relay [1-{len(servers) + 1}, default=1]: "
-                    ).strip()
-
-                    if not relay_choice or relay_choice == "1":
-                        relay = servers[0]
-                    else:
-                        try:
-                            idx = int(relay_choice) - 1
-                            if 0 <= idx < len(servers):
-                                relay = servers[idx]
-                            elif idx == len(servers):
-                                relay = input("Enter relay server: ").strip()
-                                # Add https:// if user didn't include it
-                                if not relay.startswith("https://"):
-                                    relay = f"https://{relay}"
-                            else:
-                                print(
-                                    f"Invalid choice, using default: {display_servers[0]}"
-                                )
-                                relay = servers[0]
-                        except ValueError:
-                            print(
-                                f"Invalid choice, using default: {display_servers[0]}"
-                            )
-                            relay = servers[0]
-
-                    # Strip https:// for QR code
-                    relay_host = relay.replace("https://", "")
-                    self.rpc.add_transport_from_qr(
-                        account_id, f"dcaccount:{relay_host}"
-                    )
-                    print(f"Transport configured using relay: {relay_host}")
-                    break
-
-                elif account_type == "2":
-                    # Email credentials
-                    email = input("\nEmail: ").strip()
-                    password = input("Password: ").strip()
-
-                    self.rpc.add_or_update_transport(
-                        account_id, {"addr": email, "password": password}
-                    )
-                    print(f"Transport configured using email: {email}")
-                    break
-
-                else:
-                    print("Invalid choice, please try again.")
+            self._configure_transport(account_id)
 
         # Offer to change display name
         current_name = self.rpc.get_account_info(account_id).get("name", "Unnamed")
@@ -208,6 +127,58 @@ class DeltaChatAccountSetup:
                     print(f"Failed to change name: {e}")
 
         return account_id
+
+    def _configure_transport(self, account_id) -> None:
+        """Ask for a public relay or email credentials and configure it."""
+        while True:
+            print("\nCreate account using:")
+            print("-" * 40)
+            print("1. Public relay (recommended - no personal info needed)")
+            print("2. Existing email credentials")
+
+            account_type = input("\nSelect option [1/2, default=1]: ").strip()
+
+            if not account_type or account_type == "1":
+                relay = self._choose_relay()
+                self.rpc.add_transport_from_qr(account_id, f"dcaccount:{relay}")
+                print(f"Transport configured using relay: {relay}")
+                return
+            if account_type == "2":
+                email = input("\nEmail: ").strip()
+                password = input("Password: ").strip()
+                self.rpc.add_or_update_transport(
+                    account_id, {"addr": email, "password": password}
+                )
+                print(f"Transport configured using email: {email}")
+                return
+            print("Invalid choice, please try again.")
+
+    @staticmethod
+    def _choose_relay() -> str:
+        """Let the user pick a scraped relay or enter a custom one; bare host."""
+        servers = scrape_relay_servers()
+        custom = len(servers) + 1
+
+        print("\nSelect relay server:")
+        print("-" * 40)
+        print(f"  1. {servers[0]} (default)")
+        for i, server in enumerate(servers[1:], 2):
+            print(f"  {i}. {server}")
+        print(f"  {custom}. Enter custom relay server")
+
+        choice = input(f"\nSelect relay [1-{custom}, default=1]: ").strip()
+        if not choice:
+            return servers[0]
+        try:
+            idx = int(choice)
+        except ValueError:
+            idx = 0
+        if 1 <= idx <= len(servers):
+            return servers[idx - 1]
+        if idx == custom:
+            return input("Enter relay server: ").strip().removeprefix("https://")
+        print(f"Invalid choice, using default: {servers[0]}")
+        return servers[0]
 
 
 def setup_account(rpc, profile_name: str = "default") -> Optional[str]:
@@ -321,17 +292,15 @@ def get_account_address(rpc, account_id: int) -> Optional[str]:
 
 
 if __name__ == "__main__":
-    import sys
     import os
+    import sys
     import time
 
     # Try to import deltachat2 from vendor or system
-    import sys as _sys
-
     plugin_dir = os.path.dirname(os.path.abspath(__file__))
     vendor_dir = os.path.join(plugin_dir, "vendor")
-    if os.path.exists(vendor_dir) and vendor_dir not in _sys.path:
-        _sys.path.insert(0, vendor_dir)
+    if os.path.exists(vendor_dir) and vendor_dir not in sys.path:
+        sys.path.insert(0, vendor_dir)
 
     try:
         import deltachat2

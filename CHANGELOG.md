@@ -2,6 +2,28 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.0] - 2026-09-27
+
+### Changed
+- Internal refactor (no intended behavior change): extracted helpers for
+  duplicated logic — `_send_msg_data` (all `send_*` attachment methods),
+  `_gate_mention` (one mention/quote-reply-to-self gate for text and
+  non-text paths), `_apply_bot_guards`/`_guard_tripped`, `_reject`,
+  `_is_destructive`, `_cfg_bool`/`_cfg_bounded_int` (constructor and
+  `validate_config` now share one set of message-limit bounds),
+  `_remap_container_path`; `CallManager._call_source`, `_log_sdp`,
+  `_wait_for_connection`, `_take_one`; `setup.py` split into
+  `_configure_transport`/`_choose_relay`. `_parse_chatmail_servers` renamed
+  to `_parse_csv_unique` (it also parses mention aliases).
+- A non-numeric `max_message_length`/`max_message_lines` now logs a warning
+  before falling back to the default (previously silent), and
+  `validate_config` reports both invalid and out-of-range values as
+  "must be an integer between X and Y".
+- `CallManager.consume_call_ack` now takes the state lock like the other
+  drop counters.
+- `send_voice` no longer logs each call and its kwargs at INFO; a
+  successful send logs at DEBUG like the other `send_*` methods.
+
 ## [1.7.9] - 2026-09-17
 
 ### Fixed

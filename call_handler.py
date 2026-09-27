@@ -21,6 +21,7 @@ import threading
 import time
 import wave
 import re as _re
+from collections import Counter
 from dataclasses import dataclass, field
 
 # On NixOS the gateway process does not inherit PYTHONPATH from ~/.hermes/.env
@@ -57,6 +58,9 @@ _SILENCE_THRESHOLD_S = (
     1.0  # seconds of silence → end of utterance (shorter = more responsive)
 )
 _MIN_SPEECH_S = 0.5  # minimum utterance duration to process
+_RMS_THRESHOLD = 200  # below this → silence (int16 range 0-32767)
+_MIN_VOICED_S = 0.3  # require this much actual voiced audio to process
+_BARGE_IN_MIN_VOICED_S = 0.25  # sustained speech before counting as a barge-in
 _SAMPLE_RATE = 48000  # aiortc delivers audio at 48 kHz
 _CHANNELS = 2  # stereo
 _BYTES_PER_SAMPLE = 2  # int16
@@ -105,6 +109,30 @@ def _split_sentences(text: str) -> list:
         else:
             chunks.append(buf)
     return chunks
+
+
+# Delta Chat's reserved contact id for the account itself.
+_DC_CONTACT_ID_SELF = 1
+
+
+def _contact_name(contact: dict, fallback: str) -> str:
+    """Best display name from a ``get_contact`` snapshot."""
+    return (
+        contact.get("name")
+        or contact.get("display_name")
+        or contact.get("name_and_addr")
+        or fallback
+    )
+
+
+def _take_one(counter: Counter, key: str) -> bool:
+    """Decrement *counter[key]* if positive; return whether it was."""
+    if counter[key] <= 0:
+        return False
+    counter[key] -= 1
+    if not counter[key]:
+        del counter[key]
+    return True
 
 
 # ---------------------------------------------------------------------------
@@ -285,7 +313,7 @@ class IncomingAudioBuffer:
     """Buffers incoming AudioFrames, detects utterance boundaries, fires STT.
 
     Silence detection mirrors Discord's VoiceReceiver:
-    - 1.5 s silence after >= 0.5 s of speech → utterance complete
+    - _SILENCE_THRESHOLD_S of silence after enough voiced audio → utterance complete
     - PCM resampled 48 kHz stereo → 16 kHz mono WAV via av before STT
     """
 
@@ -329,40 +357,39 @@ class IncomingAudioBuffer:
         """
         import numpy as np
 
-        resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
-        _RMS_THRESHOLD = 200  # below this → silence (int16 range 0-32767)
-        _MIN_VOICED_S = 0.3  # require this much actual voiced audio to process
-        _BARGE_IN_MIN_VOICED_S = 0.25  # sustained speech before counting as a barge-in
-        _SPEECH_BUF = bytearray()  # all frames between utterance start and end
-        _last_speech_time = 0.0
-        _voiced_s = 0.0  # accumulated voiced time (excludes silence)
-        _capturing = False
-        _barge_signaled = False  # barge-in already confirmed for this utterance
-        _buf_overflow_warned = False  # only log the max-utterance warning once per call
+        resampler = av.AudioResampler(format="s16", layout="mono", rate=_STT_RATE)
+        speech_buf = bytearray()  # all frames between utterance start and end
+        last_speech_time = 0.0
+        voiced_s = 0.0  # accumulated voiced time (excludes silence)
+        capturing = False
+        barge_signaled = False  # barge-in already confirmed for this utterance
+        buf_overflow_warned = False  # only log the max-utterance warning once per call
         frame_count = 0
 
-        def _emit():
-            if _voiced_s >= _MIN_VOICED_S:
+        def end_utterance():
+            """Hand the buffered utterance to STT (if long enough) and reset."""
+            nonlocal speech_buf, capturing, voiced_s, barge_signaled
+            if voiced_s >= _MIN_VOICED_S:
                 logger.info(
                     "Utterance end: %.1f s voiced, %d KB",
-                    _voiced_s,
-                    len(_SPEECH_BUF) // 1024,
+                    voiced_s,
+                    len(speech_buf) // 1024,
                 )
-                asyncio.ensure_future(self._process_utterance(bytes(_SPEECH_BUF)))
+                asyncio.ensure_future(self._process_utterance(bytes(speech_buf)))
+            speech_buf, capturing, voiced_s, barge_signaled = (
+                bytearray(),
+                False,
+                0.0,
+                False,
+            )
 
         logger.info("Audio receive loop started")
         while self._running:
             try:
                 frame = await asyncio.wait_for(track.recv(), timeout=3.0)
             except asyncio.TimeoutError:
-                if _capturing:
-                    _emit()
-                    _SPEECH_BUF, _capturing, _voiced_s, _barge_signaled = (
-                        bytearray(),
-                        False,
-                        0.0,
-                        False,
-                    )
+                if capturing:
+                    end_utterance()
                 continue
             except (asyncio.CancelledError, Exception) as e:
                 # CancelledError is expected on stop(); other errors end the loop.
@@ -393,59 +420,49 @@ class IncomingAudioBuffer:
             is_speech = rms >= _RMS_THRESHOLD
             frame_dur = frame.samples / frame.sample_rate
 
-            if is_speech and not _capturing:
-                _capturing = True
+            if is_speech and not capturing:
+                capturing = True
                 logger.debug("Speech started (rms=%d)", rms)
 
-            if _capturing:
-                # Buffer every frame while capturing — clean samples via to_ndarray
-                for out_frame in resampler.resample(frame):
-                    _SPEECH_BUF.extend(out_frame.to_ndarray().tobytes())
-                # Safety cap: if the caller speaks continuously for a very long
-                # time, force a flush so the buffer cannot grow without bound.
-                if len(_SPEECH_BUF) >= _MAX_SPEECH_BUF_BYTES:
-                    if not _buf_overflow_warned:
-                        logger.warning(
-                            "Utterance exceeded %s s ceiling — forcing a split",
-                            _MAX_UTTERANCE_S,
-                        )
-                        _buf_overflow_warned = True
-                    _emit()
-                    _SPEECH_BUF, _capturing, _voiced_s, _barge_signaled = (
-                        bytearray(),
-                        False,
-                        0.0,
-                        False,
+            if not capturing:
+                continue
+
+            # Buffer every frame while capturing — clean samples via to_ndarray
+            for out_frame in resampler.resample(frame):
+                speech_buf.extend(out_frame.to_ndarray().tobytes())
+            # Safety cap: if the caller speaks continuously for a very long
+            # time, force a flush so the buffer cannot grow without bound.
+            if len(speech_buf) >= _MAX_SPEECH_BUF_BYTES:
+                if not buf_overflow_warned:
+                    logger.warning(
+                        "Utterance exceeded %s s ceiling — forcing a split",
+                        _MAX_UTTERANCE_S,
                     )
-                    continue
-                if is_speech:
-                    _last_speech_time = now
-                    _voiced_s += frame_dur
-                    # Barge-in only after sustained voiced audio — confirms real
-                    # speech, not a click/transient that briefly crosses the RMS gate.
-                    if (
-                        not _barge_signaled
-                        and _voiced_s >= _BARGE_IN_MIN_VOICED_S
-                        and self._on_speech_confirmed is not None
-                    ):
-                        _barge_signaled = True
-                        try:
-                            self._on_speech_confirmed()
-                        except Exception as e:
-                            logger.debug("on_speech_confirmed error: %s", e)
-                elif (now - _last_speech_time) >= _SILENCE_THRESHOLD_S:
-                    _emit()
-                    _SPEECH_BUF, _capturing, _voiced_s, _barge_signaled = (
-                        bytearray(),
-                        False,
-                        0.0,
-                        False,
-                    )
+                    buf_overflow_warned = True
+                end_utterance()
+                continue
+            if is_speech:
+                last_speech_time = now
+                voiced_s += frame_dur
+                # Barge-in only after sustained voiced audio — confirms real
+                # speech, not a click/transient that briefly crosses the RMS gate.
+                if (
+                    not barge_signaled
+                    and voiced_s >= _BARGE_IN_MIN_VOICED_S
+                    and self._on_speech_confirmed is not None
+                ):
+                    barge_signaled = True
+                    try:
+                        self._on_speech_confirmed()
+                    except Exception as e:
+                        logger.debug("on_speech_confirmed error: %s", e)
+            elif (now - last_speech_time) >= _SILENCE_THRESHOLD_S:
+                end_utterance()
 
         # Flush remaining speech when call ends
         logger.info("Receive loop done: %d frames", frame_count)
-        if _capturing:
-            _emit()
+        if capturing:
+            end_utterance()
 
     async def _process_utterance(self, pcm: bytes) -> None:
         wav_path = await asyncio.to_thread(self._pcm_to_wav, pcm)
@@ -603,12 +620,10 @@ class CallManager:
         self._pending_answers: Dict[int, asyncio.Future] = (
             {}
         )  # msg_id → answer-SDP future (outgoing)
-        self._drop_next_response: Dict[str, int] = (
-            {}
-        )  # chat_id → number of send() replies to suppress
-        self._drop_call_ack: Dict[str, int] = (
-            {}
-        )  # chat_id → suppress the agent's post-dc_start_call line
+        # chat_id → number of send() replies to suppress
+        self._drop_next_response: Counter = Counter()
+        # chat_id → suppress the agent's post-dc_start_call line
+        self._drop_call_ack: Counter = Counter()
 
         # _sessions, _chat_to_msg, _pending_answers and the drop counters are
         # accessed from both the gateway loop (adapter.send(), tool handlers) and
@@ -670,7 +685,7 @@ class CallManager:
         # on the first real user utterance so genuine replies are never dropped.
         if _CALL_THREAD_ID is None:
             with self._state_lock:
-                self._drop_call_ack[chat_id] = self._drop_call_ack.get(chat_id, 0) + 1
+                self._drop_call_ack[chat_id] += 1
         return msg_id
 
     async def play_response(self, chat_id: str, text: str) -> None:
@@ -706,12 +721,7 @@ class CallManager:
                 contact = await self._adapter.rpc.get_contact(
                     self._adapter.account_id, int(from_id)
                 )
-                caller_name = (
-                    contact.get("name")
-                    or contact.get("display_name")
-                    or contact.get("name_and_addr")
-                    or caller_name
-                )
+                caller_name = _contact_name(contact, caller_name)
         except Exception as e:
             logger.debug("Could not fetch caller info: %s", e)
 
@@ -795,12 +805,14 @@ class CallManager:
     @staticmethod
     def _sdp_candidates(sdp: str) -> str:
         """Summarize candidate types in an SDP for diagnostics, e.g. 'host:3 relay:1'."""
-        import re
-        from collections import Counter
-
-        types = re.findall(r"a=candidate:.*? typ (\w+)", sdp or "")
-        c = Counter(types)
+        c = Counter(_re.findall(r"a=candidate:.*? typ (\w+)", sdp or ""))
         return " ".join(f"{t}:{n}" for t, n in c.items()) or "none"
+
+    @classmethod
+    def _log_sdp(cls, label: str, sdp: str) -> None:
+        """Log an SDP's candidate and media summaries."""
+        logger.info("%s candidates: %s", label, cls._sdp_candidates(sdp))
+        logger.info("%s media: %s", label, cls._sdp_media(sdp))
 
     @staticmethod
     def _sdp_media(sdp: str) -> str:
@@ -979,6 +991,14 @@ class CallManager:
             await asyncio.wait_for(ice_done.wait(), timeout=_ICE_GATHER_TIMEOUT_S)
         logger.debug("ICE gathering state: %s", pc.iceGatheringState)
 
+    @staticmethod
+    async def _wait_for_connection(pc, timeout_s: float) -> None:
+        """Poll until the connection settles (connected/failed/closed) or timeout."""
+        for _ in range(round(timeout_s / 0.1)):
+            if pc.connectionState in ("connected", "failed", "closed"):
+                return
+            await asyncio.sleep(0.1)
+
     def _register_session(
         self,
         pc,
@@ -1031,15 +1051,11 @@ class CallManager:
         await pc.setRemoteDescription(
             RTCSessionDescription(type="offer", sdp=sdp_offer)
         )
-        logger.info("Incoming offer candidates: %s", self._sdp_candidates(sdp_offer))
-        logger.info("Incoming offer media: %s", self._sdp_media(sdp_offer))
+        self._log_sdp("Incoming offer", sdp_offer)
         pc.addTrack(out_track)
         await pc.setLocalDescription(await pc.createAnswer())
         await self._gather_ice(pc)
-        logger.info(
-            "Our answer candidates: %s", self._sdp_candidates(pc.localDescription.sdp)
-        )
-        logger.info("Our answer media: %s", self._sdp_media(pc.localDescription.sdp))
+        self._log_sdp("Our answer", pc.localDescription.sdp)
 
         await self._adapter.rpc.accept_incoming_call(
             self._adapter.account_id,
@@ -1084,18 +1100,12 @@ class CallManager:
                 self._adapter.account_id, int(chat_id)
             )
             for cid in ids or []:
-                if int(cid) == 1:  # SpecialContactId.SELF
+                if int(cid) == _DC_CONTACT_ID_SELF:
                     continue
                 contact = await self._adapter.rpc.get_contact(
                     self._adapter.account_id, int(cid)
                 )
-                name = (
-                    contact.get("name")
-                    or contact.get("display_name")
-                    or contact.get("name_and_addr")
-                    or f"Contact {cid}"
-                )
-                return str(cid), name
+                return str(cid), _contact_name(contact, f"Contact {cid}")
         except Exception as e:
             logger.debug("Could not resolve chat contact: %s", e)
         return "user", "User"
@@ -1135,10 +1145,7 @@ class CallManager:
         # Our offer out (ICE gathered) → place the call to get the msg_id.
         await pc.setLocalDescription(await pc.createOffer())
         await self._gather_ice(pc)
-        logger.info(
-            "Our offer candidates: %s", self._sdp_candidates(pc.localDescription.sdp)
-        )
-        logger.info("Our offer media: %s", self._sdp_media(pc.localDescription.sdp))
+        self._log_sdp("Our offer", pc.localDescription.sdp)
         msg_id = int(
             await self._adapter.rpc.place_outgoing_call(
                 self._adapter.account_id,
@@ -1206,8 +1213,7 @@ class CallManager:
                 )
             raise
 
-        logger.info("Remote answer candidates: %s", self._sdp_candidates(sdp_answer))
-        logger.info("Remote answer media: %s", self._sdp_media(sdp_answer))
+        self._log_sdp("Remote answer", sdp_answer)
         await pc.setRemoteDescription(
             RTCSessionDescription(type="answer", sdp=sdp_answer)
         )
@@ -1218,10 +1224,7 @@ class CallManager:
         # for the full ICE timeout — DC answers already carry candidates, so
         # 'connected' is normally reached in well under a second. The opening +
         # remaining setup then run in the background on the call loop.
-        for _ in range(20):  # up to ~2 s
-            if pc.connectionState in ("connected", "failed", "closed"):
-                break
-            await asyncio.sleep(0.1)
+        await self._wait_for_connection(pc, 2.0)
         if pc.connectionState in ("failed", "closed"):
             await self._teardown_session(msg_id)
             raise RuntimeError(f"call failed to connect (state={pc.connectionState})")
@@ -1270,10 +1273,7 @@ class CallManager:
         """
         # In the rare case the connection was still 'connecting' at the 2 s
         # cutoff, give it the rest of the ICE budget before speaking.
-        for _ in range(130):  # up to ~13 s more
-            if pc.connectionState in ("connected", "failed", "closed"):
-                break
-            await asyncio.sleep(0.1)
+        await self._wait_for_connection(pc, 13.0)
         logger.info(
             "Outgoing call %s connection state after ICE wait: %s",
             msg_id,
@@ -1341,14 +1341,7 @@ class CallManager:
         """
         from gateway.platforms.base import MessageEvent, MessageType
 
-        source = self._adapter.build_source(
-            chat_id=chat_id,
-            chat_name=f"Call {chat_id}",
-            chat_type="dm",
-            user_id=caller_id,
-            user_name=caller_name,
-            thread_id=_CALL_THREAD_ID,
-        )
+        source = self._call_source(chat_id, caller_id, caller_name)
 
         event = MessageEvent(
             text="[Call started]",
@@ -1460,21 +1453,16 @@ class CallManager:
         if _CALL_STT_VOXTRAL:
             return
         try:
-            import io
-            import wave as _wave
             from tools.transcription_tools import transcribe_audio
 
-            # Create a 0.5 s silence WAV in memory and write to a temp file
-            buf = io.BytesIO()
-            with _wave.open(buf, "wb") as wf:
+            tmp_path = os.path.join(
+                self._get_hermes_home(), "audio_cache", "_warmup.wav"
+            )
+            with wave.open(tmp_path, "wb") as wf:
                 wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(16000)
-                wf.writeframes(b"\x00" * 16000)  # 0.5 s of silence
-            tmp = self._get_hermes_home()
-            tmp_path = os.path.join(tmp, "audio_cache", "_warmup.wav")
-            with open(tmp_path, "wb") as f:
-                f.write(buf.getvalue())
+                wf.setsampwidth(_BYTES_PER_SAMPLE)
+                wf.setframerate(_STT_RATE)
+                wf.writeframes(b"\x00" * (_STT_BYTES_PER_SEC // 2))  # 0.5 s of silence
             logger.info("Pre-warming Whisper medium model...")
             await asyncio.to_thread(transcribe_audio, tmp_path, "medium")
             logger.info("Whisper model ready")
@@ -1552,18 +1540,12 @@ class CallManager:
 
         # First real user turn — the post-dc_start_call ack window is over, so a
         # never-consumed suppression can't eat a genuine spoken reply.
-        self._drop_call_ack.pop(chat_id, None)
+        with self._state_lock:
+            self._drop_call_ack.pop(chat_id, None)
 
         from gateway.platforms.base import MessageEvent, MessageType
 
-        source = self._adapter.build_source(
-            chat_id=chat_id,
-            chat_name=f"Call {chat_id}",
-            chat_type="dm",
-            user_id=caller_id,
-            user_name=caller_name,
-            thread_id=_CALL_THREAD_ID,  # isolate call session from text DM (unless shared)
-        )
+        source = self._call_source(chat_id, caller_id, caller_name)
         # MessageType.TEXT since we already did STT — Hermes won't re-transcribe.
         # channel_prompt is an ephemeral per-message system prompt (applied at
         # API-call time, never persisted) — used to keep spoken replies short.
@@ -1806,18 +1788,10 @@ class CallManager:
         """
         from gateway.platforms.base import MessageEvent, MessageType
 
+        caller_id, caller_name = caller_id or "user", caller_name or "User"
         with self._state_lock:
-            self._drop_next_response[chat_id] = (
-                self._drop_next_response.get(chat_id, 0) + 1
-            )
-        source = self._adapter.build_source(
-            chat_id=chat_id,
-            chat_name=f"Call {chat_id}",
-            chat_type="dm",
-            user_id=caller_id or "user",
-            user_name=caller_name or "User",
-            thread_id=_CALL_THREAD_ID,
-        )
+            self._drop_next_response[chat_id] += 1
+        source = self._call_source(chat_id, caller_id, caller_name)
         event = MessageEvent(
             text="[The voice call has ended — you are no longer connected to the user "
             "by voice. Acknowledge to yourself; do not produce a spoken reply.]",
@@ -1836,16 +1810,9 @@ class CallManager:
         # mode already uses thread_id=None above, so skip the duplicate.
         if _CALL_THREAD_ID is not None:
             with self._state_lock:
-                self._drop_next_response[chat_id] = (
-                    self._drop_next_response.get(chat_id, 0) + 1
-                )
-            main_source = self._adapter.build_source(
-                chat_id=chat_id,
-                chat_name=f"Call {chat_id}",
-                chat_type="dm",
-                user_id=caller_id or "user",
-                user_name=caller_name or "User",
-                thread_id=None,
+                self._drop_next_response[chat_id] += 1
+            main_source = self._call_source(
+                chat_id, caller_id, caller_name, thread_id=None
             )
             main_event = MessageEvent(
                 text="[A voice call with the user has just ended. Do not call back right now.]",
@@ -1896,14 +1863,8 @@ class CallManager:
         opening already covers the first thing said, so this avoids speaking a
         meta "call connected" line over it. Shared-history mode only (separate
         mode routes that line out as text). One-shot per placed call."""
-        n = self._drop_call_ack.get(chat_id, 0)
-        if n <= 0:
-            return False
-        if n == 1:
-            del self._drop_call_ack[chat_id]
-        else:
-            self._drop_call_ack[chat_id] = n - 1
-        return True
+        with self._state_lock:
+            return _take_one(self._drop_call_ack, chat_id)
 
     def consume_drop_response(self, chat_id: str) -> bool:
         """True if the next send() to chat_id should be suppressed (call-ended note reply).
@@ -1912,18 +1873,29 @@ class CallManager:
         the counter may be 2. Each send() call decrements once.
         """
         with self._state_lock:
-            count = self._drop_next_response.get(chat_id, 0)
-            if count <= 0:
-                return False
-            if count == 1:
-                del self._drop_next_response[chat_id]
-            else:
-                self._drop_next_response[chat_id] = count - 1
-            return True
+            return _take_one(self._drop_next_response, chat_id)
 
     # ------------------------------------------------------------------ #
     # Helpers                                                             #
     # ------------------------------------------------------------------ #
+
+    def _call_source(
+        self, chat_id: str, caller_id: str, caller_name: str, thread_id=_CALL_THREAD_ID
+    ):
+        """Hermes source for a call turn.
+
+        The default thread_id isolates the call session from the text DM
+        (unless DELTACHAT_CALL_SHARED_HISTORY is set); pass None to address the
+        main text-chat session.
+        """
+        return self._adapter.build_source(
+            chat_id=chat_id,
+            chat_name=f"Call {chat_id}",
+            chat_type="dm",
+            user_id=caller_id,
+            user_name=caller_name,
+            thread_id=thread_id,
+        )
 
     def _get_hermes_home(self) -> str:
         try:

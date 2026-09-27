@@ -334,3 +334,14 @@ class TestDecodeTts:
         total = sum(f.samples for f in frames)
         expected = seconds * ch._SAMPLE_RATE  # 48 kHz target
         assert abs(total - expected) < ch.HermesAudioTrack._FRAME_SAMPLES * 2
+
+
+class TestTakeOne:
+    def test_decrements_then_removes(self):
+        from collections import Counter
+
+        c = Counter({"a": 2})
+        assert ch._take_one(c, "a") is True
+        assert ch._take_one(c, "a") is True
+        assert ch._take_one(c, "a") is False
+        assert "a" not in c

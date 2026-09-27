@@ -18,7 +18,7 @@ from adapter import (
     _async_retry,
     _cfg,
     _is_valid_email,
-    _parse_chatmail_servers,
+    _parse_csv_unique,
     _parse_email_list,
     _safe_data_dir,
     _split_message,
@@ -262,16 +262,16 @@ class TestParseEmailList:
 
 class TestParseChatmailServers:
     def test_basic(self):
-        assert _parse_chatmail_servers("a.com, b.com, a.com") == ["a.com", "b.com"]
+        assert _parse_csv_unique("a.com, b.com, a.com") == ["a.com", "b.com"]
 
     def test_empty(self):
-        assert _parse_chatmail_servers("") == []
+        assert _parse_csv_unique("") == []
 
     def test_whitespace_trimmed(self):
-        assert _parse_chatmail_servers(" a.com , b.com ") == ["a.com", "b.com"]
+        assert _parse_csv_unique(" a.com , b.com ") == ["a.com", "b.com"]
 
     def test_case_preserved(self):
-        assert _parse_chatmail_servers("A.com, a.com") == ["A.com"]
+        assert _parse_csv_unique("A.com, a.com") == ["A.com"]
 
 
 class TestSafeDataDir:
@@ -613,3 +613,110 @@ class TestUnmentionedGroupMessageIsSilent:
 
         assert result is True
         adapter.send.assert_not_called()
+
+
+class TestSharedHelpers:
+    """Helpers extracted from duplicated call sites."""
+
+    def test_is_destructive(self):
+        from adapter import _is_destructive
+
+        assert _is_destructive("delete_chat")
+        assert _is_destructive("remove_contact_from_chat")
+        assert _is_destructive("leave_group")
+        assert not _is_destructive("get_chat_contacts")
+
+    def test_bounded_int(self):
+        from adapter import _bounded_int
+
+        assert _bounded_int("150", 100, 10000) == 150
+        assert _bounded_int(100, 100, 10000) == 100
+        assert _bounded_int("99", 100, 10000) is None
+        assert _bounded_int("abc", 100, 10000) is None
+        assert _bounded_int(None, 1, 2) is None
+
+    def test_invalid_message_limits_fall_back_to_defaults(
+        self, platform_config, monkeypatch
+    ):
+        monkeypatch.delenv("DELTACHAT_MAX_MESSAGE_LENGTH", raising=False)
+        monkeypatch.delenv("DELTACHAT_MAX_MESSAGE_LINES", raising=False)
+        platform_config.extra = {"max_message_length": "5", "max_message_lines": "x"}
+        adapter = DeltaChatAdapter(platform_config)
+        assert adapter._max_message_len == DC_MESSAGE_MAX_LEN
+        assert adapter._max_message_lines == DC_MESSAGE_MAX_LINES
+
+    def test_validate_config_rejects_out_of_bounds_limit(
+        self, platform_config, monkeypatch
+    ):
+        import adapter as adapter_mod
+
+        monkeypatch.delenv("DELTACHAT_MAX_MESSAGE_LINES", raising=False)
+        monkeypatch.setattr(adapter_mod, "check_requirements", lambda: True)
+        platform_config.extra = {"max_message_lines": "500"}
+        with pytest.raises(ValueError, match="DELTACHAT_MAX_MESSAGE_LINES"):
+            adapter_mod.validate_config(platform_config)
+
+    @pytest.mark.asyncio
+    async def test_gate_inbound_accepts_contact_request(
+        self, platform_config, mock_rpc
+    ):
+        platform_config.extra = {"dm_policy": "open"}
+        adapter = DeltaChatAdapter(platform_config)
+        adapter.rpc, adapter.account_id = mock_rpc, 1
+        mock_rpc.get_contact = AsyncMock(return_value={"address": "u@example.com"})
+        mock_rpc.get_basic_chat_info = AsyncMock(
+            return_value={"chat_type": "Single", "is_contact_request": True}
+        )
+        mock_rpc.accept_chat = AsyncMock()
+
+        assert await adapter._gate_inbound(5, 1, 7) is True
+        mock_rpc.accept_chat.assert_awaited_once_with(1, 5)
+
+    @pytest.mark.asyncio
+    async def test_gate_inbound_rejected_group_invite_is_left_silently(
+        self, platform_config, mock_rpc
+    ):
+        platform_config.extra = {"group_policy": "disabled"}
+        adapter = DeltaChatAdapter(platform_config)
+        adapter.rpc, adapter.account_id = mock_rpc, 1
+        adapter.send = AsyncMock()
+        mock_rpc.get_contact = AsyncMock(return_value={"address": "u@example.com"})
+        mock_rpc.get_basic_chat_info = AsyncMock(
+            return_value={"chat_type": "Group", "is_contact_request": True}
+        )
+        mock_rpc.leave_group = AsyncMock()
+        mock_rpc.accept_chat = AsyncMock()
+
+        assert await adapter._gate_inbound(5, 2, 7) is False
+        mock_rpc.leave_group.assert_awaited_once_with(1, 5)
+        mock_rpc.accept_chat.assert_not_called()
+        adapter.send.assert_not_called()
+        assert adapter._stats == {"messages_rejected": 1}
+
+    @pytest.mark.asyncio
+    async def test_send_voice_uses_voice_viewtype_and_counts(
+        self, platform_config, mock_rpc, tmp_path
+    ):
+        audio = tmp_path / "v.ogg"
+        audio.write_bytes(b"ogg")
+        adapter = DeltaChatAdapter(platform_config)
+        adapter.rpc, adapter.account_id = mock_rpc, 1
+        mock_rpc.send_msg = AsyncMock(return_value=9)
+
+        result = await adapter.send_voice("3", str(audio), caption="hi")
+
+        assert result.success is True and result.message_id == "9"
+        msg = mock_rpc.send_msg.await_args.args[2]
+        assert msg.viewtype.name == "VOICE" and msg.file == str(audio)
+        assert adapter._stats == {"voices_sent": 1}
+
+    @pytest.mark.asyncio
+    async def test_send_file_failure_counts(self, platform_config, mock_rpc):
+        adapter = DeltaChatAdapter(platform_config)
+        adapter.rpc, adapter.account_id = mock_rpc, 1
+        mock_rpc.send_msg = AsyncMock(side_effect=RuntimeError("boom"))
+
+        result = await adapter.send_file("3", "/x.pdf", reply_to="4")
+
+        assert result.success is False and "boom" in result.error
+        assert adapter._stats == {"files_send_failed": 1}

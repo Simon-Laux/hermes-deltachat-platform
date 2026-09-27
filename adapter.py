@@ -67,6 +67,17 @@ _MAX_IMAGE_SIZE = 25 * 1024 * 1024
 
 _EMAIL_RE = re.compile(r"^[^\s@]+@[^\s@]+\.[^\s@]+$")
 
+# Delta Chat's reserved contact id for the account itself.
+DC_CONTACT_ID_SELF = 1
+
+_WORKSPACE_PREFIX = "/workspace/"
+_XDC_MEDIA_RE = re.compile(
+    r'[`"\']?MEDIA:\s*[`"\']?((?:~/|/)[\w./\- ]+\.xdc)[`"\']?', re.IGNORECASE
+)
+_XDC_WORKSPACE_PATH_RE = re.compile(
+    r"(?<![/:\w.])(/workspace/[\w./\-]+\.xdc)\b", re.IGNORECASE
+)
+
 
 def _cfg(config, env: str, key: str, default: str = "") -> str:
     """Read platform config: env var takes precedence over config.extra."""
@@ -78,6 +89,55 @@ def _cfg(config, env: str, key: str, default: str = "") -> str:
     if isinstance(val, bool):
         val = "true" if val else "false"
     return val if val is not None else default
+
+
+def _cfg_bool(config, env: str, key: str, default: str = "false") -> bool:
+    """Read a boolean platform config value ("1"/"true"/"yes" are truthy)."""
+    return str(_cfg(config, env, key, default)).lower() in ("1", "true", "yes")
+
+
+# (env var, config.extra key, default, min, max) — shared by the adapter
+# constructor (warn + default) and validate_config (raise).
+_MAX_LEN_CFG = (
+    "DELTACHAT_MAX_MESSAGE_LENGTH",
+    "max_message_length",
+    DC_MESSAGE_MAX_LEN,
+    100,
+    10000,
+)
+_MAX_LINES_CFG = (
+    "DELTACHAT_MAX_MESSAGE_LINES",
+    "max_message_lines",
+    DC_MESSAGE_MAX_LINES,
+    1,
+    200,
+)
+
+
+def _bounded_int(raw, lo: int, hi: int) -> Optional[int]:
+    """Return int(raw) if it parses and lies within [lo, hi], else None."""
+    try:
+        val = int(raw)
+    except (TypeError, ValueError):
+        return None
+    return val if lo <= val <= hi else None
+
+
+def _cfg_bounded_int(config, env: str, key: str, default: int, lo: int, hi: int) -> int:
+    """Read an int config value; fall back to *default* if invalid or out of range."""
+    raw = _cfg(config, env, key, str(default))
+    val = _bounded_int(raw, lo, hi)
+    if val is None:
+        logger.warning(
+            "%s %r invalid or out of bounds (%d-%d), using default %s",
+            env,
+            raw,
+            lo,
+            hi,
+            default,
+        )
+        return default
+    return val
 
 
 _TABLE_DELIM_RE = re.compile(r"^\s*\|?\s*:?-{1,}:?\s*(\|\s*:?-{1,}:?\s*)*\|?\s*$")
@@ -313,7 +373,6 @@ def _check_dc2_available():
             import deltachat2
 
             _DC2_AVAILABLE = True
-            return True
         except ImportError:
             _DC2_AVAILABLE = False
     return _DC2_AVAILABLE
@@ -393,13 +452,15 @@ def _parse_email_list(raw: str) -> set:
     return {e.strip().lower() for e in raw.split(",") if e.strip()}
 
 
-def _parse_chatmail_servers(raw: str) -> list[str]:
-    """Return a list of non-empty, trimmed chatmail server hostnames."""
-    servers = [s.strip() for s in raw.split(",") if s.strip()]
-    # Remove duplicate hostnames while preserving order.
+def _parse_csv_unique(raw: str) -> list[str]:
+    """Split a comma-separated string into trimmed, non-empty items.
+
+    Case-insensitive duplicates are dropped; first spelling and order win.
+    """
+    items = [s.strip() for s in raw.split(",") if s.strip()]
     seen: set[str] = set()
     unique: list[str] = []
-    for s in servers:
+    for s in items:
         key = s.lower()
         if key not in seen:
             seen.add(key)
@@ -425,6 +486,16 @@ def _build_mention_pattern(name: str) -> Optional[re.Pattern]:
     stem = name[:-1]
     core = re.escape(stem) + r"\w{0,2}" if len(stem) >= 3 else re.escape(name)
     return re.compile(rf"(?:^|\W)@{core}(?:\W|$)", re.IGNORECASE)
+
+
+def _contact_name(contact: dict, fallback: str) -> str:
+    """Best display name from a ``get_contact`` snapshot."""
+    return (
+        contact.get("name")
+        or contact.get("display_name")
+        or contact.get("name_and_addr")
+        or fallback
+    )
 
 
 class _RateLimiter:
@@ -544,6 +615,11 @@ _DESTRUCTIVE_METHODS = frozenset(
         "leave_group",
     }
 )
+
+
+def _is_destructive(method: str) -> bool:
+    """Whether an RPC method may mutate or destroy chat data (always blocked)."""
+    return method in _DESTRUCTIVE_METHODS or method.startswith(("delete_", "remove_"))
 
 
 def _parse_method_list(value: Optional[str]) -> frozenset:
@@ -680,111 +756,52 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._dc_config_dir: Optional[str] = None
         self._call_manager = None
 
-        extra = getattr(config, "extra", {}) or {}
+        cfg = functools.partial(_cfg, config)
+        cfg_bool = functools.partial(_cfg_bool, config)
 
-        def g(env, key, default=""):
-            val = os.getenv(env)
-            if val:
-                return val
-            val = extra.get(key, default)
-            if isinstance(val, bool):
-                val = "true" if val else "false"
-            return val
-
-        allow_all = g(
-            "DELTACHAT_ALLOW_ALL_USERS", "allow_all_users", "false"
-        ).lower() in (
-            "1",
-            "true",
-            "yes",
-        )
-        raw_allowed = g("DELTACHAT_ALLOWED_USERS", "allowed_users")
+        allow_all = cfg_bool("DELTACHAT_ALLOW_ALL_USERS", "allow_all_users")
         self._allowed_users = (
             set()
             if allow_all
-            else (_parse_email_list(raw_allowed) if raw_allowed else set())
+            else _parse_email_list(cfg("DELTACHAT_ALLOWED_USERS", "allowed_users"))
         )
 
-        self._dm_policy = g("DELTACHAT_DM_POLICY", "dm_policy", "pairing")
-        raw_dm_allow = g("DELTACHAT_DM_ALLOWED_USERS", "dm_allowed_users")
-        self._dm_allow_from = _parse_email_list(raw_dm_allow) if raw_dm_allow else set()
-
-        self._group_policy = g("DELTACHAT_GROUP_POLICY", "group_policy", "open")
-        raw_group_allow = g("DELTACHAT_GROUP_ALLOWED_USERS", "group_allowed_users")
-        self._group_allow_from = (
-            _parse_email_list(raw_group_allow) if raw_group_allow else set()
+        self._dm_policy = cfg("DELTACHAT_DM_POLICY", "dm_policy", "pairing")
+        self._dm_allow_from = _parse_email_list(
+            cfg("DELTACHAT_DM_ALLOWED_USERS", "dm_allowed_users")
         )
 
-        self._send_rejection_replies = g(
+        self._group_policy = cfg("DELTACHAT_GROUP_POLICY", "group_policy", "open")
+        self._group_allow_from = _parse_email_list(
+            cfg("DELTACHAT_GROUP_ALLOWED_USERS", "group_allowed_users")
+        )
+
+        self._send_rejection_replies = cfg_bool(
             "DELTACHAT_SEND_REJECTION_REPLIES", "send_rejection_replies", "true"
-        ).lower() in ("1", "true", "yes")
+        )
 
         self._seen_ids = _MessageCache(max_size=1000)
         self._rate_limiter = _RateLimiter(
-            max_calls=int(g("DELTACHAT_RATE_LIMIT_MAX", "rate_limit_max", "30")),
+            max_calls=int(cfg("DELTACHAT_RATE_LIMIT_MAX", "rate_limit_max", "30")),
             window_seconds=float(
-                g("DELTACHAT_RATE_LIMIT_WINDOW", "rate_limit_window", "60")
+                cfg("DELTACHAT_RATE_LIMIT_WINDOW", "rate_limit_window", "60")
             ),
         )
 
-        try:
-            max_message_len = int(
-                g(
-                    "DELTACHAT_MAX_MESSAGE_LENGTH",
-                    "max_message_length",
-                    str(DC_MESSAGE_MAX_LEN),
-                )
-            )
-        except ValueError:
-            max_message_len = DC_MESSAGE_MAX_LEN
-        if max_message_len < 100 or max_message_len > 10000:
-            logger.warning(
-                "DELTACHAT_MAX_MESSAGE_LENGTH %s out of bounds (100-10000), "
-                "using default %s",
-                max_message_len,
-                DC_MESSAGE_MAX_LEN,
-            )
-            max_message_len = DC_MESSAGE_MAX_LEN
-        self._max_message_len = max_message_len
+        self._max_message_len = _cfg_bounded_int(config, *_MAX_LEN_CFG)
+        self._max_message_lines = _cfg_bounded_int(config, *_MAX_LINES_CFG)
 
-        try:
-            max_message_lines = int(
-                g(
-                    "DELTACHAT_MAX_MESSAGE_LINES",
-                    "max_message_lines",
-                    str(DC_MESSAGE_MAX_LINES),
-                )
+        self._require_mention = cfg_bool("DELTACHAT_REQUIRE_MENTION", "require_mention")
+        self._free_response_channels = set(
+            _parse_csv_unique(
+                cfg("DELTACHAT_FREE_RESPONSE_CHANNELS", "free_response_channels")
             )
-        except ValueError:
-            max_message_lines = DC_MESSAGE_MAX_LINES
-        if max_message_lines < 1 or max_message_lines > 200:
-            logger.warning(
-                "DELTACHAT_MAX_MESSAGE_LINES %s out of bounds (1-200), "
-                "using default %s",
-                max_message_lines,
-                DC_MESSAGE_MAX_LINES,
-            )
-            max_message_lines = DC_MESSAGE_MAX_LINES
-        self._max_message_lines = max_message_lines
-
-        self._require_mention = g(
-            "DELTACHAT_REQUIRE_MENTION", "require_mention", "false"
-        ).lower() in ("1", "true", "yes")
-        raw_free_response = g(
-            "DELTACHAT_FREE_RESPONSE_CHANNELS", "free_response_channels"
-        )
-        self._free_response_channels = (
-            _parse_email_list(raw_free_response) if raw_free_response else set()
         )
 
         # Guards against bot-to-bot auto-reply loops (e.g. multiple agents in
         # one group replying to each other forever). <=0 disables the guard.
         self._max_consecutive_replies = int(
-            g(
-                "DELTACHAT_MAX_CONSECUTIVE_REPLIES",
-                "max_consecutive_replies",
-                "20",
-            )
+            cfg("DELTACHAT_MAX_CONSECUTIVE_REPLIES", "max_consecutive_replies", "20")
         )
         self._reply_streak: dict[str, tuple[str, int, bool]] = {}
 
@@ -793,22 +810,21 @@ class DeltaChatAdapter(BasePlatformAdapter):
         # address. Only active when DELTACHAT_HUMAN_USERS is set — with no
         # human addresses configured there is no way to detect a "check-in",
         # so the guard stays off rather than trip on every message.
-        raw_human = g("DELTACHAT_HUMAN_USERS", "human_users")
-        self._human_users = _parse_email_list(raw_human) if raw_human else set()
+        self._human_users = _parse_email_list(
+            cfg("DELTACHAT_HUMAN_USERS", "human_users")
+        )
         self._max_bot_exchanges = int(
-            g("DELTACHAT_MAX_BOT_EXCHANGES", "max_bot_exchanges", "12")
+            cfg("DELTACHAT_MAX_BOT_EXCHANGES", "max_bot_exchanges", "12")
         )
         self._bot_exchange_streak: dict[str, tuple[int, bool]] = {}
-        self._display_name = g("DELTACHAT_DISPLAY_NAME", "display_name", "Hermes")
-        raw_mention_aliases = g("DELTACHAT_MENTION_ALIASES", "mention_aliases")
-        self._mention_aliases = (
-            _parse_chatmail_servers(raw_mention_aliases) if raw_mention_aliases else []
+        self._display_name = cfg("DELTACHAT_DISPLAY_NAME", "display_name", "Hermes")
+        self._mention_aliases = _parse_csv_unique(
+            cfg("DELTACHAT_MENTION_ALIASES", "mention_aliases")
         )
         self._mention_patterns = [
             p
-            for p in (
-                _build_mention_pattern(n)
-                for n in (self._display_name, *self._mention_aliases)
+            for p in map(
+                _build_mention_pattern, (self._display_name, *self._mention_aliases)
             )
             if p is not None
         ]
@@ -851,7 +867,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
             return cached[1] if cached else []
         roster = []
         for cid in contact_ids:
-            if cid == 1:  # DC_CONTACT_ID_SELF
+            if cid == DC_CONTACT_ID_SELF:
                 continue
             try:
                 contact = await self.rpc.get_contact(self.account_id, int(cid))
@@ -995,7 +1011,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
         if msg_id:
             try:
                 quoted = await self.rpc.get_message(self.account_id, int(msg_id))
-                if quoted and quoted.get("from_id") == 1:  # DC_CONTACT_ID_SELF
+                if quoted and quoted.get("from_id") == DC_CONTACT_ID_SELF:
                     return True
             except Exception as e:
                 logger.debug("Could not fetch quoted message %s: %s", msg_id, e)
@@ -1112,12 +1128,9 @@ class DeltaChatAdapter(BasePlatformAdapter):
 
         if self._allowed_users and sender_email not in self._allowed_users:
             logger.warning("Rejected %s (not in allowed_users)", sender_email)
-            self._bump_stat("messages_rejected")
-            if self._send_rejection_replies:
-                await self.send(
-                    str(chat_id), "Sorry, you are not authorized to use this bot."
-                )
-            return False
+            return await self._reject(
+                chat_id, "Sorry, you are not authorized to use this bot."
+            )
 
         try:
             chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
@@ -1131,37 +1144,38 @@ class DeltaChatAdapter(BasePlatformAdapter):
             reason = self._check_dm(sender_email, is_verified)
             if reason:
                 logger.warning("dm_policy rejected %s", sender_email)
-                self._bump_stat("messages_rejected")
-                if self._send_rejection_replies:
-                    await self.send(str(chat_id), reason)
-                return False
-            if is_request:
-                try:
-                    await self.rpc.accept_chat(self.account_id, int(chat_id))
-                except Exception as e:
-                    logger.warning("accept_chat failed: %s", e)
-
+                return await self._reject(chat_id, reason)
         elif chat_type == "Group":
             reason = self._check_group(sender_email)
             if reason:
                 logger.warning("group_policy rejected %s", sender_email)
-                self._bump_stat("messages_rejected")
-                if is_request:
-                    try:
-                        await self.rpc.leave_group(self.account_id, int(chat_id))
-                    except Exception as e:
-                        logger.warning("leave_group failed: %s", e)
-                elif self._send_rejection_replies:
-                    await self.send(str(chat_id), reason)
-                return False
-            if is_request:
+                if not is_request:
+                    return await self._reject(chat_id, reason)
+                # An unaccepted invite: leave instead of replying into it.
                 try:
-                    await self.rpc.accept_chat(self.account_id, int(chat_id))
+                    await self.rpc.leave_group(self.account_id, int(chat_id))
                 except Exception as e:
-                    logger.warning("accept_chat failed: %s", e)
+                    logger.warning("leave_group failed: %s", e)
+                return await self._reject(chat_id, None)
+
+        if is_request and chat_type in ("Single", "Group"):
+            try:
+                await self.rpc.accept_chat(self.account_id, int(chat_id))
+            except Exception as e:
+                logger.warning("accept_chat failed: %s", e)
 
         self._bump_stat("messages_received")
         return True
+
+    async def _reject(self, chat_id, reply: Optional[str]) -> bool:
+        """Count a rejected inbound message and send *reply* if configured.
+
+        Always returns False so callers can ``return await self._reject(...)``.
+        """
+        self._bump_stat("messages_rejected")
+        if reply and self._send_rejection_replies:
+            await self.send(str(chat_id), reply)
+        return False
 
     def _get_dc_config_dir(self) -> str:
         """Get Delta Chat config directory path.
@@ -1216,11 +1230,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
 
         try:
             import deltachat2
-        except ImportError as e:
-            logger.error(f"Failed to import deltachat2: {e}")
-            return False
 
-        try:
             # Get config directory
             dc_accounts_path = self._get_dc_config_dir()
             logger.debug(f"Using DC accounts directory: {dc_accounts_path}")
@@ -1517,6 +1527,44 @@ class DeltaChatAdapter(BasePlatformAdapter):
             self._bump_stat("messages_send_failed")
             return self._send_result(chat_id, None, error=str(e))
 
+    async def _send_msg_data(
+        self,
+        chat_id: str,
+        stat: str,
+        what: str,
+        reply_to: Optional[str] = None,
+        **fields,
+    ) -> SendResult:
+        """Send one ``MsgData`` built from *fields*, with retry.
+
+        Shared tail of the ``send_*`` attachment methods. *stat* prefixes the
+        ``<stat>_sent`` / ``<stat>_send_failed`` counters; *what* names the
+        payload in log lines.
+        """
+        try:
+            if not self.rpc or not self.account_id:
+                return self._send_result(
+                    chat_id, None, error="Delta Chat not connected"
+                )
+
+            from deltachat2.types import MsgData
+
+            msg_data = MsgData(
+                quoted_message_id=int(reply_to) if reply_to else None, **fields
+            )
+            msg_id = await _async_retry(
+                lambda: self.rpc.send_msg(self.account_id, int(chat_id), msg_data),
+                max_attempts=2,
+                base_delay=0.5,
+            )
+            logger.debug("Sent %s as message %s to chat %s", what, msg_id, chat_id)
+            self._bump_stat(f"{stat}_sent")
+            return self._send_result(chat_id, msg_id)
+        except Exception as e:
+            logger.error("Error sending %s to chat %s: %s", what, chat_id, e)
+            self._bump_stat(f"{stat}_send_failed")
+            return self._send_result(chat_id, None, error=str(e))
+
     async def send_file(
         self,
         chat_id: str,
@@ -1531,36 +1579,14 @@ class DeltaChatAdapter(BasePlatformAdapter):
         DC core auto-detects the viewtype from the extension — .xdc files
         are delivered as webxdc apps without any special handling here.
         """
-        try:
-            if not self.rpc or not self.account_id:
-                return self._send_result(
-                    chat_id, None, error="Delta Chat not connected"
-                )
-
-            from deltachat2.types import MsgData
-
-            async def _do_send():
-                return await self.rpc.send_msg(
-                    self.account_id,
-                    int(chat_id),
-                    MsgData(
-                        file=file_path,
-                        text=caption or "",
-                        quoted_message_id=int(reply_to) if reply_to else None,
-                    ),
-                )
-
-            msg_id = await _async_retry(_do_send, max_attempts=2, base_delay=0.5)
-            logger.debug(
-                "Sent file %s as message %s to chat %s", file_path, msg_id, chat_id
-            )
-            self._bump_stat("files_sent")
-            return self._send_result(chat_id, msg_id)
-
-        except Exception as e:
-            logger.error("Error sending file %s to chat %s: %s", file_path, chat_id, e)
-            self._bump_stat("files_send_failed")
-            return self._send_result(chat_id, None, error=str(e))
+        return await self._send_msg_data(
+            chat_id,
+            "files",
+            f"file {file_path}",
+            reply_to,
+            file=file_path,
+            text=caption or "",
+        )
 
     async def send_document(
         self,
@@ -1660,38 +1686,26 @@ class DeltaChatAdapter(BasePlatformAdapter):
         """
         tmp_path: Optional[str] = None
         try:
-            if not self.rpc or not self.account_id:
-                return self._send_result(
-                    chat_id, None, error="Delta Chat not connected"
-                )
+            from deltachat2.types import MessageViewtype
 
-            if image_path.startswith(("http://", "https://")):
+            # Skip the download when disconnected; _send_msg_data reports that.
+            if (
+                self.rpc
+                and self.account_id
+                and image_path.startswith(("http://", "https://"))
+            ):
                 tmp_path = await self._download_image_url(image_path)
-                file_path = tmp_path
-            else:
-                file_path = image_path
-
-            from deltachat2.types import MsgData, MessageViewtype
-
-            async def _do_send():
-                return await self.rpc.send_msg(
-                    self.account_id,
-                    int(chat_id),
-                    MsgData(
-                        file=file_path,
-                        text=caption or "",
-                        viewtype=MessageViewtype.IMAGE,
-                        quoted_message_id=int(reply_to) if reply_to else None,
-                    ),
-                )
-
-            msg_id = await _async_retry(_do_send, max_attempts=2, base_delay=0.5)
-            logger.debug(
-                "Sent image %s as message %s to chat %s", image_path, msg_id, chat_id
+            return await self._send_msg_data(
+                chat_id,
+                "images",
+                f"image {image_path}",
+                reply_to,
+                file=tmp_path or image_path,
+                text=caption or "",
+                viewtype=MessageViewtype.IMAGE,
             )
-            self._bump_stat("images_sent")
-            return self._send_result(chat_id, msg_id)
         except Exception as e:
+            # Download/validation failures; _send_msg_data handles its own.
             logger.error(
                 "Error sending image %s to chat %s: %s", image_path, chat_id, e
             )
@@ -1715,90 +1729,34 @@ class DeltaChatAdapter(BasePlatformAdapter):
     ) -> SendResult:
         """Send a voice message to a Delta Chat chat.
 
-        Delta Chat supports voice messages natively.
+        Delta Chat supports voice messages natively. *reply_to* is ignored.
 
         Args:
             chat_id: Delta Chat chat ID
             audio_path: Path to audio file on disk
             caption: Optional caption for the voice message
-            reply_to: Optional message ID to reply to
+            reply_to: Unused
             metadata: Optional metadata
 
         Returns:
             SendResult with success status and message ID
         """
-        import os
-
-        logger.info(
-            f"send_voice called: chat_id={chat_id}, audio_path={audio_path}, "
-            f"caption={caption[:50] if caption else None}"
-        )
-        logger.debug(f"send_voice kwargs: {kwargs}")
-
-        # Validate audio file exists and is accessible
-        if not os.path.exists(audio_path):
-            logger.error("send_voice: Audio file does not exist: %s", audio_path)
+        if not os.path.isfile(audio_path):
+            logger.error("send_voice: audio file not found: %s", audio_path)
             return self._send_result(
                 chat_id, None, error=f"Audio file not found: {audio_path}"
             )
-        if not os.path.isfile(audio_path):
-            logger.error("send_voice: Path is not a file: %s", audio_path)
-            return self._send_result(
-                chat_id, None, error=f"Path is not a file: {audio_path}"
-            )
-        file_size = os.path.getsize(audio_path)
-        logger.info(f"send_voice: Audio file exists, size={file_size} bytes")
 
-        # Delta Chat sends voice messages as files with VOICE viewtype
-        from deltachat2.types import MsgData, MessageViewtype
+        from deltachat2.types import MessageViewtype
 
-        try:
-            if not self.rpc or not self.account_id:
-                logger.error(
-                    "send_voice: Delta Chat not connected (rpc={}, account_id={})".format(
-                        "None" if not self.rpc else "set",
-                        "None" if not self.account_id else self.account_id,
-                    )
-                )
-                return self._send_result(
-                    chat_id, None, error="Delta Chat not connected"
-                )
-
-            logger.debug(
-                "send_voice: Sending to account_id=%s, chat_id=%s",
-                self.account_id,
-                chat_id,
-            )
-
-            async def _do_send():
-                return await self.rpc.send_msg(
-                    self.account_id,
-                    int(chat_id),
-                    MsgData(
-                        file=audio_path,
-                        text=caption or "",
-                        viewtype=MessageViewtype.VOICE,
-                    ),
-                )
-
-            msg_id = await _async_retry(_do_send, max_attempts=2, base_delay=0.5)
-            logger.info(
-                "Sent voice message %s to chat %s, file=%s, size=%s",
-                msg_id,
-                chat_id,
-                audio_path,
-                file_size,
-            )
-            self._bump_stat("voices_sent")
-            return self._send_result(chat_id, msg_id)
-
-        except Exception as e:
-            import traceback
-
-            logger.error("Error in send_voice: %s", e)
-            logger.debug("send_voice exception traceback:\n%s", traceback.format_exc())
-            self._bump_stat("voices_send_failed")
-            return self._send_result(chat_id, None, error=str(e))
+        return await self._send_msg_data(
+            chat_id,
+            "voices",
+            f"voice {audio_path} ({os.path.getsize(audio_path)} bytes)",
+            file=audio_path,
+            text=caption or "",
+            viewtype=MessageViewtype.VOICE,
+        )
 
     async def send_location(
         self,
@@ -1823,31 +1781,14 @@ class DeltaChatAdapter(BasePlatformAdapter):
         Returns:
             SendResult with success status and message ID
         """
-        try:
-            if not self.rpc or not self.account_id:
-                return self._send_result(
-                    chat_id, None, error="Delta Chat not connected"
-                )
-
-            from deltachat2.types import MsgData
-
-            async def _do_send():
-                # location tuple is (latitude, longitude) per GeoJSON convention
-                return await self.rpc.send_msg(
-                    self.account_id,
-                    int(chat_id),
-                    MsgData(text=poi_name, location=(latitude, longitude)),
-                )
-
-            msg_id = await _async_retry(_do_send, max_attempts=2, base_delay=0.5)
-            logger.debug("Sent location to chat %s", chat_id)
-            self._bump_stat("locations_sent")
-            return self._send_result(chat_id, msg_id)
-
-        except Exception as e:
-            logger.error("Error sending location to chat %s: %s", chat_id, e)
-            self._bump_stat("locations_send_failed")
-            return self._send_result(chat_id, None, error=str(e))
+        # location tuple is (latitude, longitude) per GeoJSON convention
+        return await self._send_msg_data(
+            chat_id,
+            "locations",
+            "location",
+            text=poi_name,
+            location=(latitude, longitude),
+        )
 
     # ------------------------------------------------------------------
     # Container-to-host file path mapping
@@ -1872,12 +1813,10 @@ class DeltaChatAdapter(BasePlatformAdapter):
         Returns None when the path is not under /workspace/ or when it tries
         to escape the sandbox (e.g. via .. or symlinks).
         """
-        from pathlib import Path
-
         p = str(container_path)
-        if not p.startswith("/workspace/"):
+        if not p.startswith(_WORKSPACE_PREFIX):
             return None
-        rel = p[len("/workspace/") :]
+        rel = p[len(_WORKSPACE_PREFIX) :]
         if ".." in Path(rel).parts:
             logger.warning("Rejecting workspace path with '..': %s", container_path)
             return None
@@ -1918,8 +1857,6 @@ class DeltaChatAdapter(BasePlatformAdapter):
         Returns the cache path on success, None if the file doesn't exist.
         Same pattern as _copy_to_hermes_cache for DC audio blobs.
         """
-        import shutil
-        from pathlib import Path
         from gateway.config import get_hermes_home
 
         host_path_str = self._container_workspace_to_host(container_path)
@@ -1949,16 +1886,9 @@ class DeltaChatAdapter(BasePlatformAdapter):
         filter_media_delivery_paths → send_document pipeline, exactly like
         Telegram handles any other document type.
         """
-        import re
-        from gateway.platforms.base import BasePlatformAdapter
-
         media_files, remaining = BasePlatformAdapter.extract_media(content)
 
-        xdc_re = re.compile(
-            r'[`"\']?MEDIA:\s*[`"\']?((?:~/|/)[\w./\- ]+\.xdc)[`"\']?',
-            re.IGNORECASE,
-        )
-        for match in xdc_re.finditer(content):
+        for match in _XDC_MEDIA_RE.finditer(content):
             path = match.group(1).strip()
             if not any(p == path for p, _ in media_files):
                 media_files.append((path, False))
@@ -1973,13 +1903,9 @@ class DeltaChatAdapter(BasePlatformAdapter):
         paths like /workspace/app.xdc don't exist there, so we add them
         explicitly.  filter_local_delivery_paths then does the host mapping.
         """
-        import re
-        from gateway.platforms.base import BasePlatformAdapter
-
         files, remaining = BasePlatformAdapter.extract_local_files(content)
 
-        xdc_re = re.compile(r"(?<![/:\w.])(/workspace/[\w./\-]+\.xdc)\b", re.IGNORECASE)
-        for match in xdc_re.finditer(content):
+        for match in _XDC_WORKSPACE_PATH_RE.finditer(content):
             path = match.group(1)
             if path not in files:
                 files.append(path)
@@ -1987,37 +1913,42 @@ class DeltaChatAdapter(BasePlatformAdapter):
 
         return files, remaining
 
-    def filter_media_delivery_paths(self, media_files):
-        """Remap /workspace/ container paths to host cache before validation."""
-        from gateway.platforms.base import BasePlatformAdapter
+    def _remap_container_path(self, path: str) -> Optional[str]:
+        """Host cache path for a /workspace/ container path, or None.
 
-        remapped = []
-        for media_path, is_voice in media_files or []:
-            p = str(media_path)
-            if p.startswith("/workspace/"):
-                cached = self._copy_container_file_to_cache(p)
-                if cached:
-                    remapped.append((cached, is_voice))
-                    continue
-                logger.warning("Could not resolve container path for delivery: %s", p)
-            remapped.append((media_path, is_voice))
+        None means "not a container path" or "could not be copied" (logged).
+        """
+        p = str(path)
+        if not p.startswith(_WORKSPACE_PREFIX):
+            return None
+        cached = self._copy_container_file_to_cache(p)
+        if not cached:
+            logger.warning("Could not resolve container path for delivery: %s", p)
+        return cached
+
+    def filter_media_delivery_paths(self, media_files):
+        """Remap /workspace/ container paths to host cache before validation.
+
+        An unresolvable container path is passed through unchanged; the base
+        validator then rejects it.
+        """
+        remapped = [
+            (self._remap_container_path(media_path) or media_path, is_voice)
+            for media_path, is_voice in media_files or []
+        ]
         return BasePlatformAdapter.filter_media_delivery_paths(remapped)
 
     def filter_local_delivery_paths(self, file_paths):
-        """Remap /workspace/ container paths to host cache before validation."""
-        from gateway.platforms.base import BasePlatformAdapter
+        """Remap /workspace/ container paths to host cache before validation.
 
+        An unresolvable container path is dropped.
+        """
         remapped = []
         for file_path in file_paths or []:
-            p = str(file_path)
-            if p.startswith("/workspace/"):
-                cached = self._copy_container_file_to_cache(p)
-                if cached:
-                    remapped.append(cached)
-                    continue
-                logger.warning("Could not resolve container path for delivery: %s", p)
-            else:
+            if not str(file_path).startswith(_WORKSPACE_PREFIX):
                 remapped.append(file_path)
+            elif cached := self._remap_container_path(file_path):
+                remapped.append(cached)
         return BasePlatformAdapter.filter_local_delivery_paths(remapped)
 
     def _rpc_server_exit_code(self) -> Optional[int]:
@@ -2218,37 +2149,22 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 await self._handle_non_text_message(msg, chat_id, msg_id)
                 return
 
-            # Get chat info
-            chat = await self.rpc.get_basic_chat_info(
-                self.account_id,
-                int(chat_id),
-            )
+            chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
 
-            # Get sender info
             from_id = msg.get("from_id")
             sender_email = ""
             if from_id:
-                contact = await self.rpc.get_contact(
-                    self.account_id,
-                    int(from_id),
-                )
-                user_name = (
-                    contact.get("name")
-                    or contact.get("display_name")
-                    or contact.get("name_and_addr")
-                    or f"Contact {from_id}"
-                )
+                contact = await self.rpc.get_contact(self.account_id, int(from_id))
+                user_name = _contact_name(contact, f"Contact {from_id}")
                 user_id = str(from_id)
                 sender_email = (contact.get("address") or "").lower()
             else:
-                user_name = "Unknown"
-                user_id = "unknown"
+                user_name, user_id = "Unknown", "unknown"
 
-            # Determine chat type
             chat_type = "group" if chat.get("chat_type") == "Group" else "dm"
             chat_name = chat.get("name", f"Chat {chat_id}")
 
-            # Both guards below assume a shared group with a changing/checkable
+            # Both bot guards assume a shared group with a changing/checkable
             # participant set. A DM has exactly one counterparty by
             # definition, so "someone else chiming in" can never happen —
             # from_id never changes and the streak would only grow, tripping
@@ -2263,75 +2179,23 @@ class DeltaChatAdapter(BasePlatformAdapter):
             roster = (
                 await self._get_group_roster(chat_id) if chat_type == "group" else None
             )
-            guards_apply = chat_type == "group" and roster is not None and len(roster) > 1
-            if guards_apply:
-                should_process, should_warn = self._check_loop_guard(chat_id, from_id)
-                if not should_process:
-                    self._bump_stat("loop_guard_tripped")
-                    if should_warn:
-                        # Unconditional (unlike the in-chat notice below): with
-                        # send_rejection_replies=false this WARNING is the only
-                        # trace a trip ever leaves — the guard can stay
-                        # permanently tripped in a multi-member group whose
-                        # other members simply go quiet for a while, and that
-                        # is otherwise indistinguishable from a silent outage.
-                        logger.warning(
-                            "loop_guard tripped in chat %s: sender %s hit "
-                            "max_consecutive_replies=%d with no other participant "
-                            "chiming in; further messages from them here are "
-                            "dropped until someone else speaks",
-                            chat_id, from_id, self._max_consecutive_replies,
-                        )
-                    if should_warn and self._send_rejection_replies:
-                        await self.send(
-                            str(chat_id),
-                            f"Pausing replies in this chat — {self._max_consecutive_replies} "
-                            "in a row from the same sender with no one else joining in "
-                            "(looks like a bot loop). Send a message to resume.",
-                        )
+            if roster is not None and len(roster) > 1:
+                if not await self._apply_bot_guards(chat_id, from_id, sender_email):
                     return
 
-                should_process, should_warn = self._check_bot_exchange_guard(
-                    chat_id, sender_email
-                )
-                if not should_process:
-                    self._bump_stat("bot_exchange_guard_tripped")
-                    if should_warn:
-                        # See the loop_guard WARNING above — same silent-forever
-                        # risk when send_rejection_replies=false.
-                        logger.warning(
-                            "bot_exchange_guard tripped in chat %s: max_bot_exchanges=%d "
-                            "hit with no DELTACHAT_HUMAN_USERS check-in; further "
-                            "non-human messages here are dropped until one checks in",
-                            chat_id, self._max_bot_exchanges,
-                        )
-                    if should_warn and self._send_rejection_replies:
-                        await self.send(
-                            str(chat_id),
-                            f"Pausing replies in this chat — {self._max_bot_exchanges} "
-                            "bot-to-bot messages with no human check-in. Send a message "
-                            "to resume.",
-                        )
-                    return
-
-            # A quote-reply to one of this bot's own messages is an implicit
-            # mention (continues the thread even under require_mention), and
-            # the quoted text is surfaced so the LLM knows which earlier point
-            # is being replied to.
-            quote = msg.get("quote") or {}
-            is_with_message = quote.get("kind") == "WithMessage"
-            is_reply_to_self = is_with_message and await self._quote_is_self_authored(
-                quote
-            )
             # why: mention gate must run on the reply body only — matching inside
             # spliced-in quoted text would treat "someone quoted an old message
             # that once mentioned us" as a fresh mention of the new reply.
-            if not is_reply_to_self and not await self._check_mention(
-                text, chat_type, chat_id
-            ):
+            should_process, is_reply_to_self = await self._gate_mention(
+                msg, text, chat_type, chat_id
+            )
+            if not should_process:
                 return
 
-            if is_with_message and quote.get("text"):
+            # Surface the quoted text so the LLM knows which earlier point is
+            # being replied to.
+            quote = msg.get("quote") or {}
+            if quote.get("kind") == "WithMessage" and quote.get("text"):
                 # why: core reports author_display_name as the localized "Me"
                 # for self-authored quotes — substitute the bot's real name so
                 # the LLM sees "replying to <bot>" not "replying to Me".
@@ -2377,6 +2241,78 @@ class DeltaChatAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.error(f"Error handling message event: {e}")
 
+    async def _apply_bot_guards(self, chat_id, from_id, sender_email: str) -> bool:
+        """Run the loop and bot-exchange guards. Return True to keep processing."""
+        should_process, should_warn = self._check_loop_guard(chat_id, from_id)
+        if not should_process:
+            return await self._guard_tripped(
+                chat_id,
+                "loop_guard_tripped",
+                should_warn,
+                f"loop_guard tripped in chat {chat_id}: sender {from_id} hit "
+                f"max_consecutive_replies={self._max_consecutive_replies} with no "
+                "other participant chiming in; further messages from them here "
+                "are dropped until someone else speaks",
+                f"Pausing replies in this chat — {self._max_consecutive_replies} "
+                "in a row from the same sender with no one else joining in "
+                "(looks like a bot loop). Send a message to resume.",
+            )
+
+        should_process, should_warn = self._check_bot_exchange_guard(
+            chat_id, sender_email
+        )
+        if not should_process:
+            return await self._guard_tripped(
+                chat_id,
+                "bot_exchange_guard_tripped",
+                should_warn,
+                f"bot_exchange_guard tripped in chat {chat_id}: "
+                f"max_bot_exchanges={self._max_bot_exchanges} hit with no "
+                "DELTACHAT_HUMAN_USERS check-in; further non-human messages here "
+                "are dropped until one checks in",
+                f"Pausing replies in this chat — {self._max_bot_exchanges} "
+                "bot-to-bot messages with no human check-in. Send a message "
+                "to resume.",
+            )
+        return True
+
+    async def _guard_tripped(
+        self, chat_id, stat: str, should_warn: bool, warning: str, notice: str
+    ) -> bool:
+        """Record a dropped message; on a streak's first trip, warn and notify.
+
+        The WARNING is unconditional (unlike the in-chat notice): with
+        send_rejection_replies=false it is the only trace a trip ever leaves —
+        a guard can stay tripped in a multi-member group whose other members
+        simply go quiet, which is otherwise indistinguishable from an outage.
+        Always returns False.
+        """
+        self._bump_stat(stat)
+        if should_warn:
+            logger.warning(warning)
+            if self._send_rejection_replies:
+                await self.send(str(chat_id), notice)
+        return False
+
+    async def _gate_mention(
+        self, msg: Dict, text: str, chat_type: str, chat_id
+    ) -> tuple[bool, bool]:
+        """Mention gate shared by the text and non-text (image/file/voice) paths.
+
+        A quote-reply to one of this bot's own messages is an implicit mention:
+        it continues the thread under require_mention, e.g. a screenshot sent
+        in reply to what the bot just said. Otherwise *text* (the reply body or
+        caption) must pass _check_mention.
+
+        Returns (should_process, is_reply_to_self).
+        """
+        quote = msg.get("quote") or {}
+        if quote.get("kind") == "WithMessage" and await self._quote_is_self_authored(
+            quote
+        ):
+            return True, True
+        return await self._check_mention(text, chat_type, chat_id), False
+
     def _resolve_blob_path(self, filename: str) -> Optional[str]:
         """Resolve a DC file path to an accessible absolute path.
 
@@ -2407,7 +2343,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
         """
         try:
             ext = os.path.splitext(src)[1] or ""
-            data = open(src, "rb").read()
+            data = Path(src).read_bytes()
             if kind == "audio":
                 from gateway.platforms.base import cache_audio_from_bytes
 
@@ -2477,12 +2413,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
         try:
             if from_id:
                 contact = await self.rpc.get_contact(self.account_id, int(from_id))
-                user_name = (
-                    contact.get("name")
-                    or contact.get("display_name")
-                    or contact.get("name_and_addr")
-                    or user_name
-                )
+                user_name = _contact_name(contact, user_name)
         except Exception:
             pass
 
@@ -2506,26 +2437,28 @@ class DeltaChatAdapter(BasePlatformAdapter):
         token = await _get_or_create_chat_token(self.rpc, self.account_id, int(chat_id))
 
         caption = msg.get("text", "") or ""
-        # Same implicit-mention exemption as the text path: a quote-reply to
-        # one of this bot's own messages continues the thread under
-        # require_mention even with no @mention in the caption — e.g.
-        # sending a screenshot in reply to what the bot just said. Without
-        # this, every such image/file quote-reply in a mention-gated group
-        # was silently dropped while the equivalent text quote-reply worked.
-        quote = msg.get("quote") or {}
-        is_with_message = quote.get("kind") == "WithMessage"
-        is_reply_to_self = is_with_message and await self._quote_is_self_authored(
-            quote
-        )
-        if not is_reply_to_self and not await self._check_mention(
-            caption, chat_type, chat_id
-        ):
+        should_process, _ = await self._gate_mention(msg, caption, chat_type, chat_id)
+        if not should_process:
             return
 
         roster = await self._get_group_roster(chat_id) if chat_type == "group" else None
         meta = self._message_metadata(
             chat_id, msg_id, from_id, chat_type == "group", token, roster
         )
+
+        async def forward(label: str, hermes_type, resolved: Optional[str], mime):
+            text = f"[{label}]: {caption}" if caption else f"[{label}]"
+            await self.handle_message(
+                MessageEvent(
+                    text=f"{text}\n[dc:chat={token}]",
+                    message_type=hermes_type,
+                    source=source,
+                    message_id=str(msg_id),
+                    media_urls=[resolved] if resolved else [],
+                    media_types=[mime],
+                    metadata=meta,
+                )
+            )
 
         from deltachat2.types import MessageViewtype
 
@@ -2547,27 +2480,17 @@ class DeltaChatAdapter(BasePlatformAdapter):
             resolved = self._resolve_blob_path(filename)
             if resolved:
                 resolved = self._copy_to_hermes_cache(resolved, "audio")
-            is_voice = view_type == MessageViewtype.VOICE.value
-            hermes_type = MessageType.VOICE if is_voice else MessageType.AUDIO
-            caption = msg.get("text", "") or ""
-            text = f"[{'Voice' if is_voice else 'Audio'} message from {user_name}]"
-            if caption:
-                text = f"{text}: {caption}"
-            text = f"{text}\n[dc:chat={token}]"
-            if not resolved:
+            else:
                 logger.warning(
-                    f"Voice/audio file not found, forwarding without media: {filename}"
+                    "Voice/audio file not found, forwarding without media: %s", filename
                 )
-            message_event = MessageEvent(
-                text=text,
-                message_type=hermes_type,
-                source=source,
-                message_id=str(msg_id),
-                media_urls=[resolved] if resolved else [],
-                media_types=[file_mime or ("audio/ogg" if is_voice else "audio/mpeg")],
-                metadata=meta,
+            is_voice = view_type == MessageViewtype.VOICE.value
+            await forward(
+                f"{'Voice' if is_voice else 'Audio'} message from {user_name}",
+                MessageType.VOICE if is_voice else MessageType.AUDIO,
+                resolved,
+                file_mime or ("audio/ogg" if is_voice else "audio/mpeg"),
             )
-            await self.handle_message(message_event)
 
         # Image
         elif (
@@ -2582,21 +2505,12 @@ class DeltaChatAdapter(BasePlatformAdapter):
             resolved = self._resolve_blob_path(filename)
             if resolved:
                 resolved = self._copy_to_hermes_cache(resolved, "image")
-            caption = msg.get("text", "") or ""
-            text = f"[Image from {user_name}]"
-            if caption:
-                text = f"{text}: {caption}"
-            text = f"{text}\n[dc:chat={token}]"
-            message_event = MessageEvent(
-                text=text,
-                message_type=MessageType.PHOTO,
-                source=source,
-                message_id=str(msg_id),
-                media_urls=[resolved] if resolved else [],
-                media_types=[file_mime or "image/jpeg"],
-                metadata=meta,
+            await forward(
+                f"Image from {user_name}",
+                MessageType.PHOTO,
+                resolved,
+                file_mime or "image/jpeg",
             )
-            await self.handle_message(message_event)
 
         # File / document (including .xdc webxdc apps)
         elif (
@@ -2608,28 +2522,20 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 try:
                     from gateway.platforms.base import cache_document_from_bytes
 
-                    data = open(resolved, "rb").read()
-                    file_name = msg.get("file_name") or os.path.basename(resolved)
-                    resolved = cache_document_from_bytes(data, file_name)
+                    resolved = cache_document_from_bytes(
+                        Path(resolved).read_bytes(),
+                        msg.get("file_name") or os.path.basename(resolved),
+                    )
                     logger.info("Copied document to Hermes cache: %s", resolved)
                 except Exception as e:
                     logger.warning("Could not copy document to Hermes cache: %s", e)
-            caption = msg.get("text", "") or ""
             file_name = msg.get("file_name") or os.path.basename(filename)
-            text = f"[File from {user_name}: {file_name}]"
-            if caption:
-                text = f"{text}: {caption}"
-            text = f"{text}\n[dc:chat={token}]"
-            message_event = MessageEvent(
-                text=text,
-                message_type=MessageType.DOCUMENT,
-                source=source,
-                message_id=str(msg_id),
-                media_urls=[resolved] if resolved else [],
-                media_types=[file_mime or "application/octet-stream"],
-                metadata=meta,
+            await forward(
+                f"File from {user_name}: {file_name}",
+                MessageType.DOCUMENT,
+                resolved,
+                file_mime or "application/octet-stream",
             )
-            await self.handle_message(message_event)
 
         elif view_type == "Call":
             # DC sends a Call info message (Missed call / Call ended) after calls.
@@ -2692,20 +2598,8 @@ class DeltaChatAdapter(BasePlatformAdapter):
 
 def check_requirements() -> bool:
     """Check if deltachat2 and deltachat-rpc-server are available."""
-    import shutil
-
-    # Check Python package
-    try:
-        import deltachat2
-    except ImportError:
-        return False
-
-    # Check binary
     rpc_server = os.getenv("DELTACHAT_RPC_SERVER", "deltachat-rpc-server")
-    if shutil.which(rpc_server):
-        return True
-
-    return False
+    return _check_dc2_available() and shutil.which(rpc_server) is not None
 
 
 def validate_config(config) -> bool:
@@ -2713,10 +2607,10 @@ def validate_config(config) -> bool:
     if not check_requirements():
         return False
 
-    extra = getattr(config, "extra", {}) or {}
+    cfg = functools.partial(_cfg, config)
 
-    email = os.getenv("DELTACHAT_EMAIL") or extra.get("email", "auto")
-    password = os.getenv("DELTACHAT_PASSWORD") or extra.get("password")
+    email = cfg("DELTACHAT_EMAIL", "email", "auto")
+    password = cfg("DELTACHAT_PASSWORD", "password")
     if email and email != "auto" and not _is_valid_email(email):
         raise ValueError(f"DELTACHAT_EMAIL is not a valid email address: {email!r}")
     if email and email != "auto" and not password:
@@ -2724,67 +2618,36 @@ def validate_config(config) -> bool:
             "DELTACHAT_PASSWORD required when DELTACHAT_EMAIL is set (not 'auto')"
         )
 
-    dm_policy = os.getenv("DELTACHAT_DM_POLICY") or extra.get("dm_policy", "pairing")
+    dm_policy = cfg("DELTACHAT_DM_POLICY", "dm_policy", "pairing")
     if dm_policy not in ("open", "allowlist", "pairing", "disabled"):
         raise ValueError(f"Invalid DELTACHAT_DM_POLICY: {dm_policy!r}")
 
-    group_policy = os.getenv("DELTACHAT_GROUP_POLICY") or extra.get(
-        "group_policy", "open"
-    )
+    group_policy = cfg("DELTACHAT_GROUP_POLICY", "group_policy", "open")
     if group_policy not in ("open", "allowlist", "disabled"):
         raise ValueError(f"Invalid DELTACHAT_GROUP_POLICY: {group_policy!r}")
 
     # Lightweight path checks (do not create directories or require the binary).
-    data_dir = os.getenv("DELTACHAT_DATA_DIR") or extra.get(
-        "data_dir", "~/.hermes/deltachat-data"
+    _safe_data_dir(
+        cfg("DELTACHAT_DATA_DIR", "data_dir", "~/.hermes/deltachat-data"),
+        create=False,
     )
-    _safe_data_dir(data_dir, create=False)
 
-    avatar_path = os.getenv("DELTACHAT_AVATAR_PATH") or extra.get("avatar_path")
+    avatar_path = cfg("DELTACHAT_AVATAR_PATH", "avatar_path")
     if avatar_path:
         _validate_avatar_path(avatar_path, strict=False)
 
-    rpc_server = os.getenv("DELTACHAT_RPC_SERVER") or extra.get(
-        "rpc_server", "deltachat-rpc-server"
-    )
+    rpc_server = cfg("DELTACHAT_RPC_SERVER", "rpc_server", "deltachat-rpc-server")
     if rpc_server != "deltachat-rpc-server":
         _validate_rpc_server_path(rpc_server, strict=True)
 
-    chatmail_servers = os.getenv("DELTACHAT_CHATMAIL_SERVERS") or extra.get(
-        "chatmail_servers"
-    )
-    if chatmail_servers:
-        servers = _parse_chatmail_servers(chatmail_servers)
-        if not servers:
-            raise ValueError(
-                f"Invalid DELTACHAT_CHATMAIL_SERVERS: {chatmail_servers!r}"
-            )
+    chatmail_servers = cfg("DELTACHAT_CHATMAIL_SERVERS", "chatmail_servers")
+    if chatmail_servers and not _parse_csv_unique(chatmail_servers):
+        raise ValueError(f"Invalid DELTACHAT_CHATMAIL_SERVERS: {chatmail_servers!r}")
 
-    max_len = os.getenv("DELTACHAT_MAX_MESSAGE_LENGTH") or extra.get(
-        "max_message_length"
-    )
-    if max_len:
-        try:
-            max_len_int = int(max_len)
-        except ValueError:
-            raise ValueError(f"Invalid DELTACHAT_MAX_MESSAGE_LENGTH: {max_len!r}")
-        if max_len_int < 100 or max_len_int > 10000:
-            raise ValueError(
-                f"DELTACHAT_MAX_MESSAGE_LENGTH must be between 100 and 10000: {max_len!r}"
-            )
-
-    max_lines = os.getenv("DELTACHAT_MAX_MESSAGE_LINES") or extra.get(
-        "max_message_lines"
-    )
-    if max_lines:
-        try:
-            max_lines_int = int(max_lines)
-        except ValueError:
-            raise ValueError(f"Invalid DELTACHAT_MAX_MESSAGE_LINES: {max_lines!r}")
-        if max_lines_int < 1 or max_lines_int > 200:
-            raise ValueError(
-                f"DELTACHAT_MAX_MESSAGE_LINES must be between 1 and 200: {max_lines!r}"
-            )
+    for env, key, _default, lo, hi in (_MAX_LEN_CFG, _MAX_LINES_CFG):
+        raw = cfg(env, key)
+        if raw and _bounded_int(raw, lo, hi) is None:
+            raise ValueError(f"{env} must be an integer between {lo} and {hi}: {raw!r}")
 
     return True
 
@@ -2808,40 +2671,38 @@ def _apply_yaml_config(
     if isinstance(extra_block, dict):
         seeded.update(extra_block)
 
-    for yaml_key, extra_key in (
-        ("display_name", "display_name"),
-        ("avatar_path", "avatar_path"),
-        ("email", "email"),
-        ("chatmail_server", "chatmail_server"),
-        ("chatmail_servers", "chatmail_servers"),
-        ("data_dir", "data_dir"),
-        ("home_channel", "home_channel"),
-        ("allowed_users", "allowed_users"),
-        ("allow_all_users", "allow_all_users"),
-        ("dm_allowed_users", "dm_allowed_users"),
-        ("group_allowed_users", "group_allowed_users"),
-        ("dm_policy", "dm_policy"),
-        ("group_policy", "group_policy"),
-        ("human_users", "human_users"),
-        ("max_bot_exchanges", "max_bot_exchanges"),
-        ("require_mention", "require_mention"),
-        ("mention_aliases", "mention_aliases"),
-        ("free_response_channels", "free_response_channels"),
-        ("auto_delete_interval", "auto_delete_interval"),
-        ("max_message_length", "max_message_length"),
-        ("max_message_lines", "max_message_lines"),
+    for key in (
+        "display_name",
+        "avatar_path",
+        "email",
+        "chatmail_server",
+        "chatmail_servers",
+        "data_dir",
+        "home_channel",
+        "allowed_users",
+        "allow_all_users",
+        "dm_allowed_users",
+        "group_allowed_users",
+        "dm_policy",
+        "group_policy",
+        "human_users",
+        "max_bot_exchanges",
+        "require_mention",
+        "mention_aliases",
+        "free_response_channels",
+        "auto_delete_interval",
+        "max_message_length",
+        "max_message_lines",
     ):
-        value = platform_cfg.get(yaml_key)
+        value = platform_cfg.get(key)
         if value is not None:
-            seeded[extra_key] = value
+            seeded[key] = value
 
     return seeded
 
 
 def _env_enablement() -> Optional[Dict[str, Any]]:
     """Seed PlatformConfig from environment variables."""
-    import shutil
-
     rpc_server = os.getenv("DELTACHAT_RPC_SERVER", "deltachat-rpc-server").strip()
 
     # Check if binary exists
@@ -2930,9 +2791,7 @@ def register_platform(ctx):
     )
 
     # Register bundled skills so skill_view('deltachat-platform:<name>') resolves them.
-    from pathlib import Path as _Path
-
-    skills_dir = _Path(_plugin_dir) / "skills"
+    skills_dir = Path(_plugin_dir) / "skills"
     logger.info(f"Checking for skills in: {skills_dir}")
     if skills_dir.is_dir():
         for skill_dir in skills_dir.iterdir():
@@ -2979,12 +2838,7 @@ def register_rpc_tools(ctx) -> None:
 
         if _RAW_RPC_ALLOWLIST and method not in _RAW_RPC_ALLOWLIST:
             return json.dumps({"error": f"'{method}' is not in the raw RPC allowlist"})
-        if (
-            method in _RAW_RPC_BLOCKLIST
-            or method in _DESTRUCTIVE_METHODS
-            or method.startswith("delete_")
-            or method.startswith("remove_")
-        ):
+        if method in _RAW_RPC_BLOCKLIST or _is_destructive(method):
             return json.dumps({"error": f"'{method}' is blocked"})
 
         try:
@@ -3006,9 +2860,7 @@ def register_rpc_tools(ctx) -> None:
             m
             for m in spec.get("methods", [])
             if any(p["name"] == "chatId" for p in m.get("params", []))
-            and m["name"] not in _DESTRUCTIVE_METHODS
-            and not m["name"].startswith("delete_")
-            and not m["name"].startswith("remove_")
+            and not _is_destructive(m["name"])
         ]
         return json.dumps({**spec, "methods": safe_methods}, indent=2)
 
@@ -3040,12 +2892,7 @@ def register_rpc_tools(ctx) -> None:
                 }
             )
 
-        # Block destructive methods
-        if (
-            method in _DESTRUCTIVE_METHODS
-            or method.startswith("delete_")
-            or method.startswith("remove_")
-        ):
+        if _is_destructive(method):
             return json.dumps({"error": f"'{method}' is not allowed in safe mode"})
 
         # Verify method exists and has a chatId param
