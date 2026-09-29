@@ -12,3 +12,13 @@ optional_env:
     description: "Default chat for cron delivery"
     prompt: "Home chat"
     password: false
+# Python packages this plugin needs in Hermes' venv. Hermes resolves them together with its own
+# pinned ranges when the plugin is installed and RE-APPLIES them after every `hermes update`
+# (hermes_cli/plugin_python_deps.py). Without the declaration they were installed by hand, so a
+# Hermes update that bumped `cryptography` left aiortc's `pyOpenSSL` on a release built for the old
+# one: importing it failed with "module 'lib' has no attribute 'GEN_EMAIL'" and the update then
+# disabled the plugin. pyOpenSSL/cryptography are deliberately not listed — the resolver picks the
+# pyOpenSSL that matches the cryptography Hermes pins.
+python_dependencies:
+  - deltachat-rpc-server>=2.51.0
+  - aiortc>=1.9.0
