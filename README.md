@@ -188,6 +188,8 @@ hermes gateway start
 | `DELTACHAT_RPC_SERVER` | No | `deltachat-rpc-server` | Path to RPC binary |
 | `DELTACHAT_HOME_CHANNEL` | No | — | Chat ID for cron/proactive delivery (or use `/sethome` in chat) |
 | `DELTACHAT_ENABLE_RAW_RPC` | No | — | Enable unrestricted `dc_rpc_call` tool |
+| `DELTACHAT_REQUIRE_MENTION` | No | `false` | In **group** chats, only respond when mentioned (`@<localpart>`, `@<display name>` or the full address). DMs are never gated. Also settable as `platforms.deltachat-platform.require_mention: true` in `config.yaml` |
+| `DELTACHAT_MENTION_PATTERNS` | No | — | Extra mention regexes (JSON list, or comma/newline-separated); also `platforms.deltachat-platform.mention_patterns` |
 
 ### Multiple Agents
 

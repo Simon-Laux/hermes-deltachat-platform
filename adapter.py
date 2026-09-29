@@ -7,6 +7,7 @@ import functools
 import html
 import json
 import os
+import re
 import secrets
 import sys
 import asyncio
@@ -239,6 +240,29 @@ async def _fetch_spec() -> dict:
     return _spec_cache
 
 
+def _compile_patterns(raw) -> list:
+    """Compile mention regexes from a list, a JSON list string, or a comma/newline-separated
+    string. Invalid patterns are logged and skipped."""
+    if not raw:
+        return []
+    items = raw
+    if isinstance(raw, str):
+        try:
+            items = json.loads(raw)
+        except Exception:
+            items = [x for x in re.split(r"[,\n]", raw)]
+    out = []
+    for item in items if isinstance(items, (list, tuple)) else [items]:
+        item = str(item).strip()
+        if not item:
+            continue
+        try:
+            out.append(re.compile(item, re.IGNORECASE))
+        except re.error as e:
+            logger.warning("Ignoring invalid mention pattern %r: %s", item, e)
+    return out
+
+
 class DeltaChatAdapter(BasePlatformAdapter):
     """Delta Chat platform adapter for Hermes Gateway.
 
@@ -260,8 +284,62 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._running = False
         self._dc_config_dir: Optional[str] = None
         self._call_manager = None
+        # Group mention gating (opt-in; DMs are never gated). Same knobs as Hermes' built-in
+        # adapters (BlueBubbles/Signal/Telegram): ``require_mention`` + optional
+        # ``mention_patterns`` under ``platforms.deltachat-platform`` in config.yaml, or the
+        # DELTACHAT_REQUIRE_MENTION / DELTACHAT_MENTION_PATTERNS env vars.
+        extra = self.config.extra or {}
+        raw = extra.get("require_mention")
+        if raw is None:
+            raw = os.getenv("DELTACHAT_REQUIRE_MENTION", "")
+        self.require_mention = str(raw).strip().lower() in ("1", "true", "yes", "on")
+        raw_patterns = extra.get("mention_patterns")
+        if raw_patterns is None:
+            raw_patterns = os.getenv("DELTACHAT_MENTION_PATTERNS", "")
+        self._extra_mention_patterns = _compile_patterns(raw_patterns)
+        self._self_mention_patterns: list = []  # filled from the account at connect()
 
 
+
+    async def _load_self_mention_patterns(self) -> None:
+        """Default group-mention patterns from this account's own identity: ``@<localpart>``,
+        ``@<display name>`` and the full address (case-insensitive, whole-word)."""
+        names = []
+        for key in ("configured_addr", "addr", "displayname"):
+            try:
+                value = await self.rpc.get_config(self.account_id, key)
+            except Exception:
+                value = None
+            if value:
+                names.append(value)
+                if "@" in value:
+                    names.append(value.split("@", 1)[0])
+        seen, pats = set(), []
+        for n in names:
+            n = n.strip()
+            if n and n.lower() not in seen:
+                seen.add(n.lower())
+                # a bare address counts as a mention; a name must be written as "@name"
+                prefix = r"@?" if "@" in n else r"@"
+                pats.append(re.compile(r"(?<![\w@])" + prefix + re.escape(n) + r"(?![\w-])",
+                                       re.IGNORECASE))
+        self._self_mention_patterns = pats
+        if self.require_mention:
+            logger.info("Group mention gating ON (require_mention); mention names: %s", names)
+
+    def _is_mentioned(self, text: str) -> bool:
+        return bool(text) and any(p.search(text) for p in
+                                  (*self._self_mention_patterns, *self._extra_mention_patterns))
+
+    async def handle_message(self, event) -> None:
+        """Gate unmentioned GROUP messages when ``require_mention`` is on; DMs always pass."""
+        source = getattr(event, "source", None)
+        if (self.require_mention and getattr(source, "chat_type", "") == "group"
+                and not self._is_mentioned(getattr(event, "text", "") or "")):
+            logger.debug("Ignoring group message %s (require_mention, not mentioned)",
+                         getattr(event, "message_id", "?"))
+            return
+        await super().handle_message(event)
 
     def _get_dc_config_dir(self) -> str:
         """Get Delta Chat config directory path.
@@ -355,6 +433,8 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 )
                 self._cleanup()
                 return False
+
+            await self._load_self_mention_patterns()
 
             # Enable bot mode: auto-accept contact requests
             try:
