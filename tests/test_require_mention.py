@@ -82,3 +82,19 @@ async def test_env_and_custom_patterns(monkeypatch):
     assert a.require_mention
     assert await _passes(a, "hey spooky", "group")
     assert not await _passes(a, "hey there", "group")
+
+
+@pytest.mark.parametrize("chat,group", [
+    ({"chat_type": "Group"}, True),
+    ({"chat_type": "Mailinglist"}, True),
+    ({"chat_type": "Single"}, False),
+    ({"chat_type": 120}, True),
+    ({"chat_type": 100}, False),
+    ({"is_group": True}, True),
+    ({}, False),
+    (None, False),
+])
+def test_group_detection_uses_chat_type(chat, group):
+    """BasicChat has ``chatType``, not ``is_group`` — every group used to look like a DM."""
+    from adapter import _is_group_chat
+    assert _is_group_chat(chat) is group

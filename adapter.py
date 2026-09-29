@@ -240,6 +240,22 @@ async def _fetch_spec() -> dict:
     return _spec_cache
 
 
+_GROUP_CHAT_TYPES = {"group", "mailinglist", "inbroadcast", "outbroadcast", "120", "140", "160", "165"}
+
+
+def _is_group_chat(chat) -> bool:
+    """True for a multi-party chat. The core's BasicChat/FullChat carry ``chatType``
+    ("Single" | "Group" | "Mailinglist" | "OutBroadcast" | "InBroadcast"; numeric on older
+    cores), not an ``is_group`` flag — reading ``is_group`` alone classified every group chat as
+    a DM. ``is_group`` is still honoured if present."""
+    if not chat:
+        return False
+    if chat.get("is_group"):
+        return True
+    ct = chat.get("chat_type", chat.get("chatType"))
+    return str(ct).strip().lower() in _GROUP_CHAT_TYPES
+
+
 def _compile_patterns(raw) -> list:
     """Compile mention regexes from a list, a JSON list string, or a comma/newline-separated
     string. Invalid patterns are logged and skipped."""
@@ -1145,7 +1161,7 @@ body {{
                 user_id = "unknown"
 
             # Determine chat type
-            chat_type = "group" if chat.get("is_group", False) else "dm"
+            chat_type = "group" if _is_group_chat(chat) else "dm"
             chat_name = chat.get("name", f"Chat {chat_id}")
 
             # Build source
@@ -1269,7 +1285,7 @@ body {{
         try:
             chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
             chat_name = chat.get("name", chat_name)
-            chat_type = "group" if chat.get("is_group", False) else "dm"
+            chat_type = "group" if _is_group_chat(chat) else "dm"
         except Exception:
             pass
 
@@ -1426,10 +1442,11 @@ body {{
             # Still notify about the voice message
             from_id = msg.get("from_id")
             user_name = f"Contact {from_id}" if from_id else "Unknown"
-            chat_type = "group" if msg.get("is_group", False) else "dm"
+            chat_type = "dm"
             try:
                 chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
                 chat_name = chat.get("name", f"Chat {chat_id}")
+                chat_type = "group" if _is_group_chat(chat) else "dm"
             except Exception:
                 chat_name = f"Chat {chat_id}"
             source = self.build_source(
@@ -1470,6 +1487,7 @@ body {{
 
         # Get chat info
         chat_name = ""
+        chat = None
         try:
             chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
             chat_name = chat.get("name", f"Chat {chat_id}")
@@ -1509,7 +1527,7 @@ body {{
             logger.debug(f"_handle_audio_message: Transcription traceback:\n{traceback.format_exc()}")
 
         # Build response
-        chat_type = "group" if msg.get("is_group", False) else "dm"
+        chat_type = "group" if _is_group_chat(chat if isinstance(chat, dict) else None) else "dm"
         source = self.build_source(
             chat_id=str(chat_id),
             chat_name=chat_name,
@@ -1566,7 +1584,7 @@ body {{
                 )
                 return {
                     "name": chat.get("name", chat_id),
-                    "type": "group" if chat.get("is_group") else "dm",
+                    "type": "group" if _is_group_chat(chat) else "dm",
                 }
         except Exception as e:
             logger.warning(f"Error getting chat info for {chat_id}: {e}")
