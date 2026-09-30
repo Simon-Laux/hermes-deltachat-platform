@@ -2,6 +2,21 @@
 
 All notable changes to this project will be documented in this file.
 
+## [1.8.1] - 2026-09-30
+
+### Fixed
+- Mention gate no longer lets captionless images/files/voice messages through
+  in `require_mention` groups (`_check_mention` exempted any empty body, not
+  just `/` commands). Quote-replies to the bot still pass.
+- Bot-exchange guard treated every sender missing from `DELTACHAT_HUMAN_USERS`
+  as a bot, so an unlisted human never reset the count and Alice paused a
+  group mid-conversation. It now uses the contact's `is_bot` flag: non-bot
+  contacts count as human, so the list is optional (still an override), and
+  the guard is active without it. The trip warning now names the last sender.
+- Image/file/voice messages now go through the bot-loop and bot-exchange
+  guards like text (the non-text path skipped them, so a human's image never
+  reset the count and bot attachments were never counted).
+
 ## [1.8.0] - 2026-09-27
 
 ### Changed

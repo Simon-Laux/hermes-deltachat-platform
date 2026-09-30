@@ -521,6 +521,15 @@ class TestBotExchangeGuard:
         should_process, _ = adapter._check_bot_exchange_guard("chat1", "bot-c@x")
         assert should_process is True
 
+    def test_unlisted_human_resets_via_is_bot_flag(self, platform_config):
+        # no human_users list at all: is_bot alone tells bots from humans
+        platform_config.extra = {"max_bot_exchanges": 2}
+        adapter = DeltaChatAdapter(platform_config)
+        g = adapter._check_bot_exchange_guard
+        assert [g("c", "b@x", True)[0] for _ in range(3)] == [True, True, False]
+        assert g("c", "unlisted-human@x", False)[0] is True
+        assert g("c", "b@x", True)[0] is True
+
     def test_should_warn_only_once_per_trip(self, platform_config):
         platform_config.extra = {
             "human_users": "tom@x",

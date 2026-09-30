@@ -902,6 +902,75 @@ class TestMentions:
         adapter.handle_message.assert_not_called()
 
     @pytest.mark.asyncio
+    async def test_require_mention_blocks_captionless_image(
+        self, platform_config, mock_rpc, group_event
+    ):
+        platform_config.extra = {"require_mention": "true", "display_name": "Bot"}
+        adapter = DeltaChatAdapter(platform_config)
+        adapter.rpc = mock_rpc
+        adapter.handle_message = AsyncMock()
+        mock_rpc.get_message = AsyncMock(
+            return_value={
+                "text": "",
+                "view_type": "Image",
+                "from_id": 11,
+                "file": "/tmp/photo.jpg",
+                "file_mime": "image/jpeg",
+            }
+        )
+        mock_rpc.get_basic_chat_info = AsyncMock(
+            return_value={"chat_type": "Group", "name": "Test Group"}
+        )
+        mock_rpc.get_contact = AsyncMock(return_value={"address": "user@example.com"})
+        adapter._resolve_blob_path = lambda x: x
+        adapter._copy_to_hermes_cache = lambda src, kind: src
+
+        await adapter._handle_incoming_message(group_event)
+
+        adapter.handle_message.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_bot_exchange_guard_applies_to_images(
+        self, platform_config, mock_rpc, group_event
+    ):
+        platform_config.extra = {"max_bot_exchanges": 1, "display_name": "Bot"}
+        adapter = DeltaChatAdapter(platform_config)
+        adapter.rpc = mock_rpc
+        adapter.handle_message = AsyncMock()
+        adapter._get_group_roster = AsyncMock(
+            return_value=[{"name": "a"}, {"name": "b"}]
+        )
+        adapter._resolve_blob_path = lambda x: x
+        adapter._copy_to_hermes_cache = lambda src, kind: src
+        mock_rpc.get_message = AsyncMock(
+            return_value={
+                "text": "",
+                "view_type": "Image",
+                "from_id": 11,
+                "file": "/tmp/photo.jpg",
+                "file_mime": "image/jpeg",
+            }
+        )
+        mock_rpc.get_basic_chat_info = AsyncMock(
+            return_value={"chat_type": "Group", "name": "Test Group"}
+        )
+        contact = {"address": "x@example.com", "is_bot": True}
+        mock_rpc.get_contact = AsyncMock(side_effect=lambda *_: contact)
+
+        async def send(msg_id):
+            await adapter._handle_incoming_message({**group_event, "msg_id": msg_id})
+
+        await send(10)  # bot image 1: allowed
+        await send(11)  # bot image 2: exceeds max_bot_exchanges=1
+        assert adapter.handle_message.call_count == 1
+
+        contact = {"address": "human@example.com", "is_bot": False}
+        await send(12)  # human image resets the count and is processed
+        contact = {"address": "x@example.com", "is_bot": True}
+        await send(13)  # bot image counts as 1 again: allowed
+        assert adapter.handle_message.call_count == 3
+
+    @pytest.mark.asyncio
     async def test_reply_to_own_message_is_implicit_mention_for_image(
         self, platform_config, mock_rpc, group_event
     ):

@@ -1034,7 +1034,9 @@ class DeltaChatAdapter(BasePlatformAdapter):
             return True
         if str(chat_id) in self._free_response_channels:
             return True
-        if not text or text.startswith("/"):
+        # why: an empty body (captionless image/file/voice) has no mention, so it
+        # must NOT be exempt — only slash commands bypass the gate.
+        if text and text.startswith("/"):
             return True
         if self._is_mentioned(text):
             return True
@@ -1072,26 +1074,31 @@ class DeltaChatAdapter(BasePlatformAdapter):
         return not tripped, should_warn
 
     def _check_bot_exchange_guard(
-        self, chat_id, sender_email: str
+        self, chat_id, sender_email: str, is_bot: Optional[bool] = None
     ) -> tuple[bool, bool]:
         """Cap total bot-to-bot messages in a chat, regardless of who's sending.
 
         Unlike _check_loop_guard (which only catches one sender flooding),
         this catches 3+ bots round-robining a group — from each bot's own
         view the sender keeps changing, so the same-sender streak never
-        trips. Every message not from a DELTACHAT_HUMAN_USERS address counts
-        toward DELTACHAT_MAX_BOT_EXCHANGES; a message from one of those
-        addresses resets the count. Inactive unless human_users is set.
+        trips. Every bot message counts toward DELTACHAT_MAX_BOT_EXCHANGES; a
+        human message resets the count. Human = a DELTACHAT_HUMAN_USERS address,
+        or any contact core reports as not ``is_bot`` — so groups need no
+        per-user list. With ``is_bot`` unknown (None) only the list decides,
+        and the guard stays off when the list is empty.
 
         Returns (should_process, should_warn) — should_warn is True only the
         first time a given streak trips.
         """
-        if not self._human_users or self._max_bot_exchanges <= 0:
+        if self._max_bot_exchanges <= 0 or (is_bot is None and not self._human_users):
             return True, False
+        # why: a contact not flagged is_bot is a human even if not listed —
+        # requiring every group member in HUMAN_USERS defeats using groups.
+        is_human = sender_email in self._human_users or is_bot is False
         key = str(chat_id)
         with self._lock:
             count, warned = self._bot_exchange_streak.get(key, (0, False))
-            if sender_email in self._human_users:
+            if is_human:
                 count, warned = 0, False
             else:
                 count += 1
@@ -2153,11 +2160,13 @@ class DeltaChatAdapter(BasePlatformAdapter):
 
             from_id = msg.get("from_id")
             sender_email = ""
+            is_bot = None
             if from_id:
                 contact = await self.rpc.get_contact(self.account_id, int(from_id))
                 user_name = _contact_name(contact, f"Contact {from_id}")
                 user_id = str(from_id)
                 sender_email = (contact.get("address") or "").lower()
+                is_bot = contact.get("is_bot")
             else:
                 user_name, user_id = "Unknown", "unknown"
 
@@ -2180,7 +2189,9 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 await self._get_group_roster(chat_id) if chat_type == "group" else None
             )
             if roster is not None and len(roster) > 1:
-                if not await self._apply_bot_guards(chat_id, from_id, sender_email):
+                if not await self._apply_bot_guards(
+                    chat_id, from_id, sender_email, is_bot
+                ):
                     return
 
             # why: mention gate must run on the reply body only — matching inside
@@ -2241,7 +2252,9 @@ class DeltaChatAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.error(f"Error handling message event: {e}")
 
-    async def _apply_bot_guards(self, chat_id, from_id, sender_email: str) -> bool:
+    async def _apply_bot_guards(
+        self, chat_id, from_id, sender_email: str, is_bot: Optional[bool] = None
+    ) -> bool:
         """Run the loop and bot-exchange guards. Return True to keep processing."""
         should_process, should_warn = self._check_loop_guard(chat_id, from_id)
         if not should_process:
@@ -2259,7 +2272,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
             )
 
         should_process, should_warn = self._check_bot_exchange_guard(
-            chat_id, sender_email
+            chat_id, sender_email, is_bot
         )
         if not should_process:
             return await self._guard_tripped(
@@ -2268,8 +2281,8 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 should_warn,
                 f"bot_exchange_guard tripped in chat {chat_id}: "
                 f"max_bot_exchanges={self._max_bot_exchanges} hit with no "
-                "DELTACHAT_HUMAN_USERS check-in; further non-human messages here "
-                "are dropped until one checks in",
+                f"human check-in (last sender {sender_email!r}, is_bot={is_bot}); "
+                "further bot messages here are dropped until one checks in",
                 f"Pausing replies in this chat — {self._max_bot_exchanges} "
                 "bot-to-bot messages with no human check-in. Send a message "
                 "to resume.",
@@ -2410,10 +2423,14 @@ class DeltaChatAdapter(BasePlatformAdapter):
         from_id = msg.get("from_id")
         user_name = f"Contact {from_id}" if from_id else "Unknown"
         user_id = str(from_id) if from_id else "unknown"
+        sender_email = ""
+        is_bot = None
         try:
             if from_id:
                 contact = await self.rpc.get_contact(self.account_id, int(from_id))
                 user_name = _contact_name(contact, user_name)
+                sender_email = (contact.get("address") or "").lower()
+                is_bot = contact.get("is_bot")
         except Exception:
             pass
 
@@ -2436,12 +2453,18 @@ class DeltaChatAdapter(BasePlatformAdapter):
 
         token = await _get_or_create_chat_token(self.rpc, self.account_id, int(chat_id))
 
+        roster = await self._get_group_roster(chat_id) if chat_type == "group" else None
+        # why: same guards as the text path (see _handle_incoming_message) — a
+        # human's image/voice message must reset the bot-exchange count too.
+        if roster is not None and len(roster) > 1:
+            if not await self._apply_bot_guards(chat_id, from_id, sender_email, is_bot):
+                return
+
         caption = msg.get("text", "") or ""
         should_process, _ = await self._gate_mention(msg, caption, chat_type, chat_id)
         if not should_process:
             return
 
-        roster = await self._get_group_roster(chat_id) if chat_type == "group" else None
         meta = self._message_metadata(
             chat_id, msg_id, from_id, chat_type == "group", token, roster
         )
