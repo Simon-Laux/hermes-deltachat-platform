@@ -264,13 +264,6 @@ _active_adapter = None
 _chat_id_to_token: Dict[int, str] = {}
 _chat_token_to_id: Dict[str, int] = {}
 
-def _parse_method_list(value: Optional[str]) -> frozenset:
-    """Parse a comma-separated list of RPC method names into a set."""
-    if not value:
-        return frozenset()
-    return frozenset(m.strip() for m in value.split(",") if m.strip())
-
-
 def _env_flag(name: str) -> bool:
     """True when *name* is set to something that reads as "on".
 
@@ -2055,11 +2048,20 @@ def register_rpc_tools(ctx) -> None:
 
         # Read at call time, not import time — Hermes loads ~/.hermes/.env
         # after this module is imported.
-        allowlist = _parse_method_list(os.getenv("DELTACHAT_RAW_RPC_ALLOWLIST"))
-        blocklist = _parse_method_list(os.getenv("DELTACHAT_RAW_RPC_BLOCKLIST"))
+        raw_allowlist = (os.getenv("DELTACHAT_RAW_RPC_ALLOWLIST") or "").strip()
+        allowlist = frozenset(m.strip() for m in raw_allowlist.split(",") if m.strip())
+        # why: blank means "no allowlist", but a non-blank value that yields no
+        # usable names means "allow nothing" — it must not fall back to
+        # unrestricted. Otherwise a typo like ALLOWLIST=" , ," silently removes
+        # the gate the operator was trying to tighten.
+        if raw_allowlist and not allowlist:
+            return _refuse(
+                "unusable allowlist",
+                "DELTACHAT_RAW_RPC_ALLOWLIST is set but lists no method names",
+            )
         if allowlist and method not in allowlist:
             return _refuse("not allowlisted", f"'{method}' is not in the raw RPC allowlist")
-        if method in blocklist or _is_destructive(method):
+        if _is_destructive(method):
             return _refuse("blocked", f"'{method}' is blocked")
 
         # Check the name against the spec rather than relying on getattr to

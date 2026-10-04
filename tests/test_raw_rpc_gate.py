@@ -11,30 +11,19 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import adapter
-from adapter import _is_destructive, _parse_method_list
-
-
-class TestParseMethodList:
-    def test_unset_is_empty(self):
-        assert _parse_method_list(None) == frozenset()
-        assert _parse_method_list("") == frozenset()
-
-    def test_strips_and_drops_blanks(self):
-        assert _parse_method_list(" a , b ,, c ") == frozenset({"a", "b", "c"})
+from adapter import _is_destructive
 
 
 class TestIsDestructive:
     @pytest.mark.parametrize("method", [
-        "delete_chat",
-        "leave_group",
-        "remove_draft",
-        "delete_something_added_next_release",  # prefix rule, not the literal set
+        "leave_group",  # the one destructive name the prefixes miss
+        "delete_something_added_next_release",  # prefix rule, not a literal list
         "remove_something_added_next_release",
     ])
     def test_blocked(self, method):
         assert _is_destructive(method)
 
-    @pytest.mark.parametrize("method", ["get_basic_chat_info", "send_msg", "misc_get_info"])
+    @pytest.mark.parametrize("method", ["get_basic_chat_info", "undelete_chat"])
     def test_allowed(self, method):
         assert not _is_destructive(method)
 
@@ -107,11 +96,26 @@ class TestRawRpcGate:
         connected_adapter.rpc.delete_chat.assert_not_awaited()
 
     @pytest.mark.asyncio
-    async def test_blocklist_is_honoured(self, raw_rpc_handler, connected_adapter):
-        with patch.dict(os.environ, {"DELTACHAT_RAW_RPC_BLOCKLIST": "set_config, other"}):
+    @pytest.mark.parametrize("value", [" , ,", ",", "   ,"])
+    async def test_allowlist_naming_nothing_allows_nothing(self, raw_rpc_handler, connected_adapter, value):
+        """A typo'd allowlist must not silently become "no allowlist"."""
+        with patch.dict(os.environ, {"DELTACHAT_RAW_RPC_ALLOWLIST": value}):
+            result = json.loads(await raw_rpc_handler({"method": "get_basic_chat_info", "params": []}))
+        assert "lists no method names" in result["error"]
+        connected_adapter.rpc.get_basic_chat_info.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("value", ["", "   "])
+    async def test_blank_allowlist_means_unrestricted(self, raw_rpc_handler, connected_adapter, value):
+        with patch.dict(os.environ, {"DELTACHAT_RAW_RPC_ALLOWLIST": value}):
+            result = json.loads(await raw_rpc_handler({"method": "get_basic_chat_info", "params": []}))
+        assert result == {"ok": True}
+
+    @pytest.mark.asyncio
+    async def test_allowlist_tolerates_spacing(self, raw_rpc_handler, connected_adapter):
+        with patch.dict(os.environ, {"DELTACHAT_RAW_RPC_ALLOWLIST": " get_basic_chat_info , set_config ,"}):
             result = json.loads(await raw_rpc_handler({"method": "set_config", "params": []}))
-        assert "blocked" in result["error"]
-        connected_adapter.rpc.set_config.assert_not_awaited()
+        assert result == {"ok": True}
 
     @pytest.mark.asyncio
     async def test_allowlist_excludes_everything_else(self, raw_rpc_handler, connected_adapter):

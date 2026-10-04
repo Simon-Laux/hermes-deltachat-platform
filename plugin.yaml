@@ -32,12 +32,8 @@ optional_env:
     prompt: "Enable unrestricted dc_rpc_call (blank = no)"
     password: false
   - name: DELTACHAT_RAW_RPC_ALLOWLIST
-    description: "Comma-separated RPC methods dc_rpc_call may call. Unset means any non-destructive method is allowed."
+    description: "Comma-separated RPC methods dc_rpc_call may call. Leave blank to allow any non-destructive method."
     prompt: "Raw RPC allowlist (comma-separated)"
-    password: false
-  - name: DELTACHAT_RAW_RPC_BLOCKLIST
-    description: "Comma-separated RPC methods dc_rpc_call may never call, on top of the always-blocked delete_*/remove_* methods."
-    prompt: "Raw RPC blocklist (comma-separated)"
     password: false
   - name: DELTACHAT_CHATMAIL_SERVERS
     description: "Comma-separated chatmail relays to register on when DELTACHAT_EMAIL=auto (e.g. nine.testrun.org,mehl.cloud). Unset picks nine.testrun.org plus two random relays from chatmail.at/relays for redundancy."

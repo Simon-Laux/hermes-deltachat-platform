@@ -122,12 +122,11 @@ so it shows up in `~/.hermes/logs/errors.log`. To narrow it further:
 
 ```bash
 DELTACHAT_RAW_RPC_ALLOWLIST=get_account_info,get_chatlist_entries  # only these
-DELTACHAT_RAW_RPC_BLOCKLIST=set_config,add_or_update_transport     # never these
 ```
 
 The `delete_*` / `remove_*` refusal always applies — allowlisting such a method does
-not re-enable it. Within what remains, an allowlist (when set) is deny-by-default and
-the blocklist subtracts further.
+not re-enable it. Leaving the allowlist blank allows any non-destructive method; setting
+it to anything that names no methods allows nothing, rather than quietly allowing all.
 
 Note this is a rule about method *names*, so it is narrow: it blocks 9 of the 177 spec
 methods. It does not stop `set_config(delete_device_after)` or `set_chat_ephemeral_timer`,
@@ -216,8 +215,7 @@ hermes gateway start
 | `DELTACHAT_RPC_SERVER` | No | `deltachat-rpc-server` | Path to RPC binary |
 | `DELTACHAT_HOME_CHANNEL` | No | — | Chat ID for cron/proactive delivery (or use `/sethome` in chat) |
 | `DELTACHAT_ENABLE_RAW_RPC` | No | — | Expose the account-wide `dc_rpc_call` tool |
-| `DELTACHAT_RAW_RPC_ALLOWLIST` | No | — | Comma-separated methods `dc_rpc_call` may call (unset = any non-destructive one) |
-| `DELTACHAT_RAW_RPC_BLOCKLIST` | No | — | Comma-separated methods `dc_rpc_call` may never call |
+| `DELTACHAT_RAW_RPC_ALLOWLIST` | No | — | Comma-separated methods `dc_rpc_call` may call (blank = any non-destructive one) |
 
 ### Multiple Agents
 
