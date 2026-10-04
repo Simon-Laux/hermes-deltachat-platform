@@ -38,6 +38,15 @@ optional_env:
 # one: importing it failed with "module 'lib' has no attribute 'GEN_EMAIL'" and the update then
 # disabled the plugin. pyOpenSSL/cryptography are deliberately not listed — the resolver picks the
 # pyOpenSSL that matches the cryptography Hermes pins.
+#
+# why: DC core does not use semver — a *minor* bump may break the JSON-RPC API (major is reserved
+# for heavily breaking wire-format changes, patch is never used), so the ceiling has to exclude the
+# first minor whose API nobody checked. 2.61.0 removes `Account::Configured.addr` (read at
+# adapter.py:714, setup.py:297) and `Contact.nameAndAddr` (adapter.py:1440,1562,1764,
+# call_handler.py:602,911); both reads are `.get()` fallbacks so they degrade rather than crash,
+# but `get_my_address()` loses its only non-SecureJoin fallback. 2.60.0 is the newest release whose
+# full RPC surface — all 25 methods this plugin calls, plus the MsgData payload — was verified
+# against the real `--openrpc` spec and a live server.
 python_dependencies:
-  - deltachat-rpc-server>=2.51.0
+  - deltachat-rpc-server>=2.51.0,<2.61
   - aiortc>=1.9.0
