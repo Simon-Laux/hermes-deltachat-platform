@@ -3,6 +3,8 @@ mentions, quote-replies to the bot and slash commands pass.
 
 Based on the tests in PR #18 by terafin.
 """
+import sys
+import types
 from unittest.mock import AsyncMock
 
 import pytest
@@ -11,7 +13,7 @@ from adapter import DC_CONTACT_ID_SELF, DeltaChatAdapter
 from tests.conftest import MockPlatform, MockPlatformConfig
 
 
-def _adapter(extra=None, chat_type="Group", quoted_from=None):
+def _adapter(extra=None, chat_type="Group", quoted_from=None, displayname="Ghost"):
     cfg = MockPlatformConfig(name="deltachat-platform", platform=MockPlatform.DELTACHAT,
                              extra=extra or {})
     a = DeltaChatAdapter(cfg)
@@ -19,7 +21,7 @@ def _adapter(extra=None, chat_type="Group", quoted_from=None):
     a.rpc = AsyncMock()
     a.rpc.get_basic_chat_info.return_value = {"chat_type": chat_type, "name": "c"}
     a.rpc.get_config.side_effect = lambda acc, key: {
-        "configured_addr": "ghost-agent@chat.example", "displayname": "Ghost"}.get(key)
+        "configured_addr": "ghost-agent@chat.example", "displayname": displayname}.get(key)
     a.rpc.get_message.return_value = {"from_id": quoted_from}
     return a
 
@@ -41,7 +43,7 @@ async def test_off_by_default_everything_passes():
 @pytest.mark.asyncio
 @pytest.mark.parametrize("text,ok", [
     ("hello all", False),
-    ("", False),  # captionless image/voice
+    ("", False),
     ("@ghost can you check", True),
     ("hey @Ghost, ping", True),
     ("ghost is a word, not a mention", False),
@@ -50,7 +52,7 @@ async def test_off_by_default_everything_passes():
     # the address and its localpart are not names the bot answers to
     ("@ghost-agent hi", False),
     ("ping ghost-agent@chat.example please", False),
-    ("/reset", True),
+    ("/home/alice is broken", False),  # not a command
 ])
 async def test_group_messages_need_a_mention(text, ok):
     a = _adapter({"require_mention": True})
@@ -123,3 +125,109 @@ async def test_handler_drops_unmentioned_group_message():
     await a._handle_incoming_message({"chat_id": 5, "msg_id": 8})
     a.handle_message.assert_awaited_once()
     assert a.handle_message.await_args.args[0].source.chat_type == "group"
+
+
+@pytest.fixture
+def hermes_commands(monkeypatch):
+    """Stand-in for hermes_cli.commands with a few known gateway commands."""
+    known = {"reset", "help", "sethome"}
+    mod = types.ModuleType("hermes_cli.commands")
+    mod.is_gateway_known_command = lambda name: name in known
+    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
+    monkeypatch.setitem(sys.modules, "hermes_cli.commands", mod)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text,ok", [
+    ("/reset", True),
+    ("/RESET now", True),
+    ("/set_home", False),  # not known after "_" -> "-" either
+    ("/frobnicate", False),  # unknown: Hermes would reply "Unknown command"
+    ("/home/alice is broken", False),
+    ("/", False),
+    ("@ghost /frobnicate", True),  # an unknown command can still be addressed by mention
+])
+async def test_only_known_slash_commands_skip_the_gate(hermes_commands, text, ok):
+    a = _adapter({"require_mention": True})
+    assert await a._mention_gate_allows(_msg(text), 5) is ok
+
+
+@pytest.mark.asyncio
+async def test_known_command_does_not_need_chat_lookup(hermes_commands):
+    a = _adapter({"require_mention": True})
+    assert await a._mention_gate_allows(_msg("/help"), 5)
+    a.rpc.get_basic_chat_info.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_without_hermes_cli_slash_needs_a_mention(monkeypatch):
+    monkeypatch.setitem(sys.modules, "hermes_cli", None)  # makes the import fail
+    a = _adapter({"require_mention": True})
+    assert not await a._mention_gate_allows(_msg("/reset"), 5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("displayname,text,ok", [
+    ("Hermes Bot", "@hermes bot what's up", True),
+    ("Hermes Bot", "@hermes what's up", False),
+    ("R2-D2", "beep @R2-D2!", True),
+    ("R2-D2", "@R2-D2-fan hi", False),
+    ("Dr. Who", "@dr. who are you", True),
+    ("Žofie", "ahoj @žofie", True),
+    ("Žofie", "ahoj @ŽOFIE", True),
+    ("Žofie", "@Žofiex", False),
+])
+async def test_display_name_shapes(displayname, text, ok):
+    a = _adapter({"require_mention": True}, displayname=displayname)
+    assert await a._mention_gate_allows(_msg(text), 5) is ok
+
+
+@pytest.mark.asyncio
+async def test_alias_with_leading_at_still_matches():
+    a = _adapter({"require_mention": True, "mention_aliases": "@spooky, @@ ,  "})
+    assert a._mention_aliases == ["spooky"]
+    assert await a._mention_gate_allows(_msg("hey @spooky"), 5)
+
+
+@pytest.mark.asyncio
+async def test_no_display_name_and_no_aliases_warns_once(caplog):
+    a = _adapter({"require_mention": True}, displayname=None)
+    for _ in range(3):
+        assert not await a._mention_gate_allows(_msg("@ghost hi"), 5)
+    assert sum("no display name" in r.message for r in caplog.records) == 1
+
+
+@pytest.mark.asyncio
+async def test_no_display_name_quote_reply_still_passes():
+    a = _adapter({"require_mention": True}, displayname=None, quoted_from=DC_CONTACT_ID_SELF)
+    assert await a._mention_gate_allows(_msg("and this?", quote_id=3), 5)
+
+
+@pytest.mark.asyncio
+async def test_quote_of_deleted_message_is_not_a_mention(caplog):
+    a = _adapter({"require_mention": True})
+    a.rpc.get_message.side_effect = RuntimeError("Message does not exist")
+    assert not await a._mention_gate_allows(_msg("agreed", quote_id=3), 5)
+    assert not [r for r in caplog.records if r.levelname == "WARNING"]
+
+
+@pytest.mark.asyncio
+async def test_captionless_image_in_group_is_dropped():
+    a = _adapter({"require_mention": True})
+    a.rpc.get_message.return_value = {"id": 7, "text": "", "from_id": 9, "view_type": "Image",
+                                      "file": "/blobs/x.jpg", "file_mime": "image/jpeg"}
+    a._handle_non_text_message = AsyncMock()
+    a.handle_message = AsyncMock()
+    await a._handle_incoming_message({"chat_id": 5, "msg_id": 7})
+    a._handle_non_text_message.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_mentioned_image_caption_passes():
+    a = _adapter({"require_mention": True})
+    a.rpc.get_message.return_value = {"id": 7, "text": "@ghost look", "from_id": 9,
+                                      "view_type": "Image", "file": "/blobs/x.jpg",
+                                      "file_mime": "image/jpeg"}
+    a._handle_non_text_message = AsyncMock()
+    await a._handle_incoming_message({"chat_id": 5, "msg_id": 7})
+    a._handle_non_text_message.assert_awaited_once()

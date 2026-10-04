@@ -286,6 +286,23 @@ _active_adapter = None
 _chat_id_to_token: Dict[int, str] = {}
 _chat_token_to_id: Dict[str, int] = {}
 
+def _is_known_command(text: str) -> bool:
+    """True if *text* starts with a slash command Hermes knows (built-in or plugin).
+
+    why: Hermes answers an unknown "/word" with an "Unknown command" notice, so
+    letting every slash past the mention gate made a gated bot reply to things
+    like "/home/alice is broken" or another bot's command.
+    """
+    m = re.match(r"/([\w-]+)(?:\s|$)", text)
+    if not m:
+        return False
+    try:
+        from hermes_cli.commands import is_gateway_known_command
+    except ImportError:
+        return False
+    return is_gateway_known_command(m.group(1).lower().replace("_", "-"))
+
+
 def _env_flag(name: str) -> bool:
     """True when *name* is set to something that reads as "on".
 
@@ -475,7 +492,9 @@ class DeltaChatAdapter(BasePlatformAdapter):
             raw = os.getenv("DELTACHAT_MENTION_ALIASES", "")
         if isinstance(raw, str):
             raw = raw.split(",")
-        self._mention_aliases = [str(a).strip() for a in raw if str(a).strip()]
+        # "@spooky" and "spooky" both mean the alias spooky
+        self._mention_aliases = [a for a in (str(a).strip().lstrip("@").strip() for a in raw) if a]
+        self._warned_no_mention_names = False
 
     async def _mention_gate_allows(self, msg: Dict, chat_id) -> bool:
         """With require_mention on, drop group messages that don't mention us.
@@ -483,37 +502,51 @@ class DeltaChatAdapter(BasePlatformAdapter):
         A mention is "@<display name>" or "@<alias>" (case-insensitive, whole
         word) in the message's own text or caption — quoted text is not part
         of it. A quote-reply to one of our own messages counts as a mention so
-        a thread can go on without repeating it. Slash commands always pass.
+        a thread can go on without repeating it. Slash commands Hermes knows
+        always pass; any other "/..." needs a mention like normal text.
         """
         if not self._require_mention:
             return True
         text = msg.get("text") or ""
-        if text.startswith("/"):
+        if _is_known_command(text):
             return True
         try:
             chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
             if chat.get("chat_type") != "Group":
                 return True
             # why: read per message, so a renamed bot is matched under its new name.
-            names = [await self.rpc.get_config(self.account_id, "displayname"),
-                     *self._mention_aliases]
-            if any(re.search(r"(?<![\w@])@" + re.escape(n.strip()) + r"(?![\w-])",
-                             text, re.IGNORECASE)
-                   for n in names if n and n.strip()):
-                return True
-            quote = msg.get("quote") or {}
-            if quote.get("kind") == "WithMessage" and quote.get("message_id"):
-                quoted = await self.rpc.get_message(self.account_id,
-                                                    int(quote["message_id"]))
-                if quoted and quoted.get("from_id") == DC_CONTACT_ID_SELF:
-                    return True
+            names = [n.strip() for n in (await self.rpc.get_config(self.account_id, "displayname"),
+                                         *self._mention_aliases) if n and n.strip()]
         except Exception as e:
             logger.warning("Mention gate failed for chat %s, letting message through: %s",
                            chat_id, e)
             return True
+        if not names and not self._warned_no_mention_names:
+            self._warned_no_mention_names = True
+            logger.warning("require_mention is on but the account has no display name and no "
+                           "DELTACHAT_MENTION_ALIASES are set: only quote-replies to the bot "
+                           "will get through in groups")
+        if any(re.search(r"(?<![\w@])@" + re.escape(n) + r"(?![\w-])", text, re.IGNORECASE)
+               for n in names):
+            return True
+        if await self._quotes_own_message(msg):
+            return True
         logger.debug("Ignoring unmentioned group message %s (require_mention)",
                      msg.get("id"))
         return False
+
+    async def _quotes_own_message(self, msg: Dict) -> bool:
+        """True if *msg* quote-replies to a message this account sent."""
+        quote = msg.get("quote") or {}
+        if quote.get("kind") != "WithMessage" or not quote.get("message_id"):
+            return False
+        try:
+            quoted = await self.rpc.get_message(self.account_id, int(quote["message_id"]))
+        except Exception as e:
+            # e.g. the quoted message was deleted locally: no proof it was ours
+            logger.debug("Could not load quoted message %s: %s", quote["message_id"], e)
+            return False
+        return bool(quoted) and quoted.get("from_id") == DC_CONTACT_ID_SELF
 
     def _get_dc_config_dir(self) -> str:
         """Get Delta Chat config directory path.
