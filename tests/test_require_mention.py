@@ -231,3 +231,14 @@ async def test_mentioned_image_caption_passes():
     a._handle_non_text_message = AsyncMock()
     await a._handle_incoming_message({"chat_id": 5, "msg_id": 7})
     a._handle_non_text_message.assert_awaited_once()
+
+
+@pytest.mark.parametrize("value,on", [
+    ("enabled", True), ("1", True), (True, True),
+    ("off", False), ("0", False), (False, False), ("", False),
+])
+def test_config_and_env_read_on_off_the_same_way(monkeypatch, value, on):
+    assert _adapter({"require_mention": value})._require_mention is on
+    if not isinstance(value, bool):
+        monkeypatch.setenv("DELTACHAT_REQUIRE_MENTION", value)
+        assert _adapter()._require_mention is on

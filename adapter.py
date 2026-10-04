@@ -310,7 +310,12 @@ def _env_flag(name: str) -> bool:
     because they are non-empty strings. That is a fail-open kill switch — and
     plugin.yaml prompts the operator for these, which invites exactly a "0".
     """
-    return os.getenv(name, "").strip().lower() not in ("", "0", "false", "no", "off")
+    return _is_on(os.getenv(name, ""))
+
+
+def _is_on(value) -> bool:
+    """Shared on/off rule for env vars and config.yaml values (see _env_flag)."""
+    return str(value).strip().lower() not in ("", "0", "false", "no", "off")
 
 
 # Methods the RPC tools refuse, beyond the delete_*/remove_* prefix rule.
@@ -485,7 +490,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
         raw = extra.get("require_mention")
         self._require_mention = (
             _env_flag("DELTACHAT_REQUIRE_MENTION") if raw is None
-            else str(raw).strip().lower() in ("1", "true", "yes", "on")
+            else _is_on(raw)
         )
         raw = extra.get("mention_aliases")
         if raw is None:
