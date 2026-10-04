@@ -223,6 +223,39 @@ class TestSendMessage:
         assert data.file == "/path/to/file.xdc"
         assert data.text == "A file"
 
+    @pytest.mark.asyncio
+    async def test_send_video_uses_video_viewtype(self, platform_config, mock_rpc):
+        """Called the way cron delivery calls it: keyword args only, no caption."""
+        from deltachat2.types import MessageViewtype
+
+        adapter = DeltaChatAdapter(platform_config)
+        adapter.rpc = mock_rpc
+        adapter.account_id = 1
+        mock_rpc.send_msg = AsyncMock(return_value=321)
+
+        result = await adapter.send_video(
+            chat_id="789", metadata=None, video_path="/path/to/clip.mp4"
+        )
+
+        assert result.success is True
+        assert result.message_id == "321"
+        account_id, chat_id, data = mock_rpc.send_msg.await_args.args
+        assert (account_id, chat_id) == (1, 789)
+        assert data.file == "/path/to/clip.mp4"
+        assert data.viewtype == MessageViewtype.VIDEO
+        assert data.text == ""
+
+    @pytest.mark.asyncio
+    async def test_send_video_not_connected(self, platform_config):
+        adapter = DeltaChatAdapter(platform_config)
+        adapter.rpc = None
+        adapter.account_id = None
+
+        result = await adapter.send_video("789", "/path/to/clip.mp4")
+
+        assert result.success is False
+        assert "not connected" in result.error.lower()
+
 
 class TestGetChatInfo:
     """Test chat info retrieval."""
