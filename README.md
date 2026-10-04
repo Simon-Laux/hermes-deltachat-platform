@@ -88,6 +88,23 @@ Deep integration with Delta Chat's native features — voice messages, voice cal
 - Read receipts
 - Bot mode: auto-accepts contact requests, no manual approval needed
 
+### Group Chats
+By default the agent answers every message in a group. Set `DELTACHAT_REQUIRE_MENTION=1` and it
+only reacts to group messages that mention it (`@<display name>` or an alias from
+`DELTACHAT_MENTION_ALIASES`) or quote-reply to one of its messages. DMs are never gated.
+
+Messages without a mention are dropped before they reach Hermes, so the agent does not see them
+as conversation context either — when someone mentions it, it only knows that one message.
+
+This is **not a privacy or security boundary**: the messages are still stored in the bot's Delta
+Chat account, and the agent can read them through the Delta Chat RPC tools
+(`dc_safe_rpc_call`, and `dc_rpc_call` if enabled). Use it to keep the bot quiet, not to keep
+anything from it.
+
+Would you rather have the agent see all group messages as context and still only answer when
+mentioned? That isn't implemented yet —
+[open an issue](https://github.com/Simon-Laux/hermes-deltachat-platform/issues/new) if you want it.
+
 ### Voice Calls (WebRTC)
 - **Incoming calls**: auto-answer, live speech-to-text → AI → text-to-speech pipeline
 - **Outgoing calls**: the AI can call you from a scheduled task (`dc_start_call` tool)
