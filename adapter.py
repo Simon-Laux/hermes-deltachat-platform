@@ -2028,8 +2028,33 @@ def register_rpc_tools(ctx) -> None:
         if "chatId" not in param_names:
             return json.dumps({"error": f"'{method}' has no chatId parameter — use dc_rpc_call for non-chat methods"})
 
-        # Build positional params: accountId at [0], chatId at [1]
-        full_params = [adapter.account_id, real_chat_id] + list(params or [])
+        # why: bind by name, not by position. The old code built
+        # [account_id, chat_id] + params, which assumes chatId is parameter 1.
+        # Two spec methods break that assumption — forward_messages(accountId,
+        # messageIds, chatId) and search_messages(accountId, query, chatId) —
+        # and for those the injected chat id landed in the messageIds/query slot
+        # while the caller's own value became the real chatId, defeating the
+        # whole point of the token. The spec declares the order, so use it:
+        # that fixes those two and every future method with an unusual shape.
+        supplied = list(params or [])
+        full_params = []
+        for name in param_names:
+            if name == "accountId":
+                full_params.append(adapter.account_id)
+            elif name == "chatId":
+                full_params.append(real_chat_id)
+            elif supplied:
+                full_params.append(supplied.pop(0))
+            else:
+                break  # trailing optional parameters the caller left off
+        if supplied:
+            return json.dumps({
+                "error": (
+                    f"'{method}' takes {len(param_names)} parameters "
+                    f"({', '.join(param_names)}); accountId and chatId are injected, "
+                    f"so pass only the rest — {len(supplied)} too many were given"
+                )
+            })
 
         try:
             result = await getattr(adapter.rpc, method)(*full_params)
