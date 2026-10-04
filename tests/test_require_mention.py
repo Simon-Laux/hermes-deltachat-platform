@@ -259,3 +259,53 @@ def test_config_and_env_read_on_off_the_same_way(monkeypatch, value, on):
     if not isinstance(value, bool):
         monkeypatch.setenv("DELTACHAT_REQUIRE_MENTION", value)
         assert _adapter()._require_mention is on
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text,forwarded", [
+    ("/reset@Hermes Bot", "/reset"),
+    ("/model@hermes bot gpt-5", "/model gpt-5"),
+    ("/model@Hermes gpt-5", "/model gpt-5"),
+])
+async def test_longest_name_wins(text, forwarded):
+    a = _adapter({"mention_aliases": "Hermes Bot"}, displayname="Hermes")
+    msg = _msg(text)
+    assert await a._mention_gate_allows(msg, 5)
+    assert msg["text"] == forwarded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text,forwarded", [
+    ("/reset@Ghost.", "/reset."),
+    ("/reset@Ghost, thanks", "/reset, thanks"),
+    ("/reset@Ghost\nand more", "/reset\nand more"),
+])
+async def test_punctuation_or_newline_after_addressed_name(text, forwarded):
+    a = _adapter()
+    msg = _msg(text)
+    assert await a._mention_gate_allows(msg, 5)
+    assert msg["text"] == forwarded
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("require_mention", [True, False])
+async def test_own_name_is_stripped_in_dms_too(require_mention):
+    a = _adapter({"require_mention": require_mention}, chat_type="Single")
+    msg = _msg("/reset@Ghost")
+    assert await a._mention_gate_allows(msg, 5)
+    assert msg["text"] == "/reset"
+
+
+@pytest.mark.asyncio
+async def test_caption_is_never_a_command():
+    a = _adapter()
+    msg = _msg("/srv@prod logs") | {"view_type": "Image", "file": "/blobs/x.jpg"}
+    assert await a._mention_gate_allows(msg, 5)
+    assert msg["text"] == "/srv@prod logs"
+    a.rpc.get_basic_chat_info.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_bare_command_as_quote_reply_to_the_bot_passes():
+    a = _adapter({"require_mention": True}, quoted_from=DC_CONTACT_ID_SELF)
+    assert await a._mention_gate_allows(_msg("/reset", quote_id=3), 5)

@@ -486,27 +486,32 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._warned_no_mention_names = False
 
     async def _mention_gate_allows(self, msg: Dict, chat_id) -> bool:
-        """Decide whether a group message is for us.
+        """Decide whether a message is for us.
 
         Commands are addressed Telegram-style, "/cmd@<name>": one addressed to
         us passes with the "@<name>" removed from msg["text"] so Hermes sees a
-        plain "/cmd"; one addressed to anyone else is dropped. This applies in
-        groups whether or not require_mention is on.
+        plain "/cmd" (in any chat). In a group, one addressed to anyone else
+        is dropped, whether or not require_mention is on. Only plain text
+        messages are commands — a caption never is.
 
         With require_mention on, any other group message needs a mention:
         "@<display name>" or "@<alias>" (case-insensitive, whole word) in the
         message's own text or caption — quoted text is not part of it. A
         bare "/cmd" is no exception, so in a group with several bots it only
         reaches the one it names. A quote-reply to one of our own messages
-        counts as a mention so a thread can go on without repeating it.
+        counts as a mention (also for a bare "/cmd") so a thread can go on
+        without repeating it.
         """
         text = msg.get("text") or ""
-        command = re.match(r"/[\w-]+@", text)
+        is_plain_text = (msg.get("view_type") in ("Text", "", None)
+                         and not (msg.get("file") or msg.get("file_mime")))
+        command = re.match(r"/[\w-]+@", text) if is_plain_text else None
         if not self._require_mention and not command:
             return True
         try:
             chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
-            if chat.get("chat_type") != "Group":
+            is_group = chat.get("chat_type") == "Group"
+            if not is_group and not command:
                 return True
             # why: read per message, so a renamed bot is matched under its new name.
             names = [n.strip() for n in (await self.rpc.get_config(self.account_id, "displayname"),
@@ -515,14 +520,22 @@ class DeltaChatAdapter(BasePlatformAdapter):
             logger.warning("Mention gate failed for chat %s, letting message through: %s",
                            chat_id, e)
             return True
+        # why: longest first, so with names "Hermes" and "Hermes Bot",
+        # "/reset@Hermes Bot" strips the whole name instead of leaving " Bot".
+        names.sort(key=len, reverse=True)
         if command:
             addressee = text[command.end():]
             for n in names:
-                if re.match(re.escape(n) + r"(?=\s|$)", addressee, re.IGNORECASE):
-                    msg["text"] = text[:command.end() - 1] + addressee[len(n):]
+                m = re.match(re.escape(n) + r"(?![\w-])", addressee, re.IGNORECASE)
+                if m:
+                    msg["text"] = text[:command.end() - 1] + addressee[m.end():]
                     return True
+            if not is_group:
+                return True
             logger.debug("Ignoring command %s addressed to another bot", text.split()[0])
             return False
+        if not is_group:
+            return True
         if not names and not self._warned_no_mention_names:
             self._warned_no_mention_names = True
             logger.warning("require_mention is on but the account has no display name and no "

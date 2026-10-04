@@ -96,8 +96,10 @@ only reacts to group messages that mention it (`@<display name>` or an alias fro
 **Commands in groups** are addressed Telegram-style: `/reset@<name>`, where `<name>` is the
 bot's display name or an alias. Only that bot runs it; a command addressed to another name is
 ignored. With `DELTACHAT_REQUIRE_MENTION` on, a bare `/reset` in a group is ignored too, so with
-several bots in one group nothing gets reset by accident. Give a bot whose display name contains
-spaces a one-word alias — `/reset@Hermes Bot` works, but an alias is easier to type.
+several bots in one group nothing gets reset by accident (unless it is a quote-reply to that bot,
+which counts as addressing it). In DMs `/reset@<name>` works too. Give a bot whose display name contains
+spaces a one-word alias: `/reset@Hermes Bot` works, but if another bot in the group is called
+"Hermes", it will take that command (and `@Hermes Bot` mentions) as meant for itself too.
 
 Messages without a mention are dropped before they reach Hermes, so the agent does not see them
 as conversation context either.
