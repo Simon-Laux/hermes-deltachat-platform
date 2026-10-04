@@ -2203,7 +2203,7 @@ def register_rpc_tools(ctx) -> None:
                             "type": "string",
                             "description": (
                                 "RPC method name in snake_case (e.g. 'get_account_info'). "
-                                "Use dc_rpc_spec to see all available methods."
+                                "Use dc_rpc_spec to see the methods this tool will accept."
                             ),
                         },
                         "params": {
