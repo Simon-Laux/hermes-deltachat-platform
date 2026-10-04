@@ -55,7 +55,7 @@ def test_call_raises_when_server_dies_mid_wait():
         except JsonRpcError:
             result["outcome"] = "raised"
 
-    th = threading.Thread(target=run)
+    th = threading.Thread(target=run, daemon=True)  # never hang pytest on failure
     th.start()
     # Nothing drains request_queue, so the call is genuinely blocked in wait().
     time.sleep(0.2)
@@ -78,3 +78,46 @@ def test_writer_loop_failure_wakes_pending_callers():
 
     assert r._value["error"]["message"] == "RPC server disconnected"
     assert t.pending_results == {}
+
+
+def test_reply_written_just_before_exit_is_not_reported_as_failure():
+    t = _bare_transport(returncode=None)
+    result = {}
+
+    def run():
+        result["value"] = t.call("send_msg")
+
+    th = threading.Thread(target=run, daemon=True)
+    th.start()
+    time.sleep(0.2)
+    # The server answered, then exited before the reader delivered the reply.
+    t.process.returncode = 0
+    time.sleep(1.1)  # past the slice in which call() notices the dead server
+    t.pending_results.pop(1).set({"result": 42})
+    th.join(timeout=5)
+    assert not th.is_alive()
+    assert result["value"] == 42
+
+
+def test_dead_writer_thread_counts_as_dead_server():
+    t = _bare_transport(returncode=None)
+    t.writer_thread = threading.Thread(target=lambda: None)
+    t.writer_thread.start()
+    t.writer_thread.join()
+    try:
+        t.call("get_next_event")
+        assert False, "expected JsonRpcError"
+    except JsonRpcError as e:
+        assert "disconnected" in str(e).lower()
+
+
+def test_reader_tolerates_reply_for_abandoned_call():
+    import io
+
+    t = _bare_transport(returncode=None)
+    survivor = _Result()
+    t.pending_results = {2: survivor}
+    # Reply 1 belongs to a call() that already gave up; reply 2 must still land.
+    t.process.stdout = io.BytesIO(b'{"id": 1, "result": 1}\n{"id": 2, "result": 2}\n')
+    t._reader_loop()
+    assert survivor._value == {"id": 2, "result": 2}
