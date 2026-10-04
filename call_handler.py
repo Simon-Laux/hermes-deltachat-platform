@@ -1249,9 +1249,20 @@ class CallManager:
     def _gateway(self):
         """Return the GatewayRunner instance, or None.
 
-        The adapter's message handler is the gateway's bound _handle_message,
-        so its __self__ is the GatewayRunner that owns _session_model_overrides.
+        why two lookups: Hermes ≥ 0.21.5 wraps the message handler in a closure
+        (run_adapters.py `_standalone_scoped`), so `__self__` is gone and the
+        call-model override was silently skipped. `gateway.run._gateway_runner_ref`
+        is the weakref Hermes's own tools use to reach the live runner; the
+        bound-method lookup stays as the fallback for older cores.
         """
+        try:
+            import importlib
+            gateway_run = importlib.import_module("gateway.run")
+            runner = gateway_run._gateway_runner_ref()
+            if runner is not None:
+                return runner
+        except Exception:
+            pass
         handler = getattr(self._adapter, "_message_handler", None)
         return getattr(handler, "__self__", None)
 
@@ -1261,7 +1272,10 @@ class CallManager:
             return
         gw = self._gateway()
         if gw is None or not hasattr(gw, "_session_model_overrides"):
-            logger.debug("Model override requested but gateway not reachable")
+            # WARNING, not debug: this is a configured feature failing, and at
+            # debug level it went unnoticed for a whole Hermes release.
+            logger.warning("DELTACHAT_CALL_MODEL=%s is set but the gateway runner is not "
+                           "reachable — the call runs on the default model", _CALL_MODEL)
             return
         try:
             key = gw._session_key_for_source(source)
