@@ -1933,7 +1933,7 @@ def register_rpc_tools(ctx) -> None:
     """Register Delta Chat RPC tools.
 
     Always registers:
-      - dc_rpc_spec: full OpenRPC spec
+      - dc_rpc_spec: OpenRPC spec, minus the methods we refuse
       - dc_chat_rpc_spec: spec filtered to chatId-scoped methods we do not refuse
       - dc_safe_rpc_call: chat-scoped calls with token-validated chatId injection
 
@@ -1941,11 +1941,28 @@ def register_rpc_tools(ctx) -> None:
       - dc_rpc_call: unrestricted access to any RPC method
     """
 
+    def _visible_methods(spec: dict, chat_scoped: bool) -> list:
+        """Methods worth showing the model: never one it would then be refused.
+
+        why: advertising a method the call gate rejects is not neutral. The
+        model has no way to tell "not permitted here" from "I got the name
+        wrong", so it retries, rephrases, and burns the turn on a door that is
+        never going to open. Two of the blocklist entries — the securejoin QR
+        pair — exist specifically so the model is never told they are there.
+        """
+        return [
+            m for m in spec.get("methods", [])
+            if not _is_blocked(m["name"])
+            and (not chat_scoped
+                 or any(p["name"] == "chatId" for p in m.get("params", [])))
+        ]
+
     async def _spec_handler(args: dict = None, **kwargs) -> str:
         try:
-            return json.dumps(await _fetch_spec(), indent=2)
+            spec = await _fetch_spec()
         except Exception as e:
             return f"Error: {e}"
+        return json.dumps({**spec, "methods": _visible_methods(spec, chat_scoped=False)}, indent=2)
 
     async def _call_handler(args: dict, **kwargs) -> str:
         method = (args or {}).get("method")
@@ -2019,12 +2036,7 @@ def register_rpc_tools(ctx) -> None:
             spec = await _fetch_spec()
         except Exception as e:
             return f"Error: {e}"
-        safe_methods = [
-            m for m in spec.get("methods", [])
-            if any(p["name"] == "chatId" for p in m.get("params", []))
-            and not _is_blocked(m["name"])
-        ]
-        return json.dumps({**spec, "methods": safe_methods}, indent=2)
+        return json.dumps({**spec, "methods": _visible_methods(spec, chat_scoped=True)}, indent=2)
 
     async def _safe_call_handler(args: dict, **kwargs) -> Any:
         method = (args or {}).get("method")
@@ -2141,8 +2153,9 @@ def register_rpc_tools(ctx) -> None:
         toolset="deltachat",
         schema={
             "description": (
-                "Fetch the full OpenRPC specification of the running Delta Chat RPC server. "
-                "Lists every available method with parameter types and descriptions. "
+                "Fetch the OpenRPC specification of the running Delta Chat RPC server. "
+                "Lists the callable methods with parameter types and descriptions; "
+                "methods the adapter refuses are omitted. "
                 "Only call this when the user explicitly asks for low-level Delta Chat API access. "
                 "Use dc_chat_rpc_spec instead when you only need chat-scoped methods."
             ),
@@ -2190,7 +2203,7 @@ def register_rpc_tools(ctx) -> None:
                             "type": "string",
                             "description": (
                                 "RPC method name in snake_case (e.g. 'get_account_info'). "
-                                "Use dc_rpc_spec to see all available methods."
+                                "Use dc_rpc_spec to see the methods this tool will accept."
                             ),
                         },
                         "params": {

@@ -224,6 +224,15 @@ class TestChatSpecFiltering:
     """
 
     @pytest.fixture
+    def full_spec_handler(self):
+        handlers = {}
+        ctx = MagicMock()
+        ctx.register_tool.side_effect = lambda **kw: handlers.__setitem__(kw["name"], kw["handler"])
+        with patch.dict(os.environ, {"DELTACHAT_ENABLE_RAW_RPC": "1"}, clear=True):
+            adapter.register_rpc_tools(ctx)
+        return handlers["dc_rpc_spec"]
+
+    @pytest.fixture
     def chat_spec_handler(self):
         handlers = {}
         ctx = MagicMock()
@@ -261,3 +270,22 @@ class TestChatSpecFiltering:
                       if "chatId" in [p["name"] for p in m["params"]]
                       and not adapter._is_blocked(m["name"])}
         assert advertised == executable
+
+    @pytest.mark.asyncio
+    async def test_full_spec_also_hides_blocked_methods(self, full_spec_handler, wide_spec):
+        """dc_rpc_spec is registered unconditionally and used to be unfiltered.
+
+        It listed export-style and securejoin methods to the model even where
+        no tool would execute them.
+        """
+        names = {m["name"] for m in json.loads(await full_spec_handler())["methods"]}
+        assert "get_account_info" in names, "non-chat methods still belong in the full spec"
+        for hidden in ("forward_messages", "get_chat_securejoin_qr_code",
+                       "place_outgoing_call", "delete_chat"):
+            assert hidden not in names
+
+    @pytest.mark.asyncio
+    async def test_full_spec_is_a_superset_of_the_chat_spec(self, full_spec_handler, chat_spec_handler, wide_spec):
+        full = {m["name"] for m in json.loads(await full_spec_handler())["methods"]}
+        chat = {m["name"] for m in json.loads(await chat_spec_handler())["methods"]}
+        assert chat < full
