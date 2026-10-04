@@ -145,6 +145,11 @@ _CALL_PROMPT = os.getenv("DELTACHAT_CALL_PROMPT", _DEFAULT_CALL_PROMPT).strip()
 _CALL_SHARED_HISTORY = _env_flag("DELTACHAT_CALL_SHARED_HISTORY")
 _CALL_THREAD_ID = None if _CALL_SHARED_HISTORY else "call"
 
+# message_id prefix of the injected "call ended" notes. Hermes anchors a reply on
+# the id of the message it answers (base.py `_reply_anchor_for_event`), so a reply
+# carrying this prefix is the AI acknowledging the note — never meant for the user.
+CALL_END_NOTE_PREFIX = "callend-"
+
 # Optional per-call LLM override (off by default — see docs). When set, calls
 # use this model instead of the chat's normal model, restored on hangup.
 _CALL_MODEL = os.getenv("DELTACHAT_CALL_MODEL", "").strip()
@@ -506,7 +511,6 @@ class CallManager:
         self._sessions: Dict[int, CallSession] = {}   # msg_id → session
         self._chat_to_msg: Dict[str, int] = {}        # chat_id → msg_id
         self._pending_answers: Dict[int, asyncio.Future] = {}  # msg_id → answer-SDP future (outgoing)
-        self._drop_next_response: Dict[str, int] = {}  # chat_id → number of send() replies to suppress
         self._drop_call_ack: Dict[str, int] = {}  # chat_id → suppress the agent's post-dc_start_call line
 
         # The gateway/agent loop (where we were constructed — connect() is async).
@@ -1511,7 +1515,6 @@ class CallManager:
         the text-chat AI knows a call just ended.
         """
         from gateway.platforms.base import MessageEvent, MessageType
-        self._drop_next_response[chat_id] = self._drop_next_response.get(chat_id, 0) + 1
         source = self._adapter.build_source(
             chat_id=chat_id, chat_name=f"Call {chat_id}", chat_type="dm",
             user_id=caller_id or "user", user_name=caller_name or "User",
@@ -1522,7 +1525,7 @@ class CallManager:
                  "by voice. Acknowledge to yourself; do not produce a spoken reply.]",
             message_type=MessageType.TEXT,
             source=source,
-            message_id=f"callend-{int(time.monotonic() * 1000)}",
+            message_id=f"{CALL_END_NOTE_PREFIX}{int(time.monotonic() * 1000)}",
             channel_prompt=_CALL_PROMPT or None,
         )
         logger.info("Notifying AI that call ended (chat=%s)", chat_id)
@@ -1534,7 +1537,6 @@ class CallManager:
         # Inject a brief context note so the text-chat AI is aware. SHARED_HISTORY
         # mode already uses thread_id=None above, so skip the duplicate.
         if _CALL_THREAD_ID is not None:
-            self._drop_next_response[chat_id] = self._drop_next_response.get(chat_id, 0) + 1
             main_source = self._adapter.build_source(
                 chat_id=chat_id, chat_name=f"Call {chat_id}", chat_type="dm",
                 user_id=caller_id or "user", user_name=caller_name or "User",
@@ -1544,7 +1546,7 @@ class CallManager:
                 text="[A voice call with the user has just ended. Do not call back right now.]",
                 message_type=MessageType.TEXT,
                 source=main_source,
-                message_id=f"callend-main-{int(time.monotonic() * 1000)}",
+                message_id=f"{CALL_END_NOTE_PREFIX}main-{int(time.monotonic() * 1000)}",
             )
             logger.info("Notifying main thread that call ended (chat=%s)", chat_id)
             with contextlib.suppress(Exception):
@@ -1588,20 +1590,16 @@ class CallManager:
             self._drop_call_ack[chat_id] = n - 1
         return True
 
-    def consume_drop_response(self, chat_id: str) -> bool:
-        """True if the next send() to chat_id should be suppressed (call-ended note reply).
+    @staticmethod
+    def is_call_end_reply(reply_to: Optional[str]) -> bool:
+        """True if a send() answers an injected call-ended note and must be suppressed.
 
-        Each call-end injects up to two AI notes (call thread + main thread), so
-        the counter may be 2. Each send() call decrements once.
+        why not a per-chat counter: it drifted both ways. An extra send in
+        between (seen live, cause unconfirmed) used up
+        the drop and the real note reply hit the user; a note the AI answered
+        with nothing left the count up and swallowed the user's next real reply.
         """
-        count = self._drop_next_response.get(chat_id, 0)
-        if count <= 0:
-            return False
-        if count == 1:
-            del self._drop_next_response[chat_id]
-        else:
-            self._drop_next_response[chat_id] = count - 1
-        return True
+        return bool(reply_to) and str(reply_to).startswith(CALL_END_NOTE_PREFIX)
 
     # ------------------------------------------------------------------ #
     # Helpers                                                             #

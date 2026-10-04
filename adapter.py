@@ -398,6 +398,17 @@ async def _get_or_create_chat_token(rpc, account_id: int, chat_id: int) -> str:
     return token
 
 
+def _quote_id(reply_to) -> Optional[int]:
+    """DC message id to quote, or None when reply_to is not a real DC message.
+
+    why: Hermes anchors replies on the triggering event's message_id, and our
+    synthetic events (call notes) carry non-numeric ids; int() on those failed
+    the whole send instead of just sending it unquoted.
+    """
+    s = str(reply_to or "").strip()
+    return int(s) if s.isdigit() else None
+
+
 async def _resolve_chat_token(rpc, account_id: int, token: str) -> Optional[int]:
     """Resolve an opaque token back to the real chat_id.
 
@@ -1036,6 +1047,12 @@ body {{
         When a voice call is active for this chat the response is routed to
         TTS and played into the call instead of being sent as a DC message.
         """
+        # Suppress the AI's reply to an internal "call ended" note so we don't
+        # text the user a stray message after a call. Checked before call
+        # routing so a late reply can't be spoken into a follow-up call.
+        if self._call_manager and self._call_manager.is_call_end_reply(reply_to):
+            return SendResult(success=True, message_id=None)
+
         if self._call_manager and self._call_manager.has_active_call(chat_id):
             thread_id = (metadata or {}).get("thread_id")
             if self._call_manager.is_call_thread(thread_id):
@@ -1050,11 +1067,6 @@ body {{
             # agent's "calling you now" line in separate-thread mode, or a
             # concurrent DM) — deliver it as a normal Delta Chat message instead
             # of speaking it into the call. Falls through to the normal send path.
-        # Suppress the AI's reply to the internal "call ended" note so we don't
-        # text the user a stray message after a call.
-        if self._call_manager and self._call_manager.consume_drop_response(chat_id):
-            return SendResult(success=True, message_id=None)
-
         try:
             if not self.rpc or not self.account_id:
                 return SendResult(
@@ -1065,7 +1077,7 @@ body {{
             # Format long messages with HTML
             text_part, html_part = self._format_html_message(content)
 
-            quoted_id = int(reply_to) if reply_to else None
+            quoted_id = _quote_id(reply_to)
 
             if html_part:
                 from deltachat2.types import MsgData, MessageViewtype
@@ -1120,7 +1132,7 @@ body {{
             msg_id = await self.rpc.send_msg(
                 self.account_id,
                 await self._resolve_chat_id(chat_id),
-                MsgData(file=file_path, text=caption or "", quoted_message_id=int(reply_to) if reply_to else None),
+                MsgData(file=file_path, text=caption or "", quoted_message_id=_quote_id(reply_to)),
             )
             logger.debug(f"Sent file {file_path} as message {msg_id} to chat {chat_id}")
             return SendResult(success=True, message_id=str(msg_id))
@@ -1187,7 +1199,7 @@ body {{
                     file=image_path,
                     text=caption or "",
                     viewtype=MessageViewtype.IMAGE,
-                    quoted_message_id=int(reply_to) if reply_to else None,
+                    quoted_message_id=_quote_id(reply_to),
                 ),
             )
             logger.debug(f"Sent image {image_path} as message {msg_id} to chat {chat_id}")
@@ -1224,7 +1236,7 @@ body {{
                     file=video_path,
                     text=caption or "",
                     viewtype=MessageViewtype.VIDEO,
-                    quoted_message_id=int(reply_to) if reply_to else None,
+                    quoted_message_id=_quote_id(reply_to),
                 ),
             )
             logger.debug(f"Sent video {video_path} as message {msg_id} to chat {chat_id}")

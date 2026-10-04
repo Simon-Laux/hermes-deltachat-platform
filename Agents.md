@@ -20,6 +20,21 @@ Pass `tests/` explicitly. Bare `pytest` collects the repo root, where `__init__.
 test module down with it (~134 collection errors that say nothing about the tests). `make test`
 sidesteps it by running from inside `tests/`.
 
+**The call tests** (`test_call_handler.py`, `test_call_webrtc_loopback.py`) fail to collect in
+the dev shell: `call_handler.py` puts `~/.hermes/aiortc-env` on `sys.path`, and that env is built
+from Hermes's nixpkgs, not the dev shell's (glibc mismatch → `GLIBC_2.4x not found`). Run the
+whole suite with a Python from Hermes's own nixpkgs instead:
+
+```bash
+nix build --impure -o ./.calltest-py --expr 'let p = import (builtins.getFlake
+  "github:NousResearch/hermes-agent/<tag>").inputs.nixpkgs { system = builtins.currentSystem; };
+  in p.python312.withPackages (ps: [ ps.aiortc ps.pytest ps.pytest-asyncio ps.numpy ])'
+env -u LD_LIBRARY_PATH -u PYTHONPATH HOME=/nonexistent ./.calltest-py/bin/python3 \
+  -m pytest tests/ -p no:cacheprovider          # add `-m slow` for the WebRTC loopback tests
+```
+
+`HOME=/nonexistent` keeps `call_handler.py` from loading the live `~/.hermes/aiortc-env`.
+
 ## Finding Hermes Source
 
 ### Locating your installed Hermes

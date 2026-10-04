@@ -293,6 +293,36 @@ class TestSendMessage:
         assert mock_rpc.send_msg.await_args.args[1] == 789
 
     @pytest.mark.asyncio
+    async def test_reply_to_a_call_end_note_is_suppressed(self, platform_config, mock_rpc):
+        """Hermes anchors the reply on the note's synthetic id — seen live as
+        `invalid literal for int() with base 10: 'callend-35422583'`."""
+        adapter = DeltaChatAdapter(platform_config)
+        adapter.rpc = mock_rpc
+        adapter.account_id = 1
+        adapter._call_manager = Mock()
+        adapter._call_manager.is_call_end_reply = lambda r: str(r).startswith("callend-")
+        mock_rpc.send_msg = AsyncMock(return_value=55)
+
+        result = await adapter.send("19", "Okay, call over.", reply_to="callend-35422583")
+
+        assert result.success is True
+        mock_rpc.send_msg.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_non_numeric_reply_to_sends_unquoted(self, platform_config, mock_rpc):
+        adapter = DeltaChatAdapter(platform_config)
+        adapter.rpc = mock_rpc
+        adapter.account_id = 1
+        mock_rpc.send_msg = AsyncMock(return_value=55)
+
+        result = await adapter.send("19", "hi", reply_to="synthetic-7")
+        assert result.success is True
+        assert mock_rpc.send_msg.await_args.args[2].quoted_message_id is None
+
+        await adapter.send("19", "hi", reply_to="1756")
+        assert mock_rpc.send_msg.await_args.args[2].quoted_message_id == 1756
+
+    @pytest.mark.asyncio
     async def test_send_video_not_connected(self, platform_config):
         adapter = DeltaChatAdapter(platform_config)
         adapter.rpc = None

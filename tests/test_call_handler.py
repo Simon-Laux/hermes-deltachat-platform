@@ -263,21 +263,14 @@ class TestOutgoingCall:
         with pytest.raises(RuntimeError):
             fut.result()
 
-    @pytest.mark.asyncio
-    async def test_consume_drop_response_is_one_shot(self):
-        mgr = self._manager()
-        # _drop_next_response is a chat_id → count map: each call-end can inject
-        # two AI notes (call thread + main thread), so one send() must not clear
-        # a pending second drop.
-        mgr._drop_next_response["12"] = 1
-        assert mgr.consume_drop_response("12") is True   # call-ended note's reply → drop
-        assert mgr.consume_drop_response("12") is False  # subsequent replies go through
-        assert mgr.consume_drop_response("99") is False
-
-        mgr._drop_next_response["12"] = 2
-        assert mgr.consume_drop_response("12") is True
-        assert mgr.consume_drop_response("12") is True   # second note also dropped
-        assert mgr.consume_drop_response("12") is False
+    def test_call_end_reply_is_recognised_by_its_anchor(self):
+        # Both injected notes (call thread + main thread) share the prefix.
+        assert ch.CallManager.is_call_end_reply("callend-35422583") is True
+        assert ch.CallManager.is_call_end_reply("callend-main-35422590") is True
+        # Real DC message ids and missing anchors go through.
+        assert ch.CallManager.is_call_end_reply("1756") is False
+        assert ch.CallManager.is_call_end_reply(None) is False
+        assert ch.CallManager.is_call_end_reply("") is False
 
 
 class TestDecodeTts:
