@@ -11,9 +11,14 @@ This project runs on NixOS. All tools are provided via `nix develop`. Never run 
 ```bash
 nix develop                              # enter dev shell
 nix develop --command python3 script.py  # run a script
-nix develop --command pytest             # run tests
+nix develop --command pytest tests/      # run tests — the path is required, see below
 nix develop --command deltachat-rpc-server --openrpc  # inspect RPC spec
 ```
+
+Pass `tests/` explicitly. Bare `pytest` collects the repo root, where `__init__.py` does
+`from .adapter import ...` — a relative import with no parent package, which fails and takes every
+test module down with it (~134 collection errors that say nothing about the tests). `make test`
+sidesteps it by running from inside `tests/`.
 
 ## Finding Hermes Source
 
