@@ -70,14 +70,37 @@ library paths.
 ### Solution: nix-managed Python environment
 
 Build a Python 3.12 environment containing aiortc and all its dependencies
-using nixpkgs. The `-o` flag creates a symlink that acts as a **GC root**,
-keeping the store path alive through `nix-collect-garbage`.
+from **the nixpkgs your installed Hermes was built with** — not your system
+`<nixpkgs>`. The env is loaded into the Hermes process, so it has to agree with
+Hermes on two things:
+
+- **glibc** — a newer nixpkgs links PyAV/ALSA against a newer glibc, and the
+  import dies with ``version `GLIBC_2.4x' not found``.
+- **cryptography** — Hermes imports its own `cryptography` first; a pyOpenSSL
+  built for an older one then fails with
+  `module 'lib' has no attribute 'GEN_EMAIL'` and the adapter cannot connect.
+
+The expression reads the installed Hermes's locked flake from your `nix
+profile` and takes nixpkgs from that flake's inputs. The `-o` flag creates a
+symlink that acts as a **GC root**, keeping the store path alive through
+`nix-collect-garbage`.
 
 ```bash
-nix build --impure \
-  --expr 'with import <nixpkgs> {}; python312.withPackages(ps: [ps.aiortc])' \
-  -o ~/.hermes/aiortc-env
+rm -f ~/.hermes/aiortc-env
+nix build --impure -o ~/.hermes/aiortc-env --expr '
+  let
+    manifest = builtins.fromJSON (builtins.unsafeDiscardStringContext
+      (builtins.readFile (builtins.getEnv "HOME" + "/.nix-profile/manifest.json")));
+    hermes = builtins.head (builtins.filter
+      (e: builtins.match ".*NousResearch/hermes-agent.*" (e.originalUrl or "") != null)
+      (builtins.attrValues manifest.elements));
+    pkgs = import (builtins.getFlake hermes.url).inputs.nixpkgs { system = builtins.currentSystem; };
+  in pkgs.python312.withPackages (ps: [ ps.aiortc ])'
 ```
+
+If Hermes comes from a NixOS or home-manager flake input instead of `nix
+profile`, replace `hermes.url` with that input's locked ref (e.g.
+`github:NousResearch/hermes-agent/v2026.9.24`).
 
 Then add the environment's site-packages to Hermes's `PYTHONPATH` in `~/.hermes/.env`:
 
@@ -91,24 +114,18 @@ Restart Hermes — voice call support is now active.
 ### Verifying the installation
 
 ```bash
-HERMES_PYTHON=$(grep HERMES_PYTHON /proc/$(pgrep -f hermes-agent)/environ 2>/dev/null \
-  | tr '\0' '\n' | grep HERMES_PYTHON | cut -d= -f2 \
-  || echo /nix/store/2lx3hbviihknq6v6zbig8vbkymi0y5an-hermes-agent-env/bin/python3)
+# Hermes's own interpreter, found through the wrapper's runtime closure
+HERMES_PYTHON=$(nix-store -qR "$(readlink -f "$(which hermes)")" \
+  | grep -- '-hermes-agent-env$')/bin/python3
 
 PYTHONPATH=~/.hermes/aiortc-env/lib/python3.12/site-packages:~/.hermes/python-packages \
-  $HERMES_PYTHON -c "import aiortc; import av; print('aiortc', aiortc.__version__)"
+  $HERMES_PYTHON -c "import aiortc, av; from OpenSSL import crypto; print('aiortc', aiortc.__version__)"
 ```
 
 ### Keeping it up to date
 
-If you upgrade Hermes or nixpkgs and need a newer aiortc, rebuild the env:
-
-```bash
-rm ~/.hermes/aiortc-env
-nix build --impure \
-  --expr 'with import <nixpkgs> {}; python312.withPackages(ps: [ps.aiortc])' \
-  -o ~/.hermes/aiortc-env
-```
+**Rebuild the env after every Hermes update** — rerun the build command above.
+Skipping it is what produces the `GEN_EMAIL` / `GLIBC_2.4x` errors.
 
 ### Reverting / removing voice call support
 
