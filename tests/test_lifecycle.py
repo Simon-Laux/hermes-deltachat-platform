@@ -33,7 +33,8 @@ class TestListenerDeathEscalates:
         adapter._mark_connected()
         adapter.rpc.get_next_event = AsyncMock(side_effect=asyncio.CancelledError())
 
-        await adapter._event_listener()
+        with pytest.raises(asyncio.CancelledError):
+            await adapter._event_listener()
 
         assert adapter.has_fatal_error is True
         assert adapter.fatal_error_code == "event_listener_stopped"
@@ -47,7 +48,8 @@ class TestListenerDeathEscalates:
         adapter.set_fatal_error_handler(handler)
         adapter.rpc.get_next_event = AsyncMock(side_effect=asyncio.CancelledError())
 
-        await adapter._event_listener()
+        with pytest.raises(asyncio.CancelledError):
+            await adapter._event_listener()
         await asyncio.sleep(0)  # the notify is fired as its own task
 
         handler.assert_awaited_once_with(adapter)
@@ -66,7 +68,7 @@ class TestListenerDeathEscalates:
             raise asyncio.CancelledError()
 
         adapter.rpc.get_next_event = AsyncMock(side_effect=flaky)
-        with patch("asyncio.sleep", AsyncMock()):
+        with patch("asyncio.sleep", AsyncMock()), pytest.raises(asyncio.CancelledError):
             await adapter._event_listener()
 
         assert len(calls) == 3
@@ -105,13 +107,13 @@ class TestListenerDeathEscalates:
         adapter._mark_connected()
         adapter.rpc.get_next_event = AsyncMock(side_effect=asyncio.CancelledError())
 
-        await adapter._event_listener()
+        with pytest.raises(asyncio.CancelledError):
+            await adapter._event_listener()
         # Give any (unwanted) restart task a chance to run and poll again.
         for _ in range(5):
             await asyncio.sleep(0)
 
         assert adapter.rpc.get_next_event.await_count == 1
-        assert adapter._event_loop_task is None
 
 
 class TestCleanupReportsStatus:
@@ -164,12 +166,13 @@ class TestDisconnectIsResilient:
     @pytest.mark.asyncio
     async def test_normal_disconnect_tears_down_the_call_manager(self, adapter):
         adapter._mark_connected()
-        adapter._call_manager = MagicMock()
-        adapter._call_manager.teardown = AsyncMock()
+        call_manager = adapter._call_manager = MagicMock()
+        call_manager.teardown = AsyncMock()
 
         await adapter.disconnect()
 
-        adapter._call_manager is None
+        call_manager.teardown.assert_awaited_once()
+        assert adapter._call_manager is None
         assert adapter.is_connected is False
 
 

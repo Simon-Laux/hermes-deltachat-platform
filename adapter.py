@@ -751,9 +751,12 @@ class DeltaChatAdapter(BasePlatformAdapter):
         Also reached from connect()'s failure paths, which is why it marks
         disconnected itself: a failed connect used to leave the last-written
         runtime status in place, so gateway_state.json kept claiming the
-        platform was connected. _mark_disconnected() early-returns when a fatal
-        error is already recorded, so this cannot overwrite a "fatal"/"retrying"
-        state with a plain "disconnected".
+        platform was connected. _mark_disconnected() early-returns when *this
+        adapter* has recorded a fatal error, so our own "fatal" state survives.
+        It does not protect a "retrying" state the gateway wrote: when the
+        reconnect watcher disposes of an adapter whose connect() failed (no
+        fatal error recorded), this overwrites it with "disconnected" — as the
+        old disconnect() already did.
         """
         global _active_adapter
         if _active_adapter is self:
@@ -1524,7 +1527,9 @@ body {{
                         if envelope.get("context_id") == self.account_id:
                             await self._handle_dc_event(envelope.get("event", {}))
                 except asyncio.CancelledError:
-                    break
+                    # Re-raise so the task ends cancelled; the finally still
+                    # runs, and escalates only if this was not a teardown.
+                    raise
                 except Exception as e:
                     logger.error(f"Event listener error: {e}")
                     await asyncio.sleep(1)
