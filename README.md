@@ -40,7 +40,7 @@ Delta Chat is a decentralized private messenger with end-to-end encryption, and 
 
 ## Quick Start
 
-**Prerequisite:** [Hermes Agent](https://github.com/NousResearch/hermes-agent) must be installed first.
+**Prerequisite:** [Hermes Agent](https://github.com/NousResearch/hermes-agent) **0.21.5 or newer** must be installed first.
 
 `plugin.yaml` declares `deltachat-rpc-server` and `aiortc` as `python_dependencies`, so a Hermes
 that supports that manifest key installs them into its own venv when you enable the plugin — and
