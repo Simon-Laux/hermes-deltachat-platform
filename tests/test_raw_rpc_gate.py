@@ -11,29 +11,41 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import adapter
-from adapter import _is_destructive
+from adapter import _is_blocked
 
 
 class TestIsDestructive:
     @pytest.mark.parametrize("method", [
         "leave_group",
-        "set_chat_ephemeral_timer",  # timed deletion
-        "add_contact_to_chat",       # membership change the prefix rule misses
+        "set_chat_ephemeral_timer",        # timed deletion
+        "add_contact_to_chat",             # membership change the prefix rule misses
         "block_chat",
+        "set_chat_mute_duration",          # hides traffic from the gateway
+        "set_chat_visibility",
+        "forward_messages",                # unscoped source — reaches other chats
+        "get_chat_securejoin_qr_code",     # a read, but it returns a credential
+        "get_chat_securejoin_qr_code_svg",
+        "send_locations_to_chat",          # streams real device location
+        "place_outgoing_call",             # dc_start_call is the proper route
+        "init_webxdc_integration",
         "delete_something_added_next_release",  # prefix rule, not a literal list
         "remove_something_added_next_release",
     ])
     def test_blocked(self, method):
-        assert _is_destructive(method)
+        assert _is_blocked(method)
 
     @pytest.mark.parametrize("method", [
         "get_basic_chat_info",
         "undelete_chat",      # prefix match, not substring
         "misc_set_draft",     # the agent managing its own draft is ordinary use
         "misc_send_draft",
+        "get_locations",      # reading what contacts opted into sharing is fine;
+                              # send_locations_to_chat (writing ours) is not
+        "send_msg",
+        "set_chat_name",
     ])
     def test_allowed(self, method):
-        assert not _is_destructive(method)
+        assert not _is_blocked(method)
 
 
 @pytest.fixture

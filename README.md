@@ -132,9 +132,19 @@ DELTACHAT_RAW_RPC_ALLOWLIST=get_account_info,get_chatlist_entries  # only these
 ```
 
 Refused everywhere, in both `dc_rpc_call` and `dc_safe_rpc_call`: any `delete_*` /
-`remove_*` method, plus `leave_group`, `set_chat_ephemeral_timer` (timed deletion),
-`add_contact_to_chat` (adds a stranger to a private group) and `block_chat`. The last
-three are blocked for what they do, not what they are called.
+`remove_*` method, plus twelve named for what they do rather than what they are called —
+
+| | |
+|---|---|
+| `leave_group`, `set_chat_ephemeral_timer` | destroy or detach (the timer is timed deletion) |
+| `forward_messages`, `add_contact_to_chat` | reach outside the chat the token scopes |
+| `get_chat_securejoin_qr_code`(`_svg`) | the QR text *is* the group invite |
+| `send_locations_to_chat` | streams real device location |
+| `block_chat`, `set_chat_mute_duration`, `set_chat_visibility` | hide traffic from the gateway |
+| `place_outgoing_call`, `init_webxdc_integration` | reachable better via `dc_start_call`, or internal plumbing |
+
+Reading locations contacts chose to share (`get_locations`) stays allowed; only
+broadcasting ours is refused.
 
 That refusal always applies — allowlisting such a method does
 not re-enable it. Leaving the allowlist blank allows any non-destructive method; setting

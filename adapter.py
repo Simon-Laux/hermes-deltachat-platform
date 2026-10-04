@@ -292,30 +292,60 @@ def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() not in ("", "0", "false", "no", "off")
 
 
-# Destructive effects whose names the delete_*/remove_* rule does not catch.
-# Each is here for what it does, not what it is called:
+# Methods the RPC tools refuse, beyond the delete_*/remove_* prefix rule.
+# Each is here for what it does, not for what it is called.
 _BLOCKED_METHODS = frozenset({
-    "leave_group",               # detaches the bot from a chat, irreversibly
-    "set_chat_ephemeral_timer",  # timed deletion — delete_messages by another name
-    "add_contact_to_chat",       # adds a stranger to a private group. Note the
-                                 # asymmetry the prefix rule creates on its own:
-                                 # remove_contact_from_chat is blocked, this is not
-    "block_chat",                # silences a conversation; the operator may be the
-                                 # one silenced, and cannot undo it over chat
+    # --- destroys or detaches ---
+    "leave_group",                     # detaches the bot from a chat, irreversibly
+    "set_chat_ephemeral_timer",        # timed deletion — delete_messages by another
+                                       # name. The prefix rule sees names, not effects
+    # --- reaches outside the chat the token scopes ---
+    "forward_messages",                # messageIds are global and unscoped, so this
+                                       # copies messages *out of any private chat*
+                                       # into this one. The token scopes the
+                                       # destination and does nothing about the source
+    "add_contact_to_chat",             # adds a stranger to a private group. Note the
+                                       # asymmetry the prefix rule creates on its own:
+                                       # remove_contact_from_chat is blocked, this is not
+    # --- hands out credentials ---
+    "get_chat_securejoin_qr_code",     # the QR *text* is the invite — whoever reads it
+    "get_chat_securejoin_qr_code_svg", # can join the verified group. A read method, but
+                                       # what it returns is a credential, not data.
+                                       # (The adapter still calls these directly for its
+                                       # own startup invite link; only the tools refuse.)
+    # --- leaks the device, not the chat ---
+    "send_locations_to_chat",          # starts streaming real device location for N
+                                       # seconds. get_locations stays allowed: reading
+                                       # what contacts chose to share is opt-in by them
+    # --- hides the conversation from the bot's own operator ---
+    "set_chat_mute_duration",          # muting is meaningless for a bot and only ever
+    "set_chat_visibility",             # serves to hide traffic from the gateway side
+    "block_chat",                      # silences a conversation; cannot be undone over
+                                       # chat by the person who was silenced
+    # --- reachable by a better route, or not ours to touch ---
+    "place_outgoing_call",             # dc_start_call is the purpose-built tool, with
+                                       # the opening-line handling this lacks
+    "init_webxdc_integration",         # internal plumbing for Delta Chat's own map
+                                       # feature, not an integration point for us
 })
 
 
-def _is_destructive(method: str) -> bool:
-    """True for methods that destroy, detach, or silence.
+def _is_blocked(method: str) -> bool:
+    """True for methods the RPC tools refuse.
 
     Two rules. The prefix half is deliberately open-ended: the OpenRPC surface
     grows with every core release, and a new delete_* method should be blocked
-    the day it appears, not the day we notice it. The named half covers effects
-    the prefixes miss.
+    the day it appears, not the day we notice it. The named half above covers
+    what the prefixes cannot see.
 
-    It is still a name rule, so it bounds names rather than capabilities — it
+    Named rather than "destructive" because the list outgrew that: it now also
+    covers disclosure (securejoin QR), reaching outside the token's scope
+    (forward_messages) and methods better reached another way.
+
+    It is still a *name* rule, so it bounds names rather than capabilities. It
     does not stop set_config(delete_device_after), which wipes the whole message
-    store under an innocuous name. The allowlist is the real control (#22).
+    store under an innocuous name, nor the `file` parameter on send_msg, which
+    takes any local path (#32). The allowlist is the real control (#22).
 
     Draft methods are deliberately absent: the agent writing and clearing its
     own drafts is ordinary use, not destruction.
@@ -1946,7 +1976,7 @@ def register_rpc_tools(ctx) -> None:
             )
         if allowlist and method not in allowlist:
             return _refuse("not allowlisted", f"'{method}' is not in the raw RPC allowlist")
-        if _is_destructive(method):
+        if _is_blocked(method):
             return _refuse("blocked", f"'{method}' is blocked")
 
         # Check the name against the spec rather than relying on getattr to
@@ -1991,7 +2021,7 @@ def register_rpc_tools(ctx) -> None:
         safe_methods = [
             m for m in spec.get("methods", [])
             if any(p["name"] == "chatId" for p in m.get("params", []))
-            and not _is_destructive(m["name"])
+            and not _is_blocked(m["name"])
         ]
         return json.dumps({**spec, "methods": safe_methods}, indent=2)
 
@@ -2011,7 +2041,7 @@ def register_rpc_tools(ctx) -> None:
             return json.dumps({"error": "Unknown chat_token — use the [dc:chat=...] value from your message"})
 
         # Block destructive methods
-        if _is_destructive(method):
+        if _is_blocked(method):
             return json.dumps({"error": f"'{method}' is not allowed in safe mode"})
 
         # Verify method exists and has a chatId param

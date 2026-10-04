@@ -64,9 +64,21 @@ class TestParamBinding:
 
     @pytest.mark.asyncio
     async def test_chat_id_last_is_placed_last(self, safe_handler, connected):
-        """forward_messages(accountId, messageIds, chatId) — the whole point."""
-        await safe_handler({"method": "forward_messages", "chat_token": TOKEN, "params": [[7, 8]]})
-        connected.rpc.forward_messages.assert_awaited_once_with(1, [7, 8], CHAT_ID)
+        """search_messages(accountId, query, chatId) — chatId is not parameter 1.
+
+        forward_messages has the same shape but is now refused outright (its
+        messageIds are unscoped), so search_messages is the live case.
+        """
+        await safe_handler({"method": "search_messages", "chat_token": TOKEN, "params": ["q"]})
+        connected.rpc.search_messages.assert_awaited_once_with(1, "q", CHAT_ID)
+
+    @pytest.mark.asyncio
+    async def test_forward_messages_is_refused_not_bound(self, safe_handler, connected):
+        """The denylist runs before binding, so this never reaches the server."""
+        result = json.loads(await safe_handler(
+            {"method": "forward_messages", "chat_token": TOKEN, "params": [[7, 8]]}))
+        assert "not allowed" in result["error"]
+        connected.rpc.forward_messages.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_caller_cannot_smuggle_a_chat_id(self, safe_handler, connected):
