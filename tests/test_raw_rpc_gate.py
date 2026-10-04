@@ -78,12 +78,17 @@ def connected_adapter():
 
 
 class TestRawRpcGate:
-    @pytest.mark.asyncio
-    async def test_not_registered_without_env(self):
+    @pytest.mark.parametrize("value", [None, "", "0", "false", "no", "off", "OFF", " 0 "])
+    def test_not_registered_unless_flag_reads_as_on(self, value):
+        """A kill switch must not fail open.
+
+        plugin.yaml prompts for this, so an operator answering "0" to mean "no"
+        is the expected input, not an exotic one.
+        """
         handlers = {}
         ctx = MagicMock()
         ctx.register_tool.side_effect = lambda **kw: handlers.__setitem__(kw["name"], kw["handler"])
-        env = {k: v for k, v in os.environ.items() if k != "DELTACHAT_ENABLE_RAW_RPC"}
+        env = {} if value is None else {"DELTACHAT_ENABLE_RAW_RPC": value}
         with patch.dict(os.environ, env, clear=True):
             adapter.register_rpc_tools(ctx)
         assert "dc_rpc_call" not in handlers
@@ -125,11 +130,6 @@ class TestRawRpcGate:
         assert "blocked" in result["error"]
         connected_adapter.rpc.delete_chat.assert_not_awaited()
 
-    @pytest.mark.asyncio
-    async def test_call_is_logged_at_warning(self, raw_rpc_handler, connected_adapter, caplog):
-        with caplog.at_level("WARNING", logger="hermes_plugins.deltachat"):
-            await raw_rpc_handler({"method": "get_basic_chat_info", "params": []})
-        assert any("get_basic_chat_info" in r.getMessage() for r in caplog.records)
 
     @pytest.mark.asyncio
     async def test_rpc_error_is_forwarded_and_logged(self, raw_rpc_handler, connected_adapter, caplog):
@@ -161,6 +161,30 @@ class TestRawRpcGate:
         with patch.object(adapter, "_fetch_spec", AsyncMock(side_effect=RuntimeError("no binary"))):
             result = json.loads(await raw_rpc_handler({"method": "get_basic_chat_info", "params": []}))
         assert result == {"ok": True}
+
+    @pytest.mark.asyncio
+    async def test_refusal_is_logged_distinguishably(self, raw_rpc_handler, connected_adapter, caplog):
+        """errors.log must not read the same for a blocked call and an executed one."""
+        with caplog.at_level("WARNING", logger="hermes_plugins.deltachat"):
+            await raw_rpc_handler({"method": "delete_chat", "params": []})
+        lines = [r.getMessage() for r in caplog.records]
+        assert any("REFUSED" in m for m in lines)
+        assert not any("ACCEPTED" in m for m in lines)
+
+    @pytest.mark.asyncio
+    async def test_method_name_cannot_forge_a_log_line(self, raw_rpc_handler, connected_adapter, caplog):
+        """%r, not %s — an embedded newline must not fake a second audit entry."""
+        forged = "delete_chat\nWARNING hermes_plugins.deltachat: Raw RPC call ACCEPTED: 'get_account_info'"
+        with caplog.at_level("WARNING", logger="hermes_plugins.deltachat"):
+            await raw_rpc_handler({"method": forged, "params": []})
+        for r in caplog.records:
+            assert "\n" not in r.getMessage(), "raw newline reached the log"
+
+    @pytest.mark.asyncio
+    async def test_accepted_call_is_logged_once_past_the_gates(self, raw_rpc_handler, connected_adapter, caplog):
+        with caplog.at_level("WARNING", logger="hermes_plugins.deltachat"):
+            await raw_rpc_handler({"method": "get_basic_chat_info", "params": []})
+        assert sum("ACCEPTED" in r.getMessage() for r in caplog.records) == 1
 
     @pytest.mark.asyncio
     async def test_missing_method_arg(self, raw_rpc_handler, connected_adapter):

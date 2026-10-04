@@ -264,18 +264,6 @@ _active_adapter = None
 _chat_id_to_token: Dict[int, str] = {}
 _chat_token_to_id: Dict[str, int] = {}
 
-# Methods that mutate or destroy chat data — blocked from dc_safe_rpc_call
-# and from dc_rpc_call, along with any delete_*/remove_* method.
-_DESTRUCTIVE_METHODS = frozenset({
-    "delete_chat",
-    "delete_messages",
-    "delete_messages_for_all",
-    "remove_contact_from_chat",
-    "remove_draft",
-    "leave_group",
-})
-
-
 def _parse_method_list(value: Optional[str]) -> frozenset:
     """Parse a comma-separated list of RPC method names into a set."""
     if not value:
@@ -283,18 +271,29 @@ def _parse_method_list(value: Optional[str]) -> frozenset:
     return frozenset(m.strip() for m in value.split(",") if m.strip())
 
 
+def _env_flag(name: str) -> bool:
+    """True when *name* is set to something that reads as "on".
+
+    why: plain truthiness on os.getenv treats "0", "false" and "off" as enabled,
+    because they are non-empty strings. That is a fail-open kill switch — and
+    plugin.yaml prompts the operator for these, which invites exactly a "0".
+    """
+    return os.getenv(name, "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
 def _is_destructive(method: str) -> bool:
     """True for methods that destroy or detach chat data.
 
-    The prefix check is deliberately broader than _DESTRUCTIVE_METHODS: the
-    OpenRPC surface grows with every core release, and a new delete_* method
-    should be blocked the day it appears, not the day we notice it.
+    The prefix rule is deliberately open-ended: the OpenRPC surface grows with
+    every core release, and a new delete_* method should be blocked the day it
+    appears, not the day we notice it. leave_group is the only destructive name
+    in the current spec that the prefixes miss — checked against all 177.
+
+    This is a name rule, so it catches names, not capabilities. It does not stop
+    set_config(delete_device_after) or set_chat_ephemeral_timer, which destroy
+    data under innocuous names. See the allowlist for the real control.
     """
-    return (
-        method in _DESTRUCTIVE_METHODS
-        or method.startswith("delete_")
-        or method.startswith("remove_")
-    )
+    return method == "leave_group" or method.startswith(("delete_", "remove_"))
 
 
 # Cached OpenRPC spec (fetched lazily on first use).
@@ -2047,20 +2046,21 @@ def register_rpc_tools(ctx) -> None:
         if _active_adapter is None or _active_adapter.rpc is None:
             return json.dumps({"error": "Delta Chat is not connected"})
 
-        # WARNING, not INFO: this tool can reach the whole account, and anyone
-        # who gets text in front of the model can try to steer it. WARNING is
-        # the lowest level that lands in errors.log, so the audit trail
-        # survives even when gateway.log has rolled over.
-        logger.warning("Raw RPC call: %s", method)
+        # why: %r, not %s. `method` is model-supplied and has only been checked
+        # for being a str — an embedded newline would otherwise let it forge a
+        # second, entirely fake audit line in errors.log.
+        def _refuse(reason: str, detail: str) -> str:
+            logger.warning("Raw RPC call REFUSED (%s): %r", reason, method)
+            return json.dumps({"error": detail})
 
         # Read at call time, not import time — Hermes loads ~/.hermes/.env
         # after this module is imported.
         allowlist = _parse_method_list(os.getenv("DELTACHAT_RAW_RPC_ALLOWLIST"))
         blocklist = _parse_method_list(os.getenv("DELTACHAT_RAW_RPC_BLOCKLIST"))
         if allowlist and method not in allowlist:
-            return json.dumps({"error": f"'{method}' is not in the raw RPC allowlist"})
+            return _refuse("not allowlisted", f"'{method}' is not in the raw RPC allowlist")
         if method in blocklist or _is_destructive(method):
-            return json.dumps({"error": f"'{method}' is blocked"})
+            return _refuse("blocked", f"'{method}' is blocked")
 
         # Check the name against the spec rather than relying on getattr to
         # raise: deltachat2.Rpc.__getattr__ returns a lambda for *any* name, so
@@ -2070,12 +2070,15 @@ def register_rpc_tools(ctx) -> None:
         try:
             known = {m["name"] for m in (await _fetch_spec()).get("methods", [])}
         except Exception as e:
-            logger.warning("Could not load the RPC spec to validate %s: %s", method, e)
+            logger.warning("Could not load the RPC spec to validate %r: %s", method, e)
             known = None
         if known is not None and method not in known:
-            return json.dumps({
-                "error": f"Unknown method '{method}' — use dc_rpc_spec to browse available methods"
-            })
+            return _refuse("unknown method", f"Unknown method '{method}' — use dc_rpc_spec to browse available methods")
+
+        # why: logged here, after every gate, so errors.log distinguishes a call
+        # that ran from one that was refused. Logging before the gates made both
+        # look identical, which is useless as an audit trail.
+        logger.warning("Raw RPC call ACCEPTED: %r", method)
 
         try:
             result = await getattr(_active_adapter.rpc, method)(*params)
@@ -2224,7 +2227,7 @@ def register_rpc_tools(ctx) -> None:
         emoji="📋",
     )
 
-    if os.getenv("DELTACHAT_ENABLE_RAW_RPC"):
+    if _env_flag("DELTACHAT_ENABLE_RAW_RPC"):
         ctx.register_tool(
             name="dc_rpc_call",
             toolset="deltachat",

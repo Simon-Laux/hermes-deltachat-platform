@@ -125,8 +125,14 @@ DELTACHAT_RAW_RPC_ALLOWLIST=get_account_info,get_chatlist_entries  # only these
 DELTACHAT_RAW_RPC_BLOCKLIST=set_config,add_or_update_transport     # never these
 ```
 
-An allowlist, when set, wins over everything else; the blocklist stacks on top of the
-built-in `delete_*` / `remove_*` refusal.
+The `delete_*` / `remove_*` refusal always applies — allowlisting such a method does
+not re-enable it. Within what remains, an allowlist (when set) is deny-by-default and
+the blocklist subtracts further.
+
+Note this is a rule about method *names*, so it is narrow: it blocks 9 of the 177 spec
+methods. It does not stop `set_config(delete_device_after)` or `set_chat_ephemeral_timer`,
+which destroy data under innocuous names. Set `DELTACHAT_RAW_RPC_ALLOWLIST` if you want a
+real bound on what the agent can reach.
 
 RPC errors come back to the agent verbatim so it can correct a malformed call. That
 discloses nothing a tool with `get_message` and `get_system_info` did not already
