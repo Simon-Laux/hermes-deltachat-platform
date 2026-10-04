@@ -3,8 +3,6 @@ mentions, quote-replies to the bot and slash commands pass.
 
 Based on the tests in PR #18 by terafin.
 """
-import sys
-import types
 from unittest.mock import AsyncMock
 
 import pytest
@@ -127,43 +125,62 @@ async def test_handler_drops_unmentioned_group_message():
     assert a.handle_message.await_args.args[0].source.chat_type == "group"
 
 
-@pytest.fixture
-def hermes_commands(monkeypatch):
-    """Stand-in for hermes_cli.commands with a few known gateway commands."""
-    known = {"reset", "help", "sethome"}
-    mod = types.ModuleType("hermes_cli.commands")
-    mod.is_gateway_known_command = lambda name: name in known
-    monkeypatch.setitem(sys.modules, "hermes_cli", types.ModuleType("hermes_cli"))
-    monkeypatch.setitem(sys.modules, "hermes_cli.commands", mod)
-
-
 @pytest.mark.asyncio
-@pytest.mark.parametrize("text,ok", [
-    ("/reset", True),
-    ("/RESET now", True),
-    ("/set_home", False),  # not known after "_" -> "-" either
-    ("/frobnicate", False),  # unknown: Hermes would reply "Unknown command"
-    ("/home/alice is broken", False),
-    ("/", False),
-    ("@ghost /frobnicate", True),  # an unknown command can still be addressed by mention
+@pytest.mark.parametrize("require_mention", [True, False])
+@pytest.mark.parametrize("text,ok,forwarded", [
+    ("/reset@Ghost", True, "/reset"),
+    ("/reset@ghost now please", True, "/reset now please"),
+    ("/reset@spooky", True, "/reset"),  # alias
+    ("/reset@Other", False, None),
+    ("/reset@Ghostly", False, None),  # another bot whose name starts with ours
+    ("/reset@ghost-agent@chat.example", False, None),  # the address is not a name
 ])
-async def test_only_known_slash_commands_skip_the_gate(hermes_commands, text, ok):
-    a = _adapter({"require_mention": True})
-    assert await a._mention_gate_allows(_msg(text), 5) is ok
+async def test_addressed_commands(require_mention, text, ok, forwarded):
+    a = _adapter({"require_mention": require_mention, "mention_aliases": "spooky"})
+    msg = _msg(text)
+    assert await a._mention_gate_allows(msg, 5) is ok
+    if ok:
+        assert msg["text"] == forwarded
 
 
 @pytest.mark.asyncio
-async def test_known_command_does_not_need_chat_lookup(hermes_commands):
+async def test_addressed_command_to_name_with_spaces():
+    a = _adapter({"require_mention": True}, displayname="Hermes Bot")
+    msg = _msg("/model@hermes bot gpt-5")
+    assert await a._mention_gate_allows(msg, 5)
+    assert msg["text"] == "/model gpt-5"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("text", ["/reset", "/home/alice is broken", "/"])
+async def test_bare_slash_in_group_needs_addressing(text):
     a = _adapter({"require_mention": True})
-    assert await a._mention_gate_allows(_msg("/help"), 5)
+    assert not await a._mention_gate_allows(_msg(text), 5)
+
+
+@pytest.mark.asyncio
+async def test_without_require_mention_bare_commands_pass_without_lookup():
+    a = _adapter()
+    assert await a._mention_gate_allows(_msg("/reset"), 5)
     a.rpc.get_basic_chat_info.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_without_hermes_cli_slash_needs_a_mention(monkeypatch):
-    monkeypatch.setitem(sys.modules, "hermes_cli", None)  # makes the import fail
+async def test_addressed_commands_are_left_alone_in_dms():
+    a = _adapter({"require_mention": True}, chat_type="Single")
+    msg = _msg("/reset@Other")
+    assert await a._mention_gate_allows(msg, 5)
+    assert msg["text"] == "/reset@Other"
+
+
+@pytest.mark.asyncio
+async def test_handler_forwards_addressed_command_without_suffix():
     a = _adapter({"require_mention": True})
-    assert not await a._mention_gate_allows(_msg("/reset"), 5)
+    a.rpc.get_message.return_value = _msg("/reset@Ghost") | {"view_type": "Text"}
+    a.rpc.get_contact.return_value = {"name": "u"}
+    a.handle_message = AsyncMock()
+    await a._handle_incoming_message({"chat_id": 5, "msg_id": 7})
+    assert a.handle_message.await_args.args[0].text == "/reset"
 
 
 @pytest.mark.asyncio
