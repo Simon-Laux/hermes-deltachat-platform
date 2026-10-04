@@ -124,7 +124,12 @@ so it shows up in `~/.hermes/logs/errors.log`. To narrow it further:
 DELTACHAT_RAW_RPC_ALLOWLIST=get_account_info,get_chatlist_entries  # only these
 ```
 
-The `delete_*` / `remove_*` refusal always applies — allowlisting such a method does
+Refused everywhere, in both `dc_rpc_call` and `dc_safe_rpc_call`: any `delete_*` /
+`remove_*` method, plus `leave_group`, `set_chat_ephemeral_timer` (timed deletion),
+`add_contact_to_chat` (adds a stranger to a private group) and `block_chat`. The last
+three are blocked for what they do, not what they are called.
+
+That refusal always applies — allowlisting such a method does
 not re-enable it. Leaving the allowlist blank allows any non-destructive method; setting
 it to anything that names no methods allows nothing, rather than quietly allowing all.
 

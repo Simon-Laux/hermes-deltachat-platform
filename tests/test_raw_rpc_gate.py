@@ -16,14 +16,22 @@ from adapter import _is_destructive
 
 class TestIsDestructive:
     @pytest.mark.parametrize("method", [
-        "leave_group",  # the one destructive name the prefixes miss
+        "leave_group",
+        "set_chat_ephemeral_timer",  # timed deletion
+        "add_contact_to_chat",       # membership change the prefix rule misses
+        "block_chat",
         "delete_something_added_next_release",  # prefix rule, not a literal list
         "remove_something_added_next_release",
     ])
     def test_blocked(self, method):
         assert _is_destructive(method)
 
-    @pytest.mark.parametrize("method", ["get_basic_chat_info", "undelete_chat"])
+    @pytest.mark.parametrize("method", [
+        "get_basic_chat_info",
+        "undelete_chat",      # prefix match, not substring
+        "misc_set_draft",     # the agent managing its own draft is ordinary use
+        "misc_send_draft",
+    ])
     def test_allowed(self, method):
         assert not _is_destructive(method)
 

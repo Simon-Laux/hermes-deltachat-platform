@@ -274,19 +274,35 @@ def _env_flag(name: str) -> bool:
     return os.getenv(name, "").strip().lower() not in ("", "0", "false", "no", "off")
 
 
+# Destructive effects whose names the delete_*/remove_* rule does not catch.
+# Each is here for what it does, not what it is called:
+_BLOCKED_METHODS = frozenset({
+    "leave_group",               # detaches the bot from a chat, irreversibly
+    "set_chat_ephemeral_timer",  # timed deletion — delete_messages by another name
+    "add_contact_to_chat",       # adds a stranger to a private group. Note the
+                                 # asymmetry the prefix rule creates on its own:
+                                 # remove_contact_from_chat is blocked, this is not
+    "block_chat",                # silences a conversation; the operator may be the
+                                 # one silenced, and cannot undo it over chat
+})
+
+
 def _is_destructive(method: str) -> bool:
-    """True for methods that destroy or detach chat data.
+    """True for methods that destroy, detach, or silence.
 
-    The prefix rule is deliberately open-ended: the OpenRPC surface grows with
-    every core release, and a new delete_* method should be blocked the day it
-    appears, not the day we notice it. leave_group is the only destructive name
-    in the current spec that the prefixes miss — checked against all 177.
+    Two rules. The prefix half is deliberately open-ended: the OpenRPC surface
+    grows with every core release, and a new delete_* method should be blocked
+    the day it appears, not the day we notice it. The named half covers effects
+    the prefixes miss.
 
-    This is a name rule, so it catches names, not capabilities. It does not stop
-    set_config(delete_device_after) or set_chat_ephemeral_timer, which destroy
-    data under innocuous names. See the allowlist for the real control.
+    It is still a name rule, so it bounds names rather than capabilities — it
+    does not stop set_config(delete_device_after), which wipes the whole message
+    store under an innocuous name. The allowlist is the real control (#22).
+
+    Draft methods are deliberately absent: the agent writing and clearing its
+    own drafts is ordinary use, not destruction.
     """
-    return method == "leave_group" or method.startswith(("delete_", "remove_"))
+    return method in _BLOCKED_METHODS or method.startswith(("delete_", "remove_"))
 
 
 # Cached OpenRPC spec (fetched lazily on first use).
