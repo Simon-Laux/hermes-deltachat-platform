@@ -56,6 +56,9 @@ MIN_DC_VERSION = "2.51.0"
 # plugin.yaml's `python_dependencies` in step — it is the same claim.
 MAX_TESTED_DC_VERSION = "2.60.0"
 
+# Contact id core uses for this account itself (DC_CONTACT_ID_SELF).
+DC_CONTACT_ID_SELF = 1
+
 # ---------------------------------------------------------------------------
 # Headless onboarding
 # ---------------------------------------------------------------------------
@@ -456,7 +459,62 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._call_manager = None
         self._invite_link: Optional[str] = None
 
+        # Bot-to-bot loop guard: max messages in a row from one sender in a
+        # group before we stop answering them. <=0 disables the guard.
+        try:
+            self._max_consecutive_replies = int(
+                os.getenv("DELTACHAT_MAX_CONSECUTIVE_REPLIES", "20")
+            )
+        except ValueError:
+            self._max_consecutive_replies = 20
+        # chat_id -> [last sender id, streak length, notice already sent]
+        self._reply_streak: Dict[str, list] = {}
 
+    async def _loop_guard_allows(self, chat_id, from_id) -> bool:
+        """Drop messages once one sender has sent too many in a row.
+
+        Two agents in a shared group can end up answering each other forever.
+        When the same from_id sends more than DELTACHAT_MAX_CONSECUTIVE_REPLIES
+        messages in a chat with nobody else speaking in between, stop handing
+        their messages to Hermes until someone else speaks. The first trip of
+        a streak logs a warning and posts one notice in the chat.
+        """
+        if self._max_consecutive_replies <= 0 or not from_id:
+            return True
+        sender = str(from_id)
+        streak = self._reply_streak.setdefault(str(chat_id), [None, 0, False])
+        if streak[0] == sender:
+            streak[1] += 1
+        else:
+            streak[:] = [sender, 1, False]
+        if streak[1] <= self._max_consecutive_replies:
+            return True
+
+        # why: in a DM, or a group with only one other member, nobody else can
+        # ever speak to break the streak — it would trip once and then silence
+        # that person for good. A long run there is just a conversation.
+        try:
+            members = await self.rpc.get_chat_contacts(self.account_id, int(chat_id))
+        except Exception as e:
+            logger.debug("Loop guard: could not list members of chat %s: %s", chat_id, e)
+            return True
+        if sum(1 for c in members if c != DC_CONTACT_ID_SELF) < 2:
+            return True
+
+        if not streak[2]:
+            streak[2] = True
+            logger.warning(
+                "Loop guard tripped in chat %s: sender %s sent %d messages in a row "
+                "with nobody else speaking; ignoring them here until someone else does",
+                chat_id, sender, self._max_consecutive_replies,
+            )
+            await self.send(
+                str(chat_id),
+                f"Pausing replies in this chat — {self._max_consecutive_replies} "
+                "messages in a row from the same sender with no one else joining "
+                "in (looks like a bot loop). Send a message to resume.",
+            )
+        return False
 
     def _get_dc_config_dir(self) -> str:
         """Get Delta Chat config directory path.
@@ -1512,6 +1570,10 @@ body {{
                 await self.rpc.markseen_msgs(self.account_id, [int(msg_id)])
             except Exception as e:
                 logger.debug(f"Could not mark message {msg_id} as seen: {e}")
+
+            # Before the text/non-text split so images and voice count too.
+            if not await self._loop_guard_allows(chat_id, msg.get("from_id")):
+                return
 
             text = msg.get("text", "")
             view_type = msg.get("view_type", "")

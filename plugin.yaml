@@ -42,6 +42,9 @@ optional_env:
   - name: DELTACHAT_CHATMAIL_SERVERS
     description: "Comma-separated chatmail relays to register on when DELTACHAT_EMAIL=auto (e.g. nine.testrun.org,mehl.cloud). Unset picks nine.testrun.org plus two random relays from chatmail.at/relays for redundancy."
     prompt: "Chatmail relays (comma-separated)"
+  - name: DELTACHAT_MAX_CONSECUTIVE_REPLIES
+    description: "Bot-loop guard: in a group with two or more other members, stop answering a sender after this many messages in a row with nobody else speaking, until someone else does. Default 20; 0 turns the guard off."
+    prompt: "Max messages in a row from one group member (default 20)"
 
 # Python packages this plugin needs in Hermes' venv. Hermes resolves them together with its own
 # pinned ranges when the plugin is installed and RE-APPLIES them after every `hermes update`
