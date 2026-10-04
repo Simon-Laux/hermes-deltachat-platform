@@ -246,6 +246,53 @@ class TestSendMessage:
         assert data.text == ""
 
     @pytest.mark.asyncio
+    async def test_send_accepts_a_chat_token_as_target(self, platform_config, mock_rpc):
+        """A cron job the agent wrote targets `deltachat-platform:<token>`."""
+        adapter = DeltaChatAdapter(platform_config)
+        adapter.rpc = mock_rpc
+        adapter.account_id = 1
+        token_key = "ui.hermes.token_chat.79489f9c02ceb390"
+        mock_rpc.get_config = AsyncMock(
+            side_effect=lambda acc, key: "789" if key == token_key else None
+        )
+        mock_rpc.send_msg = AsyncMock(return_value=55)
+
+        result = await adapter.send("79489f9c02ceb390", "from cron")
+        assert result.success is True
+        assert mock_rpc.send_msg.await_args.args[1] == 789
+
+        result = await adapter.send_video(chat_id="79489f9c02ceb390", video_path="/p/clip.mp4")
+        assert result.success is True
+        assert mock_rpc.send_msg.await_args.args[1] == 789
+
+    @pytest.mark.asyncio
+    async def test_send_rejects_an_unknown_token(self, platform_config, mock_rpc):
+        adapter = DeltaChatAdapter(platform_config)
+        adapter.rpc = mock_rpc
+        adapter.account_id = 1
+        mock_rpc.get_config = AsyncMock(return_value=None)
+        mock_rpc.send_msg = AsyncMock(return_value=55)
+
+        result = await adapter.send("deadbeefdeadbeef", "hi")
+
+        assert result.success is False
+        assert "unknown Delta Chat chat id or token" in result.error
+        mock_rpc.send_msg.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_numeric_id_skips_the_token_lookup(self, platform_config, mock_rpc):
+        adapter = DeltaChatAdapter(platform_config)
+        adapter.rpc = mock_rpc
+        adapter.account_id = 1
+        mock_rpc.get_config = AsyncMock(return_value=None)
+        mock_rpc.send_msg = AsyncMock(return_value=55)
+
+        await adapter.send("789", "hi")
+
+        mock_rpc.get_config.assert_not_awaited()
+        assert mock_rpc.send_msg.await_args.args[1] == 789
+
+    @pytest.mark.asyncio
     async def test_send_video_not_connected(self, platform_config):
         adapter = DeltaChatAdapter(platform_config)
         adapter.rpc = None
