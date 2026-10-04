@@ -4,6 +4,10 @@ kind: platform
 version: 1.0.0
 description: Delta Chat messaging platform adapter for Hermes Agent. Supports text, webxdc mini apps, voice messages, images, and videos.
 author: Simon Laux
+# Load gate: a Hermes that knows this key refuses to load the plugin below it (hermes_cli/
+# plugins_manifest.py `requires_hermes_error`). Releases that predate the key (e.g. 0.15.x) ignore
+# it and load anyway, so it cannot protect those — see docs/version-compatibility.md.
+requires_hermes: ">=0.21.5"
 requires_env:
   - name: DELTACHAT_RPC_SERVER
     description: "Path to deltachat-rpc-server binary. After setting, run: python ~/.hermes/plugins/deltachat-platform/setup.py"
