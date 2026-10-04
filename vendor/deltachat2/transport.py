@@ -26,6 +26,13 @@ class RpcTransport(ABC):
         """Request the RPC server to call a function and return its return value if any."""
 
 
+# Local divergence from upstream deltachat2: see the "vendored deltachat2" note
+# in README.md. This file carries patches (dead-server handling here, to_attrdict
+# on results, close() guards) that a naive re-vendor would silently drop.
+
+_DISCONNECTED_ERROR = {"error": {"code": -1, "message": "RPC server disconnected"}}
+
+
 class _Result(Event):
     def __init__(self) -> None:
         self._value: Any = None
@@ -35,9 +42,12 @@ class _Result(Event):
         self._value = value
         super().set()
 
-    def wait(self) -> Any:  # noqa
-        super().wait()
-        return self._value
+    def wait(self, timeout: Optional[float] = None) -> bool:  # noqa
+        """Block until a value is set; return True if set, False on timeout.
+
+        Read the value from ``._value`` after a True return.
+        """
+        return super().wait(timeout)
 
 
 class IOTransport:
@@ -108,6 +118,22 @@ class IOTransport:
     def __exit__(self, _exc_type, _exc, _tb):
         self.close()
 
+    def _fail_all_pending(self) -> None:
+        """Resolve every waiting caller with the disconnect error.
+
+        Called from both the reader and writer loop when the RPC server dies, so
+        no caller blocks forever on a request that will never be answered. The
+        two callers may race on the dict, but both set the same error, so the
+        outcome is identical either way.
+        """
+        for pending in list(self.pending_results.values()):
+            pending.set(_DISCONNECTED_ERROR)
+        self.pending_results.clear()
+
+    def _server_dead(self) -> bool:
+        """True once the RPC server subprocess has exited (any exit code)."""
+        return hasattr(self, "process") and self.process.poll() is not None
+
     def _reader_loop(self) -> None:
         try:
             assert self.process.stdout
@@ -124,11 +150,7 @@ class IOTransport:
             # Log an exception if the reader loop dies.
             self.logger.exception("Exception in the reader loop")
         finally:
-            # Wake any callers still waiting so they don't block forever.
-            error = {"error": {"code": -1, "message": "RPC server disconnected"}}
-            for pending in list(self.pending_results.values()):
-                pending.set(error)
-            self.pending_results.clear()
+            self._fail_all_pending()
 
     def _writer_loop(self) -> None:
         """Writer loop ensuring only a single thread writes requests."""
@@ -144,9 +166,16 @@ class IOTransport:
         except Exception:
             # Log an exception if the writer loop dies.
             self.logger.exception("Exception in the writer loop")
+        finally:
+            # A dead writer means no queued request will ever be sent; wake
+            # every caller instead of letting them block forever.
+            self._fail_all_pending()
 
     def call(self, method: str, *args) -> Any:
         """Request the RPC server to call a function and return its return value if any."""
+        if self._server_dead():
+            raise JsonRpcError(_DISCONNECTED_ERROR["error"])
+
         request_id = next(self.id_iterator)
         request = {
             "jsonrpc": "2.0",
@@ -159,7 +188,15 @@ class IOTransport:
 
         result = self.pending_results[request_id] = _Result()
         self.request_queue.put(request)
-        response = result.wait()
+        # Poll in short slices instead of an untimed wait: a legitimate slow
+        # call (network round-trip) keeps waiting as long as the server is
+        # alive, but a server that dies mid-call surfaces as an error within a
+        # slice instead of hanging this thread forever.
+        while not result.wait(timeout=1.0):
+            if self._server_dead():
+                self.pending_results.pop(request_id, None)
+                raise JsonRpcError(_DISCONNECTED_ERROR["error"])
+        response = result._value
 
         # Log the response for debugging
         self.logger.debug(f"RPC response for {method}: {response}")
