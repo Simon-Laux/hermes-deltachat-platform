@@ -274,9 +274,17 @@ hermes -p personal gateway start
 
 ## Development
 
-The `deltachat2` Python package is vendored in `vendor/` to avoid a manual install step. To update it:
+The `deltachat2` Python package is vendored in `vendor/` to avoid a manual install step.
+
+**`vendor/deltachat2/` has diverged from upstream — do not blindly overwrite it.** Local patches that a straight copy would silently drop:
+
+- `transport.py`: dead-RPC-server handling — `_fail_all_pending()` from both reader and writer loops, `_server_dead()` probe, and a polled `_Result.wait()` so a `deltachat-rpc-server` that dies mid-call raises instead of hanging the caller forever. Upstream has none of this.
+- `transport.py`: `to_attrdict()` on RPC results (camelCase → snake_case, which `adapter.py` depends on) and `close()` guards for the never-started / already-dead cases.
+- `IOTransport.__init__` takes `rpc_server=`; upstream renamed this kwarg to `rpc_executable=`. `adapter.py` passes `rpc_server=`.
+
+To update it:
 1. Fetch the latest from [adbenitez/deltachat2](https://github.com/adbenitez/deltachat2)
-2. Copy `deltachat2/` contents to `vendor/deltachat2/`
+2. Merge upstream changes into `vendor/deltachat2/` **without** discarding the patches above — diff, don't copy
 3. Test thoroughly — API changes can affect compatibility
 4. Update the minimum version check in `adapter.py` if needed
 
