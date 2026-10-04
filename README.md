@@ -122,7 +122,32 @@ Three tools are always available once the plugin is loaded:
 | `dc_chat_rpc_spec` | Spec filtered to chat-scoped methods, destructive ops removed |
 | `dc_safe_rpc_call` | Call a chat-scoped method safely — `accountId` and `chatId` are injected from an opaque per-chat token; the AI cannot address a different chat |
 
-Set `DELTACHAT_ENABLE_RAW_RPC=1` to also unlock `dc_rpc_call` (unrestricted access — only for trusted deployments).
+Set `DELTACHAT_ENABLE_RAW_RPC=1` to also unlock `dc_rpc_call`, which reaches the whole
+account rather than a single chat — only for trusted deployments. Even then it refuses
+every `delete_*` / `remove_*` method, and every call it receives is logged at `WARNING`
+so it shows up in `~/.hermes/logs/errors.log`. To narrow it further:
+
+```bash
+DELTACHAT_RAW_RPC_ALLOWLIST=get_account_info,get_chatlist_entries  # only these
+```
+
+Refused everywhere, in both `dc_rpc_call` and `dc_safe_rpc_call`: any `delete_*` /
+`remove_*` method, plus `leave_group`, `set_chat_ephemeral_timer` (timed deletion),
+`add_contact_to_chat` (adds a stranger to a private group) and `block_chat`. The last
+three are blocked for what they do, not what they are called.
+
+That refusal always applies — allowlisting such a method does
+not re-enable it. Leaving the allowlist blank allows any non-destructive method; setting
+it to anything that names no methods allows nothing, rather than quietly allowing all.
+
+Note this is a rule about method *names*, so it is narrow: it blocks 9 of the 177 spec
+methods. It does not stop `set_config(delete_device_after)` or `set_chat_ephemeral_timer`,
+which destroy data under innocuous names. Set `DELTACHAT_RAW_RPC_ALLOWLIST` if you want a
+real bound on what the agent can reach.
+
+RPC errors come back to the agent verbatim so it can correct a malformed call. That
+discloses nothing a tool with `get_message` and `get_system_info` did not already
+grant, and refused methods never reach the server to produce one.
 
 ---
 
@@ -209,7 +234,8 @@ hermes gateway start
 |----------|----------|---------|-------------|
 | `DELTACHAT_RPC_SERVER` | No | `deltachat-rpc-server` | Path to RPC binary |
 | `DELTACHAT_HOME_CHANNEL` | No | — | Chat ID for cron/proactive delivery (or use `/sethome` in chat) |
-| `DELTACHAT_ENABLE_RAW_RPC` | No | — | Enable unrestricted `dc_rpc_call` tool |
+| `DELTACHAT_ENABLE_RAW_RPC` | No | — | Expose the account-wide `dc_rpc_call` tool |
+| `DELTACHAT_RAW_RPC_ALLOWLIST` | No | — | Comma-separated methods `dc_rpc_call` may call (blank = any non-destructive one) |
 
 ### Multiple Agents
 

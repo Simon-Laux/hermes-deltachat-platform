@@ -282,15 +282,46 @@ _active_adapter = None
 _chat_id_to_token: Dict[int, str] = {}
 _chat_token_to_id: Dict[str, int] = {}
 
-# Methods that mutate or destroy chat data — blocked from dc_safe_rpc_call.
-_DESTRUCTIVE_METHODS = frozenset({
-    "delete_chat",
-    "delete_messages",
-    "delete_messages_for_all",
-    "remove_contact_from_chat",
-    "remove_draft",
-    "leave_group",
+def _env_flag(name: str) -> bool:
+    """True when *name* is set to something that reads as "on".
+
+    why: plain truthiness on os.getenv treats "0", "false" and "off" as enabled,
+    because they are non-empty strings. That is a fail-open kill switch — and
+    plugin.yaml prompts the operator for these, which invites exactly a "0".
+    """
+    return os.getenv(name, "").strip().lower() not in ("", "0", "false", "no", "off")
+
+
+# Destructive effects whose names the delete_*/remove_* rule does not catch.
+# Each is here for what it does, not what it is called:
+_BLOCKED_METHODS = frozenset({
+    "leave_group",               # detaches the bot from a chat, irreversibly
+    "set_chat_ephemeral_timer",  # timed deletion — delete_messages by another name
+    "add_contact_to_chat",       # adds a stranger to a private group. Note the
+                                 # asymmetry the prefix rule creates on its own:
+                                 # remove_contact_from_chat is blocked, this is not
+    "block_chat",                # silences a conversation; the operator may be the
+                                 # one silenced, and cannot undo it over chat
 })
+
+
+def _is_destructive(method: str) -> bool:
+    """True for methods that destroy, detach, or silence.
+
+    Two rules. The prefix half is deliberately open-ended: the OpenRPC surface
+    grows with every core release, and a new delete_* method should be blocked
+    the day it appears, not the day we notice it. The named half covers effects
+    the prefixes miss.
+
+    It is still a name rule, so it bounds names rather than capabilities — it
+    does not stop set_config(delete_device_after), which wipes the whole message
+    store under an innocuous name. The allowlist is the real control (#22).
+
+    Draft methods are deliberately absent: the agent writing and clearing its
+    own drafts is ordinary use, not destruction.
+    """
+    return method in _BLOCKED_METHODS or method.startswith(("delete_", "remove_"))
+
 
 # Cached OpenRPC spec (fetched lazily on first use).
 _spec_cache: Optional[dict] = None
@@ -1892,10 +1923,63 @@ def register_rpc_tools(ctx) -> None:
             return json.dumps({"error": "Missing 'method' (snake_case RPC name)."})
         if _active_adapter is None or _active_adapter.rpc is None:
             return json.dumps({"error": "Delta Chat is not connected"})
+
+        # why: %r, not %s. `method` is model-supplied and has only been checked
+        # for being a str — an embedded newline would otherwise let it forge a
+        # second, entirely fake audit line in errors.log.
+        def _refuse(reason: str, detail: str) -> str:
+            logger.warning("Raw RPC call REFUSED (%s): %r", reason, method)
+            return json.dumps({"error": detail})
+
+        # Read at call time, not import time — Hermes loads ~/.hermes/.env
+        # after this module is imported.
+        raw_allowlist = (os.getenv("DELTACHAT_RAW_RPC_ALLOWLIST") or "").strip()
+        allowlist = frozenset(m.strip() for m in raw_allowlist.split(",") if m.strip())
+        # why: blank means "no allowlist", but a non-blank value that yields no
+        # usable names means "allow nothing" — it must not fall back to
+        # unrestricted. Otherwise a typo like ALLOWLIST=" , ," silently removes
+        # the gate the operator was trying to tighten.
+        if raw_allowlist and not allowlist:
+            return _refuse(
+                "unusable allowlist",
+                "DELTACHAT_RAW_RPC_ALLOWLIST is set but lists no method names",
+            )
+        if allowlist and method not in allowlist:
+            return _refuse("not allowlisted", f"'{method}' is not in the raw RPC allowlist")
+        if _is_destructive(method):
+            return _refuse("blocked", f"'{method}' is blocked")
+
+        # Check the name against the spec rather than relying on getattr to
+        # raise: deltachat2.Rpc.__getattr__ returns a lambda for *any* name, so
+        # a typo reaches the server and comes back as a bare "Method not found"
+        # a round-trip later. Catching it here points at dc_rpc_spec instead. A
+        # spec that won't load is not a reason to refuse the call.
+        try:
+            known = {m["name"] for m in (await _fetch_spec()).get("methods", [])}
+        except Exception as e:
+            logger.warning("Could not load the RPC spec to validate %r: %s", method, e)
+            known = None
+        if known is not None and method not in known:
+            return _refuse("unknown method", f"Unknown method '{method}' — use dc_rpc_spec to browse available methods")
+
+        # why: logged here, after every gate, so errors.log distinguishes a call
+        # that ran from one that was refused. Logging before the gates made both
+        # look identical, which is useless as an audit trail.
+        logger.warning("Raw RPC call ACCEPTED: %r", method)
+
         try:
             result = await getattr(_active_adapter.rpc, method)(*params)
             return json.dumps(result, default=str)
         except Exception as e:
+            # why: the error goes back verbatim, on purpose. It is tempting to
+            # mask it as leaking paths or as an injection channel, but this tool
+            # only exists under DELTACHAT_ENABLE_RAW_RPC, where the model can
+            # already reach get_message/get_contact/get_system_info and pull the
+            # same strings out directly. Blocked methods return above without
+            # ever calling, so no error can name something the caller was
+            # refused. What masking does cost is real: "This method takes an
+            # array of 2 arguments" is how the model fixes its own call.
+            logger.error("Raw RPC call %s failed: %s", method, e, exc_info=True)
             return json.dumps({"error": str(e)})
 
     async def _chat_spec_handler(args: dict = None, **kwargs) -> str:
@@ -1907,9 +1991,7 @@ def register_rpc_tools(ctx) -> None:
         safe_methods = [
             m for m in spec.get("methods", [])
             if any(p["name"] == "chatId" for p in m.get("params", []))
-            and m["name"] not in _DESTRUCTIVE_METHODS
-            and not m["name"].startswith("delete_")
-            and not m["name"].startswith("remove_")
+            and not _is_destructive(m["name"])
         ]
         return json.dumps({**spec, "methods": safe_methods}, indent=2)
 
@@ -1929,11 +2011,7 @@ def register_rpc_tools(ctx) -> None:
             return json.dumps({"error": "Unknown chat_token — use the [dc:chat=...] value from your message"})
 
         # Block destructive methods
-        if (
-            method in _DESTRUCTIVE_METHODS
-            or method.startswith("delete_")
-            or method.startswith("remove_")
-        ):
+        if _is_destructive(method):
             return json.dumps({"error": f"'{method}' is not allowed in safe mode"})
 
         # Verify method exists and has a chatId param
@@ -2036,7 +2114,7 @@ def register_rpc_tools(ctx) -> None:
         emoji="📋",
     )
 
-    if os.getenv("DELTACHAT_ENABLE_RAW_RPC"):
+    if _env_flag("DELTACHAT_ENABLE_RAW_RPC"):
         ctx.register_tool(
             name="dc_rpc_call",
             toolset="deltachat",
@@ -2044,7 +2122,9 @@ def register_rpc_tools(ctx) -> None:
                 "description": (
                     "Call any Delta Chat RPC method directly by name and params. "
                     "Use dc_rpc_spec first to see available methods. "
-                    "CAUTION: unrestricted access — can modify or delete account data. "
+                    "CAUTION: reaches the whole account, not just one chat. "
+                    "delete_*/remove_* methods are refused, and the deployment "
+                    "may restrict this further. "
                     "Prefer dc_safe_rpc_call for chat-scoped operations."
                 ),
                 "parameters": {
