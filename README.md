@@ -88,6 +88,36 @@ Deep integration with Delta Chat's native features — voice messages, voice cal
 - Read receipts
 - Bot mode: auto-accepts contact requests, no manual approval needed
 
+### Group Chats
+By default the agent answers every message in a group. Set `DELTACHAT_REQUIRE_MENTION=1` and it
+only reacts to group messages that mention it (`@<display name>` or an alias from
+`DELTACHAT_MENTION_ALIASES`) or quote-reply to one of its messages. DMs are never gated.
+
+**Commands in groups** are addressed Telegram-style: `/reset@<name>`, where `<name>` is the
+bot's display name or an alias. Only that bot runs it; a command addressed to another name is
+ignored. With `DELTACHAT_REQUIRE_MENTION` on, a bare `/reset` in a group is ignored too, so with
+several bots in one group nothing gets reset by accident (unless it is a quote-reply to that bot,
+which counts as addressing it). In DMs `/reset@<name>` works too. Give a bot whose display name contains
+spaces a one-word alias: `/reset@Hermes Bot` works, but if another bot in the group is called
+"Hermes", it will take that command (and `@Hermes Bot` mentions) as meant for itself too.
+
+Messages without a mention are dropped before they reach Hermes, so the agent does not see them
+as conversation context either.
+
+Hermes keeps a separate conversation per group member by default, so the agent remembers what
+it discussed with each person, but not what it told someone else in the same group. Set Hermes'
+`group_sessions_per_user: false` for one shared conversation per group.
+
+This is **not a privacy or security boundary**: the messages are still stored in the bot's Delta
+Chat account, and the agent's Delta Chat tools may still reach them in some form. Use it to keep
+the bot quiet, not to keep anything from it.
+
+Would you rather have the agent see all group messages as context and still only answer when
+mentioned? That isn't implemented yet —
+[open an issue](https://github.com/Simon-Laux/hermes-deltachat-platform/issues/new) if you want it.
+
+`DELTACHAT_REQUIRE_MENTION` applies to all groups; exempting single groups is not supported yet — open an issue for that too.
+
 ### Voice Calls (WebRTC)
 - **Incoming calls**: auto-answer, live speech-to-text → AI → text-to-speech pipeline
 - **Outgoing calls**: the AI can call you from a scheduled task (`dc_start_call` tool)
@@ -247,6 +277,8 @@ hermes gateway start
 | `DELTACHAT_HOME_CHANNEL` | No | — | Chat ID for cron/proactive delivery (or use `/sethome` in chat) |
 | `DELTACHAT_ENABLE_RAW_RPC` | No | — | Expose the account-wide `dc_rpc_call` tool |
 | `DELTACHAT_RAW_RPC_ALLOWLIST` | No | — | Comma-separated methods `dc_rpc_call` may call (blank = any method not refused above) |
+| `DELTACHAT_REQUIRE_MENTION` | No | — | In **group** chats, only answer messages that say `@<display name>` (or an alias), or quote-reply to the bot; commands must be addressed as `/cmd@<name>`. DMs are never gated. Also `platforms.deltachat-platform.require_mention: true` in `config.yaml` |
+| `DELTACHAT_MENTION_ALIASES` | No | — | Comma-separated extra names that count as a mention (`@<alias>`); also `platforms.deltachat-platform.mention_aliases` |
 
 ### Multiple Agents
 

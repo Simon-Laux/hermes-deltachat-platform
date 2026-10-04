@@ -8,6 +8,7 @@ import html
 import json
 import os
 import random
+import re
 import secrets
 import sys
 import asyncio
@@ -55,6 +56,9 @@ MIN_DC_VERSION = "2.51.0"
 # spec and a live server. Bump it after re-verifying, and keep the ceiling in
 # plugin.yaml's `python_dependencies` in step — it is the same claim.
 MAX_TESTED_DC_VERSION = "2.60.0"
+
+# Contact id core uses for this account itself (DC_CONTACT_ID_SELF).
+DC_CONTACT_ID_SELF = 1
 
 # ---------------------------------------------------------------------------
 # Headless onboarding
@@ -282,6 +286,7 @@ _active_adapter = None
 _chat_id_to_token: Dict[int, str] = {}
 _chat_token_to_id: Dict[str, int] = {}
 
+
 def _env_flag(name: str) -> bool:
     """True when *name* is set to something that reads as "on".
 
@@ -289,7 +294,12 @@ def _env_flag(name: str) -> bool:
     because they are non-empty strings. That is a fail-open kill switch — and
     plugin.yaml prompts the operator for these, which invites exactly a "0".
     """
-    return os.getenv(name, "").strip().lower() not in ("", "0", "false", "no", "off")
+    return _is_on(os.getenv(name, ""))
+
+
+def _is_on(value) -> bool:
+    """Shared on/off rule for env vars and config.yaml values (see _env_flag)."""
+    return str(value).strip().lower() not in ("", "0", "false", "no", "off")
 
 
 # Methods the RPC tools refuse, beyond the delete_*/remove_* prefix rule.
@@ -462,7 +472,102 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._call_manager = None
         self._invite_link: Optional[str] = None
 
+        # Group mention gating (opt-in; DMs are never gated). Set
+        # platforms.deltachat-platform.require_mention / mention_aliases in
+        # config.yaml (Hermes copies them into config.extra), or the
+        # DELTACHAT_REQUIRE_MENTION / DELTACHAT_MENTION_ALIASES env vars.
+        extra = self.config.extra or {}
+        raw = extra.get("require_mention")
+        self._require_mention = (
+            _env_flag("DELTACHAT_REQUIRE_MENTION") if raw is None
+            else _is_on(raw)
+        )
+        raw = extra.get("mention_aliases")
+        if raw is None:
+            raw = os.getenv("DELTACHAT_MENTION_ALIASES", "")
+        if isinstance(raw, str):
+            raw = raw.split(",")
+        # "@spooky" and "spooky" both mean the alias spooky
+        self._mention_aliases = [a for a in (str(a).strip().lstrip("@").strip() for a in raw) if a]
+        self._warned_no_mention_names = False
 
+    async def _mention_gate_allows(self, msg: Dict, chat_id) -> bool:
+        """Decide whether a message is for us.
+
+        Commands are addressed Telegram-style, "/cmd@<name>": one addressed to
+        us passes with the "@<name>" removed from msg["text"] so Hermes sees a
+        plain "/cmd" (in any chat). In a group, one addressed to anyone else
+        is dropped, whether or not require_mention is on. Only plain text
+        messages are commands — a caption never is.
+
+        With require_mention on, any other group message needs a mention:
+        "@<display name>" or "@<alias>" (case-insensitive, whole word) in the
+        message's own text or caption — quoted text is not part of it. A
+        bare "/cmd" is no exception, so in a group with several bots it only
+        reaches the one it names. A quote-reply to one of our own messages
+        counts as a mention (also for a bare "/cmd") so a thread can go on
+        without repeating it.
+        """
+        text = msg.get("text") or ""
+        is_plain_text = (msg.get("view_type") in ("Text", "", None)
+                         and not (msg.get("file") or msg.get("file_mime")))
+        command = re.match(r"/[\w-]+@", text) if is_plain_text else None
+        if not self._require_mention and not command:
+            return True
+        try:
+            chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
+            is_group = chat.get("chat_type") == "Group"
+            if not is_group and not command:
+                return True
+            # why: read per message, so a renamed bot is matched under its new name.
+            names = [n.strip() for n in (await self.rpc.get_config(self.account_id, "displayname"),
+                                         *self._mention_aliases) if n and n.strip()]
+        except Exception as e:
+            logger.warning("Mention gate failed for chat %s, letting message through: %s",
+                           chat_id, e)
+            return True
+        # why: longest first, so with names "Hermes" and "Hermes Bot",
+        # "/reset@Hermes Bot" strips the whole name instead of leaving " Bot".
+        names.sort(key=len, reverse=True)
+        if command:
+            addressee = text[command.end():]
+            for n in names:
+                m = re.match(re.escape(n) + r"(?![\w-])", addressee, re.IGNORECASE)
+                if m:
+                    msg["text"] = text[:command.end() - 1] + addressee[m.end():]
+                    return True
+            if not is_group:
+                return True
+            logger.debug("Ignoring command %s addressed to another bot", text.split()[0])
+            return False
+        if not is_group:
+            return True
+        if not names and not self._warned_no_mention_names:
+            self._warned_no_mention_names = True
+            logger.warning("require_mention is on but the account has no display name and no "
+                           "DELTACHAT_MENTION_ALIASES are set: only quote-replies to the bot "
+                           "will get through in groups")
+        if any(re.search(r"(?<![\w@])@" + re.escape(n) + r"(?![\w-])", text, re.IGNORECASE)
+               for n in names):
+            return True
+        if await self._quotes_own_message(msg):
+            return True
+        logger.debug("Ignoring unmentioned group message %s (require_mention)",
+                     msg.get("id"))
+        return False
+
+    async def _quotes_own_message(self, msg: Dict) -> bool:
+        """True if *msg* quote-replies to a message this account sent."""
+        quote = msg.get("quote") or {}
+        if quote.get("kind") != "WithMessage" or not quote.get("message_id"):
+            return False
+        try:
+            quoted = await self.rpc.get_message(self.account_id, int(quote["message_id"]))
+        except Exception as e:
+            # e.g. the quoted message was deleted locally: no proof it was ours
+            logger.debug("Could not load quoted message %s: %s", quote["message_id"], e)
+            return False
+        return bool(quoted) and quoted.get("from_id") == DC_CONTACT_ID_SELF
 
     def _get_dc_config_dir(self) -> str:
         """Get Delta Chat config directory path.
@@ -1701,6 +1806,10 @@ body {{
             except Exception as e:
                 logger.debug(f"Could not mark message {msg_id} as seen: {e}")
 
+            # Before the text/non-text split so images and voice are gated too.
+            if not await self._mention_gate_allows(msg, chat_id):
+                return
+
             text = msg.get("text", "")
             view_type = msg.get("view_type", "")
             has_file = bool(msg.get("file") or msg.get("file_mime"))
@@ -1737,7 +1846,7 @@ body {{
                 user_id = "unknown"
 
             # Determine chat type
-            chat_type = "group" if chat.get("is_group", False) else "dm"
+            chat_type = "group" if chat.get("chat_type") == "Group" else "dm"
             chat_name = chat.get("name", f"Chat {chat_id}")
 
             # Build source
@@ -1861,7 +1970,7 @@ body {{
         try:
             chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
             chat_name = chat.get("name", chat_name)
-            chat_type = "group" if chat.get("is_group", False) else "dm"
+            chat_type = "group" if chat.get("chat_type") == "Group" else "dm"
         except Exception:
             pass
 
@@ -1984,7 +2093,7 @@ body {{
                 )
                 return {
                     "name": chat.get("name", chat_id),
-                    "type": "group" if chat.get("is_group") else "dm",
+                    "type": "group" if chat.get("chat_type") == "Group" else "dm",
                 }
         except Exception as e:
             logger.warning(f"Error getting chat info for {chat_id}: {e}")
