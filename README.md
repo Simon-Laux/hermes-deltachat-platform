@@ -247,6 +247,7 @@ hermes gateway start
 | `DELTACHAT_HOME_CHANNEL` | No | — | Chat ID for cron/proactive delivery (or use `/sethome` in chat) |
 | `DELTACHAT_ENABLE_RAW_RPC` | No | — | Expose the account-wide `dc_rpc_call` tool |
 | `DELTACHAT_RAW_RPC_ALLOWLIST` | No | — | Comma-separated methods `dc_rpc_call` may call (blank = any method not refused above) |
+| `DELTACHAT_MAX_CONSECUTIVE_REPLIES` | No | `20` | Bot-loop guard: stop answering a group member after this many messages in a row with nobody else speaking (`0` = off; DMs and one-member groups are exempt) |
 
 ### Multiple Agents
 
