@@ -42,11 +42,18 @@ Delta Chat is a decentralized private messenger with end-to-end encryption, and 
 
 **Prerequisite:** [Hermes Agent](https://github.com/NousResearch/hermes-agent) must be installed first.
 
+`plugin.yaml` declares `deltachat-rpc-server` and `aiortc` as `python_dependencies`, so a Hermes
+that supports that manifest key installs them into its own venv when you enable the plugin — and
+re-installs them after every `hermes update`. Steps 1 and 2 are only needed on older Hermes
+releases, which ignore the key, and on NixOS — see
+[docs/nixos-installation.md](docs/nixos-installation.md). A `No module named 'aiortc'` in
+`~/.hermes/logs/gateway.log` means you are in that case.
+
 ```bash
-# 1. Install deltachat-rpc-server
+# 1. Install deltachat-rpc-server (only if Hermes did not)
 pip install deltachat-rpc-server
 
-# 2. Install aiortc (required for voice calls)
+# 2. Install aiortc for voice calls (only if Hermes did not)
 pip install aiortc
 
 # 3. Clone plugin to Hermes
@@ -123,6 +130,12 @@ Set `DELTACHAT_ENABLE_RAW_RPC=1` to also unlock `dc_rpc_call` (unrestricted acce
 
 ### 1. Install dependencies
 
+Both are declared in `plugin.yaml` under `python_dependencies`, so on a Hermes that supports that
+key you can skip this whole step — PM resolves them against Hermes' own pins when the plugin is
+enabled, which is what keeps `pyOpenSSL` in step with the `cryptography` version Hermes pins. Do it
+by hand only on releases that ignore the key, or on NixOS where the pip wheels do not work
+([docs/nixos-installation.md](docs/nixos-installation.md)).
+
 #### deltachat-rpc-server
 
 **pip (recommended):**
@@ -156,7 +169,9 @@ pip install aiortc
 (python3.withPackages (ps: with ps; [ deltachat2 aiortc ]))
 ```
 
-aiortc brings in `av` (PyAV/libav for audio resampling), `aioice`, and Opus support — all required for the WebRTC call pipeline.
+aiortc brings in `av` (PyAV/libav for audio resampling), `aioice`, and Opus support — all required
+for the WebRTC call pipeline. `call_handler.py` imports `av` directly but only aiortc is declared,
+so `av` arrives as a transitive dependency.
 
 ### 2. (Optional) Configure RPC server path
 

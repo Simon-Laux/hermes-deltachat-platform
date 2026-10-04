@@ -31,13 +31,16 @@ optional_env:
     description: "Comma-separated chatmail relays to register on when DELTACHAT_EMAIL=auto (e.g. nine.testrun.org,mehl.cloud). Unset picks nine.testrun.org plus two random relays from chatmail.at/relays for redundancy."
     prompt: "Chatmail relays (comma-separated)"
     password: false
+
 # Python packages this plugin needs in Hermes' venv. Hermes resolves them together with its own
 # pinned ranges when the plugin is installed and RE-APPLIES them after every `hermes update`
-# (hermes_cli/plugin_python_deps.py). Without the declaration they were installed by hand, so a
-# Hermes update that bumped `cryptography` left aiortc's `pyOpenSSL` on a release built for the old
-# one: importing it failed with "module 'lib' has no attribute 'GEN_EMAIL'" and the update then
-# disabled the plugin. pyOpenSSL/cryptography are deliberately not listed — the resolver picks the
-# pyOpenSSL that matches the cryptography Hermes pins.
+# (grep Hermes for `_install_plugin_python_deps` — the module holding it gets renamed between
+# releases). Without the declaration they were installed by hand, so a Hermes update that bumped
+# `cryptography` left aiortc's `pyOpenSSL` on a release built for the old one: importing it failed
+# with "module 'lib' has no attribute 'GEN_EMAIL'" and the update then disabled the plugin.
+# pyOpenSSL/cryptography are deliberately not listed — the resolver picks the pyOpenSSL that
+# matches the cryptography Hermes pins. Releases without `python_dependencies` support ignore this
+# key, so on those the packages still have to be installed by hand (see README).
 #
 # why: DC core does not use semver — a *minor* bump may break the JSON-RPC API (major is reserved
 # for heavily breaking wire-format changes, patch is never used), so the ceiling has to exclude the
