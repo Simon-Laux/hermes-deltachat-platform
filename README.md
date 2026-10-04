@@ -118,7 +118,7 @@ Three tools are always available once the plugin is loaded:
 
 | Tool | Description |
 |------|-------------|
-| `dc_rpc_spec` | Full OpenRPC spec from the running server — all methods, params, types |
+| `dc_rpc_spec` | OpenRPC spec from the running server — params and types for every method the adapter will actually call |
 | `dc_chat_rpc_spec` | Spec filtered to chat-scoped methods, refused ops removed |
 | `dc_safe_rpc_call` | Call a chat-scoped method safely — `accountId` and `chatId` are injected from an opaque per-chat token; the AI cannot address a different chat |
 
