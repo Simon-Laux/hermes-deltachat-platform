@@ -11,29 +11,41 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 
 import adapter
-from adapter import _is_destructive
+from adapter import _is_blocked
 
 
 class TestIsDestructive:
     @pytest.mark.parametrize("method", [
         "leave_group",
-        "set_chat_ephemeral_timer",  # timed deletion
-        "add_contact_to_chat",       # membership change the prefix rule misses
+        "set_chat_ephemeral_timer",        # timed deletion
+        "add_contact_to_chat",             # membership change the prefix rule misses
         "block_chat",
+        "set_chat_mute_duration",          # hides traffic from the gateway
+        "set_chat_visibility",
+        "forward_messages",                # unscoped source — reaches other chats
+        "get_chat_securejoin_qr_code",     # a read, but it returns a credential
+        "get_chat_securejoin_qr_code_svg",
+        "send_locations_to_chat",          # streams real device location
+        "place_outgoing_call",             # dc_start_call is the proper route
+        "init_webxdc_integration",
         "delete_something_added_next_release",  # prefix rule, not a literal list
         "remove_something_added_next_release",
     ])
     def test_blocked(self, method):
-        assert _is_destructive(method)
+        assert _is_blocked(method)
 
     @pytest.mark.parametrize("method", [
         "get_basic_chat_info",
         "undelete_chat",      # prefix match, not substring
         "misc_set_draft",     # the agent managing its own draft is ordinary use
         "misc_send_draft",
+        "get_locations",      # reading what contacts opted into sharing is fine;
+                              # send_locations_to_chat (writing ours) is not
+        "send_msg",
+        "set_chat_name",
     ])
     def test_allowed(self, method):
-        assert not _is_destructive(method)
+        assert not _is_blocked(method)
 
 
 @pytest.fixture
@@ -202,3 +214,50 @@ class TestRawRpcGate:
     async def test_missing_method_arg(self, raw_rpc_handler, connected_adapter):
         result = json.loads(await raw_rpc_handler({}))
         assert "Missing 'method'" in result["error"]
+
+class TestChatSpecFiltering:
+    """dc_chat_rpc_spec must not advertise what dc_safe_rpc_call would refuse.
+
+    Two of the blocklist entries (the securejoin QR pair) exist mainly so the
+    model is never told they are available. Nothing covered this filter before:
+    replacing it with `and True` left the whole suite green.
+    """
+
+    @pytest.fixture
+    def chat_spec_handler(self):
+        handlers = {}
+        ctx = MagicMock()
+        ctx.register_tool.side_effect = lambda **kw: handlers.__setitem__(kw["name"], kw["handler"])
+        with patch.dict(os.environ, {}, clear=True):
+            adapter.register_rpc_tools(ctx)
+        return handlers["dc_chat_rpc_spec"]
+
+    @pytest.fixture
+    def wide_spec(self):
+        spec = {"methods": [
+            {"name": "get_basic_chat_info", "params": [{"name": "accountId"}, {"name": "chatId"}]},
+            {"name": "forward_messages", "params": [{"name": "accountId"}, {"name": "messageIds"}, {"name": "chatId"}]},
+            {"name": "get_chat_securejoin_qr_code", "params": [{"name": "accountId"}, {"name": "chatId"}]},
+            {"name": "place_outgoing_call", "params": [{"name": "accountId"}, {"name": "chatId"}]},
+            {"name": "delete_chat", "params": [{"name": "accountId"}, {"name": "chatId"}]},
+            {"name": "get_account_info", "params": [{"name": "accountId"}]},  # no chatId
+        ]}
+        with patch.object(adapter, "_spec_cache", spec):
+            yield spec
+
+    @pytest.mark.asyncio
+    async def test_blocked_methods_are_not_advertised(self, chat_spec_handler, wide_spec):
+        names = {m["name"] for m in json.loads(await chat_spec_handler())["methods"]}
+        assert names == {"get_basic_chat_info"}
+        for hidden in ("forward_messages", "get_chat_securejoin_qr_code",
+                       "place_outgoing_call", "delete_chat", "get_account_info"):
+            assert hidden not in names
+
+    @pytest.mark.asyncio
+    async def test_advertised_set_matches_what_the_caller_will_execute(self, chat_spec_handler, wide_spec):
+        """The spec filter and the call gate must not drift apart."""
+        advertised = {m["name"] for m in json.loads(await chat_spec_handler())["methods"]}
+        executable = {m["name"] for m in wide_spec["methods"]
+                      if "chatId" in [p["name"] for p in m["params"]]
+                      and not adapter._is_blocked(m["name"])}
+        assert advertised == executable

@@ -119,7 +119,7 @@ Three tools are always available once the plugin is loaded:
 | Tool | Description |
 |------|-------------|
 | `dc_rpc_spec` | Full OpenRPC spec from the running server — all methods, params, types |
-| `dc_chat_rpc_spec` | Spec filtered to chat-scoped methods, destructive ops removed |
+| `dc_chat_rpc_spec` | Spec filtered to chat-scoped methods, refused ops removed |
 | `dc_safe_rpc_call` | Call a chat-scoped method safely — `accountId` and `chatId` are injected from an opaque per-chat token; the AI cannot address a different chat |
 
 Set `DELTACHAT_ENABLE_RAW_RPC=1` to also unlock `dc_rpc_call`, which reaches the whole
@@ -132,18 +132,29 @@ DELTACHAT_RAW_RPC_ALLOWLIST=get_account_info,get_chatlist_entries  # only these
 ```
 
 Refused everywhere, in both `dc_rpc_call` and `dc_safe_rpc_call`: any `delete_*` /
-`remove_*` method, plus `leave_group`, `set_chat_ephemeral_timer` (timed deletion),
-`add_contact_to_chat` (adds a stranger to a private group) and `block_chat`. The last
-three are blocked for what they do, not what they are called.
+`remove_*` method, plus twelve named for what they do rather than what they are called —
+
+| | |
+|---|---|
+| `leave_group`, `set_chat_ephemeral_timer` | destroy or detach (the timer is timed deletion) |
+| `forward_messages`, `add_contact_to_chat` | reach outside the chat the token scopes |
+| `get_chat_securejoin_qr_code`(`_svg`) | the QR text *is* the group invite |
+| `send_locations_to_chat` | streams real device location |
+| `block_chat`, `set_chat_mute_duration`, `set_chat_visibility` | hide traffic from the gateway |
+| `place_outgoing_call`, `init_webxdc_integration` | reachable better via `dc_start_call`, or internal plumbing |
+
+Reading locations contacts chose to share (`get_locations`) stays allowed; only
+broadcasting ours is refused.
 
 That refusal always applies — allowlisting such a method does
-not re-enable it. Leaving the allowlist blank allows any non-destructive method; setting
+not re-enable it. Leaving the allowlist blank allows any method not refused above; setting
 it to anything that names no methods allows nothing, rather than quietly allowing all.
 
-Note this is a rule about method *names*, so it is narrow: it blocks 9 of the 177 spec
-methods. It does not stop `set_config(delete_device_after)` or `set_chat_ephemeral_timer`,
-which destroy data under innocuous names. Set `DELTACHAT_RAW_RPC_ALLOWLIST` if you want a
-real bound on what the agent can reach.
+Note this is still a rule about method *names*, so it is narrow: it refuses 20 of the 177
+spec methods. It cannot see `set_config(delete_device_after)`, which wipes the whole
+message store under an innocuous name, nor the `file` parameter on `send_msg`, which takes
+any local path. Set `DELTACHAT_RAW_RPC_ALLOWLIST` if you want a real bound on what the
+agent can reach.
 
 RPC errors come back to the agent verbatim so it can correct a malformed call. That
 discloses nothing a tool with `get_message` and `get_system_info` did not already
@@ -235,7 +246,7 @@ hermes gateway start
 | `DELTACHAT_RPC_SERVER` | No | `deltachat-rpc-server` | Path to RPC binary |
 | `DELTACHAT_HOME_CHANNEL` | No | — | Chat ID for cron/proactive delivery (or use `/sethome` in chat) |
 | `DELTACHAT_ENABLE_RAW_RPC` | No | — | Expose the account-wide `dc_rpc_call` tool |
-| `DELTACHAT_RAW_RPC_ALLOWLIST` | No | — | Comma-separated methods `dc_rpc_call` may call (blank = any non-destructive one) |
+| `DELTACHAT_RAW_RPC_ALLOWLIST` | No | — | Comma-separated methods `dc_rpc_call` may call (blank = any method not refused above) |
 
 ### Multiple Agents
 
