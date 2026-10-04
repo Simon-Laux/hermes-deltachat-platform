@@ -109,6 +109,8 @@ Would you rather have the agent see all group messages as context and still only
 mentioned? That isn't implemented yet —
 [open an issue](https://github.com/Simon-Laux/hermes-deltachat-platform/issues/new) if you want it.
 
+`DELTACHAT_REQUIRE_MENTION` applies to all groups; exempting single groups is not supported yet — open an issue for that too.
+
 ### Voice Calls (WebRTC)
 - **Incoming calls**: auto-answer, live speech-to-text → AI → text-to-speech pipeline
 - **Outgoing calls**: the AI can call you from a scheduled task (`dc_start_call` tool)
