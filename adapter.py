@@ -860,6 +860,23 @@ body {{
 
         return (text_part, html_part)
 
+    async def _resolve_chat_id(self, chat_id) -> int:
+        """Real DC chat id for an outbound target: a numeric id or a chat token.
+
+        why: the agent sees only the [dc:chat=<token>] tag, so when it writes a
+        delivery target itself (a cron job's `deliver: deltachat-platform:<x>`)
+        it uses the token. Hermes passes that through verbatim as chat_id.
+        """
+        s = str(chat_id).strip()
+        # token_hex(8) is 16 hex chars and can, rarely, be all digits.
+        if not s.isdigit() or len(s) == 16:
+            real = await _resolve_chat_token(self.rpc, self.account_id, s)
+            if real is not None:
+                return real
+        if not s.isdigit():
+            raise ValueError(f"unknown Delta Chat chat id or token: {s!r}")
+        return int(s)
+
     async def send(
         self,
         chat_id: str,
@@ -908,7 +925,7 @@ body {{
 
                 msg_id = await self.rpc.send_msg(
                     self.account_id,
-                    int(chat_id),
+                    await self._resolve_chat_id(chat_id),
                     MsgData(text=text_part, html=html_part, viewtype=MessageViewtype.TEXT, quoted_message_id=quoted_id),
                 )
             else:
@@ -916,7 +933,7 @@ body {{
 
                 msg_id = await self.rpc.send_msg(
                     self.account_id,
-                    int(chat_id),
+                    await self._resolve_chat_id(chat_id),
                     MsgData(text=content, quoted_message_id=quoted_id),
                 )
 
@@ -955,7 +972,7 @@ body {{
 
             msg_id = await self.rpc.send_msg(
                 self.account_id,
-                int(chat_id),
+                await self._resolve_chat_id(chat_id),
                 MsgData(file=file_path, text=caption or "", quoted_message_id=int(reply_to) if reply_to else None),
             )
             logger.debug(f"Sent file {file_path} as message {msg_id} to chat {chat_id}")
@@ -1018,7 +1035,7 @@ body {{
 
             msg_id = await self.rpc.send_msg(
                 self.account_id,
-                int(chat_id),
+                await self._resolve_chat_id(chat_id),
                 MsgData(
                     file=image_path,
                     text=caption or "",
@@ -1055,7 +1072,7 @@ body {{
 
             msg_id = await self.rpc.send_msg(
                 self.account_id,
-                int(chat_id),
+                await self._resolve_chat_id(chat_id),
                 MsgData(
                     file=video_path,
                     text=caption or "",
@@ -1129,7 +1146,7 @@ body {{
             logger.debug(f"send_voice: Sending to account_id={self.account_id}, chat_id={chat_id}")
             msg_id = await self.rpc.send_msg(
                 self.account_id,
-                int(chat_id),
+                await self._resolve_chat_id(chat_id),
                 MsgData(file=audio_path, text=caption or "", viewtype=MessageViewtype.VOICE),
             )
 
@@ -1183,7 +1200,7 @@ body {{
             # location tuple is (latitude, longitude) per GeoJSON convention
             msg_id = await self.rpc.send_msg(
                 self.account_id,
-                int(chat_id),
+                await self._resolve_chat_id(chat_id),
                 MsgData(text=poi_name, location=(latitude, longitude)),
             )
 
@@ -1829,7 +1846,7 @@ body {{
             if self.rpc and self.account_id:
                 chat = await self.rpc.get_basic_chat_info(
                     self.account_id,
-                    int(chat_id),
+                    await self._resolve_chat_id(chat_id),
                 )
                 return {
                     "name": chat.get("name", chat_id),
