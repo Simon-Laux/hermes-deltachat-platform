@@ -39,9 +39,22 @@ if os.getenv("DELTACHAT_DEBUG"):
     logging.getLogger("deltachat2").setLevel(logging.DEBUG)
     logging.getLogger("deltachat2.IOTransport").setLevel(logging.DEBUG)
 
-# Minimum required Delta Chat core version
-# Plugin will NOT connect with older versions
+# Delta Chat core version window. Below the minimum the plugin refuses to
+# connect; above the tested ceiling it connects but warns.
+#
+# why two constants: DC core does not use semver. Major is reserved for heavily
+# breaking wire-format changes and patch is never used, so a *minor* bump is
+# just a counter that may still remove JSON-RPC fields — 2.61.0 dropped
+# `Account::Configured.addr` and `Contact.nameAndAddr`, both of which this
+# adapter reads. A single MIN_DC_VERSION therefore cannot express "known good":
+# everything above it would be both allowed and suspect, which is why the
+# warning used to fire on every connect for versions we had in fact verified.
 MIN_DC_VERSION = "2.51.0"
+
+# Newest release whose full RPC surface was verified against its `--openrpc`
+# spec and a live server. Bump it after re-verifying, and keep the ceiling in
+# plugin.yaml's `python_dependencies` in step — it is the same claim.
+MAX_TESTED_DC_VERSION = "2.60.0"
 
 # ---------------------------------------------------------------------------
 # Headless onboarding
@@ -205,6 +218,7 @@ async def _check_dc_version(rpc) -> bool:
         dc_version_str = system_info.get("deltachat_core_version", "0.0.0")
         dc_version = _parse_version(dc_version_str)
         min_version = _parse_version(MIN_DC_VERSION)
+        max_tested = _parse_version(MAX_TESTED_DC_VERSION)
 
         if dc_version < min_version:
             logger.error(
@@ -213,11 +227,15 @@ async def _check_dc_version(rpc) -> bool:
                 f"Please update your Delta Chat installation."
             )
             return False
-        elif dc_version > min_version:
+        elif dc_version > max_tested:
+            # Only above the tested ceiling. Warning on everything above the
+            # *minimum* cried wolf on versions that were in fact verified, and
+            # a warning nobody can act on is one everybody learns to ignore.
             logger.warning(
-                f"Delta Chat version {dc_version_str} is newer than "
-                f"the minimum required ({MIN_DC_VERSION}). "
-                f"The API may have changed and there may be errors."
+                f"Delta Chat version {dc_version_str} is newer than the newest "
+                f"version this plugin was tested against ({MAX_TESTED_DC_VERSION}). "
+                f"Core minor bumps can remove JSON-RPC fields, so contact names or "
+                f"the bot's own address may come out blank. Please report problems."
             )
 
         return True
