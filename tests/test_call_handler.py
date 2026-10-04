@@ -219,6 +219,60 @@ class TestBargeIn:
         assert session.hangup_cancelled is True   # _hangup_session will abort
 
 
+class TestHangupMarker:
+    """A reply ending in [[hangup]] is spoken without the marker, then hangs up."""
+
+    def _manager(self, monkeypatch):
+        import json
+        import types
+        from unittest.mock import AsyncMock, MagicMock
+
+        spoken = []
+        fake_tts = types.ModuleType("tools.tts_tool")
+        # TTS "fails" so no audio decode is needed; we only check what was sent.
+        fake_tts.text_to_speech_tool = lambda s: spoken.append(s) or json.dumps({"success": False})
+        monkeypatch.setitem(sys.modules, "tools.tts_tool", fake_tts)
+
+        session = ch.CallSession(
+            pc=MagicMock(), chat_id="12", msg_id=1, caller_id="11", caller_name="X",
+            outgoing_track=ch.HermesAudioTrack(), audio_buffer=MagicMock(),
+            ice_channel=MagicMock(),
+        )
+        mgr = ch.CallManager(adapter=MagicMock())
+        mgr._sessions[1] = session
+        mgr._chat_to_msg["12"] = 1
+        mgr._hangup_session = AsyncMock()
+        return mgr, session, spoken
+
+    @pytest.mark.asyncio
+    async def test_marker_is_stripped_and_hangs_up(self, monkeypatch):
+        mgr, session, spoken = self._manager(monkeypatch)
+        await mgr._play_response("12", "Tschüss, bis bald! [[hangup]]")
+        assert spoken == ["Tschüss, bis bald!"]
+        mgr._hangup_session.assert_awaited_once_with(session)
+
+    @pytest.mark.asyncio
+    async def test_marker_spelling_is_lenient(self, monkeypatch):
+        mgr, _, spoken = self._manager(monkeypatch)
+        await mgr._play_response("12", "Bye! [[ Hang-Up ]]")
+        assert spoken == ["Bye!"]
+        mgr._hangup_session.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_marker_alone_hangs_up_without_speaking(self, monkeypatch):
+        mgr, _, spoken = self._manager(monkeypatch)
+        await mgr._play_response("12", "[[hangup]]")
+        assert spoken == []
+        mgr._hangup_session.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_marker_keeps_the_call(self, monkeypatch):
+        mgr, _, spoken = self._manager(monkeypatch)
+        await mgr._play_response("12", "Sure, here is a joke.")
+        assert spoken == ["Sure, here is a joke."]
+        mgr._hangup_session.assert_not_awaited()
+
+
 class TestOutgoingCall:
     """Answer-future resolution for outgoing calls."""
 

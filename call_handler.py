@@ -16,6 +16,7 @@ import fractions
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -130,10 +131,17 @@ _DEFAULT_CALL_PROMPT = (
     "subagent (it runs on the more capable default model) and then give a brief "
     "spoken summary of the result — do not attempt heavy work inline, especially "
     "since this call may be running on a smaller, faster model. "
-    "When the user says goodbye or asks to end the call, end it gracefully: "
-    "say goodbye, then call dc_end_call to hang up. The tool waits for your "
-    "goodbye to finish playing before disconnecting."
+    "When the user says goodbye (bye, ciao, tschüss, that's all) or asks "
+    "to end the call, say a short goodbye and end your reply with [[hangup]] — "
+    "the call disconnects once your goodbye has finished playing. Do not ask "
+    "whether they want to hang up; just do it."
 )
+
+# why a text marker and not only the dc_end_call tool: Hermes ≥ 0.21.5 hides
+# plugin tools behind tool_search/tool_describe/tool_call, so hanging up took
+# three correct tool steps and a call model routinely missed a plain "bye".
+# dc_end_call stays registered for explicit use.
+_HANGUP_MARKER_RE = re.compile(r"\[\[\s*hang\s*-?\s*up\s*\]\]", re.IGNORECASE)
 _CALL_PROMPT = os.getenv("DELTACHAT_CALL_PROMPT", _DEFAULT_CALL_PROMPT).strip()
 
 # Isolate the call conversation in its own session so spoken turns don't mix
@@ -1356,7 +1364,17 @@ class CallManager:
         session.resp_start_frames = track.played_count
         session.tts_checkpoints = []
 
-        sentences = _split_sentences(text) or [text]
+        # Spoken-goodbye hangup: the marker rides in the reply text, so ending a
+        # call needs no tool call. Same drain path as dc_end_call (finally block
+        # below), and a barge-in during the goodbye still cancels it.
+        text, n_markers = _HANGUP_MARKER_RE.subn("", text)
+        text = text.strip()
+        if n_markers:
+            session.last_response_text = text
+            session.hangup_pending = True
+            logger.info("play_response: hangup marker — hanging up after this reply")
+
+        sentences = (_split_sentences(text) or [text]) if text else []
         t0 = time.monotonic()
         first_audio_s = None
         text_cursor = 0   # real offset into `text`, tracked for barge-in accounting

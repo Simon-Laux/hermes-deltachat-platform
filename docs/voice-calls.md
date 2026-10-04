@@ -7,7 +7,8 @@ WebRTC call.
 
 Requires `aiortc` (see [nixos-installation.md](nixos-installation.md) for the
 NixOS setup). Incoming calls are auto-answered; hang up from your Delta Chat
-client (or the bot can hang up via `dc_end_call`).
+client, or the bot hangs up after its goodbye — it ends the reply with `[[hangup]]`,
+which the adapter strips before TTS. `dc_end_call` does the same as a tool.
 
 ## Outgoing calls (the bot calls you)
 
@@ -106,7 +107,7 @@ DELTACHAT_CALL_STT_VOXTRAL=true
 
 | Variable | Default | Description |
 |---|---|---|
-| `DELTACHAT_CALL_PROMPT` | (built-in) | Ephemeral per-call system prompt that keeps replies short and TTS-friendly. Applied only during calls, never persisted to chat history. Override to change the calling persona/brevity. |
+| `DELTACHAT_CALL_PROMPT` | (built-in) | Ephemeral per-call system prompt that keeps replies short and TTS-friendly. Applied only during calls, never persisted to chat history. Override to change the calling persona/brevity — keep the `[[hangup]]` instruction, or the bot can only hang up via `dc_end_call`. |
 
 The built-in prompt instructs the agent to reply in 1-2 short spoken sentences
 with no markdown/lists/emojis/URLs (cuts both AI and TTS latency, which scale
