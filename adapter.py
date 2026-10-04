@@ -1001,6 +1001,43 @@ body {{
             logger.error(f"Error sending image {image_path} to chat {chat_id}: {e}")
             return SendResult(success=False, error=str(e))
 
+    async def send_video(
+        self,
+        chat_id: str,
+        video_path: str,
+        caption: Optional[str] = None,
+        reply_to: Optional[str] = None,
+        metadata: Optional[Dict[str, Any]] = None,
+        **kwargs,
+    ) -> SendResult:
+        """Send a video file to a Delta Chat chat as an inline-playable video.
+
+        why: without this override Hermes falls back to the base class, which
+        posts a "couldn't send video" notice instead of the file — on both the
+        reply-flow MEDIA path and cron delivery.
+        """
+        try:
+            if not self.rpc or not self.account_id:
+                return SendResult(success=False, error="Delta Chat not connected")
+
+            from deltachat2.types import MsgData, MessageViewtype
+
+            msg_id = await self.rpc.send_msg(
+                self.account_id,
+                int(chat_id),
+                MsgData(
+                    file=video_path,
+                    text=caption or "",
+                    viewtype=MessageViewtype.VIDEO,
+                    quoted_message_id=int(reply_to) if reply_to else None,
+                ),
+            )
+            logger.debug(f"Sent video {video_path} as message {msg_id} to chat {chat_id}")
+            return SendResult(success=True, message_id=str(msg_id))
+        except Exception as e:
+            logger.error(f"Error sending video {video_path} to chat {chat_id}: {e}")
+            return SendResult(success=False, error=str(e))
+
     async def send_voice(
         self,
         chat_id: str,
