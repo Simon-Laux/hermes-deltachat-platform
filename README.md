@@ -247,6 +247,8 @@ hermes gateway start
 | `DELTACHAT_HOME_CHANNEL` | No | — | Chat ID for cron/proactive delivery (or use `/sethome` in chat) |
 | `DELTACHAT_ENABLE_RAW_RPC` | No | — | Expose the account-wide `dc_rpc_call` tool |
 | `DELTACHAT_RAW_RPC_ALLOWLIST` | No | — | Comma-separated methods `dc_rpc_call` may call (blank = any method not refused above) |
+| `DELTACHAT_REQUIRE_MENTION` | No | — | In **group** chats, only answer messages that say `@<display name>` (or an alias), or quote-reply to the bot. DMs and slash commands are never gated. Also `platforms.deltachat-platform.require_mention: true` in `config.yaml` |
+| `DELTACHAT_MENTION_ALIASES` | No | — | Comma-separated extra names that count as a mention (`@<alias>`); also `platforms.deltachat-platform.mention_aliases` |
 
 ### Multiple Agents
 

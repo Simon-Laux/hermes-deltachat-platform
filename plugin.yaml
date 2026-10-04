@@ -42,6 +42,12 @@ optional_env:
   - name: DELTACHAT_CHATMAIL_SERVERS
     description: "Comma-separated chatmail relays to register on when DELTACHAT_EMAIL=auto (e.g. nine.testrun.org,mehl.cloud). Unset picks nine.testrun.org plus two random relays from chatmail.at/relays for redundancy."
     prompt: "Chatmail relays (comma-separated)"
+  - name: DELTACHAT_REQUIRE_MENTION
+    description: "Set to 1 to answer group messages only when they mention the bot (@<display name> or @<alias>) or quote-reply to it. DMs are never gated."
+    prompt: "Require @mention in groups (blank = no)"
+  - name: DELTACHAT_MENTION_ALIASES
+    description: "Comma-separated extra names that count as a mention when written as @<alias>."
+    prompt: "Mention aliases (comma-separated)"
 
 # Python packages this plugin needs in Hermes' venv. Hermes resolves them together with its own
 # pinned ranges when the plugin is installed and RE-APPLIES them after every `hermes update`

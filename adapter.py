@@ -8,6 +8,7 @@ import html
 import json
 import os
 import random
+import re
 import secrets
 import sys
 import asyncio
@@ -55,6 +56,9 @@ MIN_DC_VERSION = "2.51.0"
 # spec and a live server. Bump it after re-verifying, and keep the ceiling in
 # plugin.yaml's `python_dependencies` in step — it is the same claim.
 MAX_TESTED_DC_VERSION = "2.60.0"
+
+# Contact id core uses for this account itself (DC_CONTACT_ID_SELF).
+DC_CONTACT_ID_SELF = 1
 
 # ---------------------------------------------------------------------------
 # Headless onboarding
@@ -456,7 +460,60 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._call_manager = None
         self._invite_link: Optional[str] = None
 
+        # Group mention gating (opt-in; DMs are never gated). Set
+        # platforms.deltachat-platform.require_mention / mention_aliases in
+        # config.yaml (Hermes copies them into config.extra), or the
+        # DELTACHAT_REQUIRE_MENTION / DELTACHAT_MENTION_ALIASES env vars.
+        extra = self.config.extra or {}
+        raw = extra.get("require_mention")
+        self._require_mention = (
+            _env_flag("DELTACHAT_REQUIRE_MENTION") if raw is None
+            else str(raw).strip().lower() in ("1", "true", "yes", "on")
+        )
+        raw = extra.get("mention_aliases")
+        if raw is None:
+            raw = os.getenv("DELTACHAT_MENTION_ALIASES", "")
+        if isinstance(raw, str):
+            raw = raw.split(",")
+        self._mention_aliases = [str(a).strip() for a in raw if str(a).strip()]
 
+    async def _mention_gate_allows(self, msg: Dict, chat_id) -> bool:
+        """With require_mention on, drop group messages that don't mention us.
+
+        A mention is "@<display name>" or "@<alias>" (case-insensitive, whole
+        word) in the message's own text or caption — quoted text is not part
+        of it. A quote-reply to one of our own messages counts as a mention so
+        a thread can go on without repeating it. Slash commands always pass.
+        """
+        if not self._require_mention:
+            return True
+        text = msg.get("text") or ""
+        if text.startswith("/"):
+            return True
+        try:
+            chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
+            if chat.get("chat_type") != "Group":
+                return True
+            # why: read per message, so a renamed bot is matched under its new name.
+            names = [await self.rpc.get_config(self.account_id, "displayname"),
+                     *self._mention_aliases]
+            if any(re.search(r"(?<![\w@])@" + re.escape(n.strip()) + r"(?![\w-])",
+                             text, re.IGNORECASE)
+                   for n in names if n and n.strip()):
+                return True
+            quote = msg.get("quote") or {}
+            if quote.get("kind") == "WithMessage" and quote.get("message_id"):
+                quoted = await self.rpc.get_message(self.account_id,
+                                                    int(quote["message_id"]))
+                if quoted and quoted.get("from_id") == DC_CONTACT_ID_SELF:
+                    return True
+        except Exception as e:
+            logger.warning("Mention gate failed for chat %s, letting message through: %s",
+                           chat_id, e)
+            return True
+        logger.debug("Ignoring unmentioned group message %s (require_mention)",
+                     msg.get("id"))
+        return False
 
     def _get_dc_config_dir(self) -> str:
         """Get Delta Chat config directory path.
@@ -1513,6 +1570,10 @@ body {{
             except Exception as e:
                 logger.debug(f"Could not mark message {msg_id} as seen: {e}")
 
+            # Before the text/non-text split so images and voice are gated too.
+            if not await self._mention_gate_allows(msg, chat_id):
+                return
+
             text = msg.get("text", "")
             view_type = msg.get("view_type", "")
             has_file = bool(msg.get("file") or msg.get("file_mime"))
@@ -1549,7 +1610,7 @@ body {{
                 user_id = "unknown"
 
             # Determine chat type
-            chat_type = "group" if chat.get("is_group", False) else "dm"
+            chat_type = "group" if chat.get("chat_type") == "Group" else "dm"
             chat_name = chat.get("name", f"Chat {chat_id}")
 
             # Build source
@@ -1673,7 +1734,7 @@ body {{
         try:
             chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
             chat_name = chat.get("name", chat_name)
-            chat_type = "group" if chat.get("is_group", False) else "dm"
+            chat_type = "group" if chat.get("chat_type") == "Group" else "dm"
         except Exception:
             pass
 
@@ -1796,7 +1857,7 @@ body {{
                 )
                 return {
                     "name": chat.get("name", chat_id),
-                    "type": "group" if chat.get("is_group") else "dm",
+                    "type": "group" if chat.get("chat_type") == "Group" else "dm",
                 }
         except Exception as e:
             logger.warning(f"Error getting chat info for {chat_id}: {e}")

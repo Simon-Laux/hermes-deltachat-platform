@@ -235,7 +235,7 @@ class TestGetChatInfo:
         adapter.account_id = 1
 
         mock_rpc.get_basic_chat_info = AsyncMock(
-            return_value={"chat_id": 789, "name": "Test Chat", "is_group": False}
+            return_value={"chat_id": 789, "name": "Test Chat", "chat_type": "Single"}
         )
 
         result = await adapter.get_chat_info("789")
@@ -251,7 +251,7 @@ class TestGetChatInfo:
         adapter.account_id = 1
 
         mock_rpc.get_basic_chat_info = AsyncMock(
-            return_value={"chat_id": 789, "name": "Group Chat", "is_group": True}
+            return_value={"chat_id": 789, "name": "Group Chat", "chat_type": "Group"}
         )
 
         result = await adapter.get_chat_info("789")
@@ -294,7 +294,7 @@ class TestEventHandling:
             }
         )
         mock_rpc.get_basic_chat_info = AsyncMock(
-            return_value={"chat_id": 789, "name": "Test Chat", "is_group": False}
+            return_value={"chat_id": 789, "name": "Test Chat", "chat_type": "Single"}
         )
         mock_rpc.get_contact = AsyncMock(
             return_value={"id": 456, "display_name": "Test User"}
