@@ -31,3 +31,25 @@ optional_env:
     description: "Comma-separated chatmail relays to register on when DELTACHAT_EMAIL=auto (e.g. nine.testrun.org,mehl.cloud). Unset picks nine.testrun.org plus two random relays from chatmail.at/relays for redundancy."
     prompt: "Chatmail relays (comma-separated)"
     password: false
+
+# Python packages this plugin needs in Hermes' venv. Hermes resolves them together with its own
+# pinned ranges when the plugin is installed and RE-APPLIES them after every `hermes update`
+# (grep Hermes for `_install_plugin_python_deps` — the module holding it gets renamed between
+# releases). Without the declaration they were installed by hand, so a Hermes update that bumped
+# `cryptography` left aiortc's `pyOpenSSL` on a release built for the old one: importing it failed
+# with "module 'lib' has no attribute 'GEN_EMAIL'" and the update then disabled the plugin.
+# pyOpenSSL/cryptography are deliberately not listed — the resolver picks the pyOpenSSL that
+# matches the cryptography Hermes pins. Releases without `python_dependencies` support ignore this
+# key, so on those the packages still have to be installed by hand (see README).
+#
+# why: DC core does not use semver — a *minor* bump may break the JSON-RPC API (major is reserved
+# for heavily breaking wire-format changes, patch is never used), so the ceiling has to exclude the
+# first minor whose API nobody checked. 2.61.0 removes `Account::Configured.addr` (read at
+# adapter.py:714, setup.py:297) and `Contact.nameAndAddr` (adapter.py:1440,1562,1764,
+# call_handler.py:602,911); both reads are `.get()` fallbacks so they degrade rather than crash,
+# but `get_my_address()` loses its only non-SecureJoin fallback. 2.60.0 is the newest release whose
+# full RPC surface — all 25 methods this plugin calls, plus the MsgData payload — was verified
+# against the real `--openrpc` spec and a live server.
+python_dependencies:
+  - deltachat-rpc-server>=2.51.0,<2.61
+  - aiortc>=1.9.0

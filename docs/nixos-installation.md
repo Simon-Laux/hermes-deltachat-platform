@@ -4,6 +4,25 @@ This guide covers installing the Delta Chat Hermes plugin on NixOS, including
 voice call support (aiortc) which requires special handling because pip-installed
 C extension wheels don't work reliably on NixOS.
 
+## What the declared `python_dependencies` mean here
+
+`plugin.yaml` declares `deltachat-rpc-server` and `aiortc`, so a Hermes that supports that manifest
+key will pip-install both into its own venv when the plugin is enabled. On NixOS you still want the
+nix-built ones, and the nix path wins without any extra work:
+
+- **aiortc** — `PYTHONPATH` entries are placed ahead of the venv's `site-packages` on `sys.path`,
+  and `call_handler.py` additionally inserts `~/.hermes/aiortc-env`'s site-packages at `sys.path[0]`
+  when that symlink exists. So the nix build shadows whatever pip put in the venv. Keep following
+  the GC-root recipe below; treat the venv copy as inert ballast.
+- **deltachat-rpc-server** — `DELTACHAT_RPC_SERVER` takes precedence over PATH lookup, so the
+  `nix profile` binary keeps being used. If you leave that variable unset, the adapter falls back to
+  `shutil.which("deltachat-rpc-server")` and can pick the venv's wheel binary, which may not exec on
+  NixOS. Always set `DELTACHAT_RPC_SERVER` (step 1 below does).
+
+Dependency resolution happens when the plugin is enabled, and failure leaves the previous
+environment and plugin selection untouched — a wheel Hermes cannot install will not take your
+working setup down with it.
+
 ## Basic Installation
 
 ### 1. Install deltachat-rpc-server

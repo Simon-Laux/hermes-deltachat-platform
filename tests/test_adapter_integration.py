@@ -16,6 +16,7 @@ from adapter import (
     _check_dc_version,
     _check_dc2_available,
     MIN_DC_VERSION,
+    MAX_TESTED_DC_VERSION,
 )
 
 
@@ -125,6 +126,23 @@ class TestVersionCheckIntegration:
             result = await _check_dc_version(mock_rpc)
         assert result is True
         assert "newer than" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_version_inside_tested_window_is_silent(self, mock_rpc, caplog):
+        """A version between the minimum and the tested ceiling must not warn.
+
+        The whole range is verified, so warning on it is a false alarm on every
+        connect — and warnings that fire when nothing is wrong get filtered out
+        by the people who would need to read the real one.
+        """
+        assert _parse_version(MAX_TESTED_DC_VERSION) > _parse_version(MIN_DC_VERSION)
+        mock_rpc.get_system_info = AsyncMock(
+            return_value={"deltachat_core_version": MAX_TESTED_DC_VERSION}
+        )
+        with caplog.at_level("WARNING"):
+            result = await _check_dc_version(mock_rpc)
+        assert result is True
+        assert caplog.text == ""
 
     @pytest.mark.asyncio
     async def test_missing_version_key_refuses(self, mock_rpc):
