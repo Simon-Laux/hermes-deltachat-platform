@@ -214,3 +214,50 @@ class TestRawRpcGate:
     async def test_missing_method_arg(self, raw_rpc_handler, connected_adapter):
         result = json.loads(await raw_rpc_handler({}))
         assert "Missing 'method'" in result["error"]
+
+class TestChatSpecFiltering:
+    """dc_chat_rpc_spec must not advertise what dc_safe_rpc_call would refuse.
+
+    Two of the blocklist entries (the securejoin QR pair) exist mainly so the
+    model is never told they are available. Nothing covered this filter before:
+    replacing it with `and True` left the whole suite green.
+    """
+
+    @pytest.fixture
+    def chat_spec_handler(self):
+        handlers = {}
+        ctx = MagicMock()
+        ctx.register_tool.side_effect = lambda **kw: handlers.__setitem__(kw["name"], kw["handler"])
+        with patch.dict(os.environ, {}, clear=True):
+            adapter.register_rpc_tools(ctx)
+        return handlers["dc_chat_rpc_spec"]
+
+    @pytest.fixture
+    def wide_spec(self):
+        spec = {"methods": [
+            {"name": "get_basic_chat_info", "params": [{"name": "accountId"}, {"name": "chatId"}]},
+            {"name": "forward_messages", "params": [{"name": "accountId"}, {"name": "messageIds"}, {"name": "chatId"}]},
+            {"name": "get_chat_securejoin_qr_code", "params": [{"name": "accountId"}, {"name": "chatId"}]},
+            {"name": "place_outgoing_call", "params": [{"name": "accountId"}, {"name": "chatId"}]},
+            {"name": "delete_chat", "params": [{"name": "accountId"}, {"name": "chatId"}]},
+            {"name": "get_account_info", "params": [{"name": "accountId"}]},  # no chatId
+        ]}
+        with patch.object(adapter, "_spec_cache", spec):
+            yield spec
+
+    @pytest.mark.asyncio
+    async def test_blocked_methods_are_not_advertised(self, chat_spec_handler, wide_spec):
+        names = {m["name"] for m in json.loads(await chat_spec_handler())["methods"]}
+        assert names == {"get_basic_chat_info"}
+        for hidden in ("forward_messages", "get_chat_securejoin_qr_code",
+                       "place_outgoing_call", "delete_chat", "get_account_info"):
+            assert hidden not in names
+
+    @pytest.mark.asyncio
+    async def test_advertised_set_matches_what_the_caller_will_execute(self, chat_spec_handler, wide_spec):
+        """The spec filter and the call gate must not drift apart."""
+        advertised = {m["name"] for m in json.loads(await chat_spec_handler())["methods"]}
+        executable = {m["name"] for m in wide_spec["methods"]
+                      if "chatId" in [p["name"] for p in m["params"]]
+                      and not adapter._is_blocked(m["name"])}
+        assert advertised == executable

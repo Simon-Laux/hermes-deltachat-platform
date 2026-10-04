@@ -347,8 +347,9 @@ def _is_blocked(method: str) -> bool:
     store under an innocuous name, nor the `file` parameter on send_msg, which
     takes any local path (#32). The allowlist is the real control (#22).
 
-    Draft methods are deliberately absent: the agent writing and clearing its
-    own drafts is ordinary use, not destruction.
+    Draft methods are deliberately absent *from the named set*: the agent
+    writing and clearing its own drafts is ordinary use. Note remove_draft is
+    still refused, by the prefix rule rather than by choice.
     """
     return method in _BLOCKED_METHODS or method.startswith(("delete_", "remove_"))
 
@@ -1933,7 +1934,7 @@ def register_rpc_tools(ctx) -> None:
 
     Always registers:
       - dc_rpc_spec: full OpenRPC spec
-      - dc_chat_rpc_spec: spec filtered to chatId-scoped, non-destructive methods
+      - dc_chat_rpc_spec: spec filtered to chatId-scoped methods we do not refuse
       - dc_safe_rpc_call: chat-scoped calls with token-validated chatId injection
 
     Only registers when DELTACHAT_ENABLE_RAW_RPC is set:
@@ -2013,7 +2014,7 @@ def register_rpc_tools(ctx) -> None:
             return json.dumps({"error": str(e)})
 
     async def _chat_spec_handler(args: dict = None, **kwargs) -> str:
-        """Return only the chatId-scoped, non-destructive methods."""
+        """Return only the chatId-scoped methods _is_blocked does not refuse."""
         try:
             spec = await _fetch_spec()
         except Exception as e:
@@ -2040,7 +2041,7 @@ def register_rpc_tools(ctx) -> None:
         if real_chat_id is None:
             return json.dumps({"error": "Unknown chat_token — use the [dc:chat=...] value from your message"})
 
-        # Block destructive methods
+        # Refuse before resolving anything else
         if _is_blocked(method):
             return json.dumps({"error": f"'{method}' is not allowed in safe mode"})
 
@@ -2158,7 +2159,7 @@ def register_rpc_tools(ctx) -> None:
         schema={
             "description": (
                 "Fetch the OpenRPC spec filtered to methods that accept a chatId parameter, "
-                "excluding all destructive operations. "
+                "excluding every operation the adapter refuses. "
                 "Only call this when you are about to use dc_safe_rpc_call for an explicit user request "
                 "that cannot be handled by normal messaging tools."
             ),
@@ -2217,7 +2218,7 @@ def register_rpc_tools(ctx) -> None:
                 "Do NOT call this for routine message handling, reading messages, or sending replies — "
                 "those go through the standard tools. "
                 "accountId and chatId are injected automatically from the chat_token. "
-                "Destructive methods are blocked. Use dc_chat_rpc_spec first to find the method name."
+                "Refused methods are rejected before the call. Use dc_chat_rpc_spec first to find the method name."
             ),
             "parameters": {
                 "type": "object",
