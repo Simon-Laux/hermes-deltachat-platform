@@ -612,6 +612,59 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._mention_aliases = [a for a in (str(a).strip().lstrip("@").strip() for a in raw) if a]
         self._warned_no_mention_names = False
 
+    async def _intake_allows(self, msg: Dict, chat_id) -> bool:
+        """Drop what Hermes' own authorization can't judge, and leave groups
+        no approved contact is a member of.
+
+        Who may talk to the agent is Hermes' decision (pairing), keyed on the
+        contact ID. That only identifies a person for key-contacts: in Delta
+        Chat identity is the key, and a message without one (unencrypted
+        classic email) says nothing reliable about its sender. Checked first,
+        so such a sender never makes us do anything visible, like leaving.
+        """
+        from_id = msg.get("from_id")
+        try:
+            contact = await self.rpc.get_contact(self.account_id, int(from_id))
+        except Exception as e:
+            logger.warning("Dropping message %s: could not load sender %s: %s",
+                           msg.get("id"), from_id, e)
+            return False
+        if not contact.get("is_key_contact"):
+            logger.debug("Dropping message %s from non-key contact %s", msg.get("id"), from_id)
+            return False
+        if await self._group_has_no_approved_member(chat_id):
+            logger.info("Leaving group %s: none of its members is approved", chat_id)
+            # Separate steps: if we were removed already, leaving fails but
+            # the chat should still go.
+            for step in (self.rpc.leave_group, self.rpc.delete_chat):
+                try:
+                    await step(self.account_id, int(chat_id))
+                except Exception as e:
+                    logger.warning("Could not leave group %s: %s", chat_id, e)
+            return False
+        return True
+
+    async def _group_has_no_approved_member(self, chat_id) -> bool:
+        """True only if *chat_id* is a group and Hermes rejects every member.
+
+        Delta Chat doesn't record who added us to a group (a new group sends
+        no "member added" message at all), so membership is what we judge.
+        Asked the way Hermes judges their messages in this group, so a group
+        Hermes would answer is never left. Anything unknown — an RPC error,
+        no auth check wired (None) — keeps us in.
+        """
+        try:
+            chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
+            if chat.get("chat_type") != "Group":
+                return False
+            members = [c for c in await self.rpc.get_chat_contacts(self.account_id, int(chat_id))
+                       if c != DC_CONTACT_ID_SELF]
+        except Exception as e:
+            logger.warning("Could not check members of chat %s: %s", chat_id, e)
+            return False
+        return bool(members) and all(
+            self._is_sender_authorized(str(c), "group", str(chat_id)) is False for c in members)
+
     async def _mention_gate_allows(self, msg: Dict, chat_id) -> bool:
         """Decide whether a message is for us.
 
@@ -1913,6 +1966,10 @@ body {{
             )
             if not msg:
                 logger.warning(f"Could not retrieve message {msg_id}")
+                return
+
+            # Before the read receipt: a dropped sender learns nothing.
+            if not await self._intake_allows(msg, chat_id):
                 return
 
             # Send read receipt immediately

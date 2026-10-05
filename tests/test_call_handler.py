@@ -273,6 +273,38 @@ class TestHangupMarker:
         mgr._hangup_session.assert_not_awaited()
 
 
+class TestIncomingCallAuthorization:
+    """Calls from contacts Hermes wouldn't talk to are declined, not answered."""
+
+    def _manager(self, verdict):
+        from unittest.mock import AsyncMock, MagicMock
+        adapter = MagicMock()
+        adapter.rpc.get_message = AsyncMock(return_value={"from_id": 10})
+        adapter.rpc.get_contact = AsyncMock(return_value={"name": "Eve"})
+        adapter.rpc.end_call = AsyncMock()
+        adapter._is_sender_authorized = MagicMock(return_value=verdict)
+        mgr = ch.CallManager(adapter=adapter)
+        mgr._answer_call = AsyncMock()
+        mgr._warmup_stt = AsyncMock()
+        return mgr, adapter
+
+    @pytest.mark.asyncio
+    async def test_unauthorized_caller_is_declined(self):
+        mgr, adapter = self._manager(False)
+        await mgr._handle_incoming_call({"msg_id": 5, "chat_id": 12, "place_call_info": "sdp"})
+        adapter._is_sender_authorized.assert_called_once_with("10", "dm", "12")
+        adapter.rpc.end_call.assert_awaited_once()
+        mgr._answer_call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verdict", [True, None])
+    async def test_authorized_or_unchecked_caller_is_answered(self, verdict):
+        mgr, adapter = self._manager(verdict)
+        await mgr._handle_incoming_call({"msg_id": 5, "chat_id": 12, "place_call_info": "sdp"})
+        mgr._answer_call.assert_awaited_once()
+        adapter.rpc.end_call.assert_not_awaited()
+
+
 class TestOutgoingCall:
     """Answer-future resolution for outgoing calls."""
 

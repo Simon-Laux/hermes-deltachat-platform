@@ -84,9 +84,13 @@ Deep integration with Delta Chat's native features — voice messages, voice cal
 
 ### Messaging
 - Bidirectional text, voice messages (auto-transcribed via Hermes STT), images, files, locations
-- Group chat support — drop the agent into any group
+- Group chat support — add the agent to a group you are in
 - Read receipts
 - Bot mode: auto-accepts contact requests, no manual approval needed
+- Only end-to-end encrypted contacts reach the agent — in Delta Chat identity is the key, so
+  unencrypted mail is dropped unread. Calls from contacts Hermes hasn't approved are declined.
+  In a group where Hermes approves none of the members, the agent leaves (the group sees it
+  leave); someone who wants to add it should message it directly first to get approved
 
 ### Group Chats
 By default the agent answers every message in a group. Set `DELTACHAT_REQUIRE_MENTION=1` and it
