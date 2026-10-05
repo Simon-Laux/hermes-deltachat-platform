@@ -2148,7 +2148,13 @@ def register_platform(ctx):
         emoji="💬",
         platform_hint=(
             "You are chatting via Delta Chat. "
-            "Delta Chat does NOT support markdown formatting or message editing. "
+            "Write plain prose. Do NOT use markdown — no **bold**, no *italics*, "
+            "no `backticks`, no # headings, no - bullet lists. Delta Chat shows those "
+            "characters literally, so they read as clutter. Use short paragraphs and "
+            "blank lines for structure instead. (Code blocks are the exception: keep "
+            "them when the content really is code.) "
+            "You cannot edit a message after sending it — get it right the first time "
+            "(you can still delete one, see below). "
             "Messages longer than 40 lines will be automatically formatted with HTML. "
             "For very long content, consider sending as a document file instead. "
             "You CAN send voice messages (use send_voice tool), videos, images, files, and delete messages. "
