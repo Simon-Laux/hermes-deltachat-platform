@@ -632,6 +632,14 @@ class CallManager:
         logger.info("Incoming call: msg_id=%s chat_id=%s caller=%s has_video=%s",
                     msg_id, chat_id, caller_id, event.get("has_video"))
 
+        # Hermes drops everything an unauthorized caller says anyway, so don't
+        # answer and load STT for them. None (no check wired) is not a verdict.
+        if self._adapter._is_sender_authorized(caller_id, "dm", chat_id) is False:
+            logger.info("Declining call %s from unauthorized contact %s", msg_id, caller_id)
+            with contextlib.suppress(Exception):
+                await self._adapter.rpc.end_call(self._adapter.account_id, msg_id)
+            return
+
         # Start warming up Whisper NOW — before ICE gathering and SDP exchange
         # which take ~5-10 s, giving the model time to load into memory.
         asyncio.ensure_future(self._warmup_stt())

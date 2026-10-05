@@ -87,6 +87,9 @@ Deep integration with Delta Chat's native features — voice messages, voice cal
 - Group chat support — drop the agent into any group
 - Read receipts
 - Bot mode: auto-accepts contact requests, no manual approval needed
+- Only end-to-end encrypted contacts reach the agent — in Delta Chat identity is the key, so
+  unencrypted mail is dropped unread. Someone Hermes hasn't approved can't pull the bot into a
+  group (it leaves) or call it (the call is declined)
 
 ### Group Chats
 By default the agent answers every message in a group. Set `DELTACHAT_REQUIRE_MENTION=1` and it

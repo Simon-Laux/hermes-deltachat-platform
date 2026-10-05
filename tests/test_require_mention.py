@@ -21,6 +21,7 @@ def _adapter(extra=None, chat_type="Group", quoted_from=None, displayname="Ghost
     a.rpc.get_config.side_effect = lambda acc, key: {
         "configured_addr": "ghost-agent@chat.example", "displayname": displayname}.get(key)
     a.rpc.get_message.return_value = {"from_id": quoted_from}
+    a.rpc.get_contact.return_value = {"name": "u", "is_key_contact": True}
     return a
 
 
@@ -114,7 +115,6 @@ async def test_rpc_failure_lets_message_through():
 async def test_handler_drops_unmentioned_group_message():
     a = _adapter({"require_mention": True})
     a.rpc.get_message.return_value = _msg("hello all") | {"view_type": "Text"}
-    a.rpc.get_contact.return_value = {"name": "u"}
     a.handle_message = AsyncMock()
     await a._handle_incoming_message({"chat_id": 5, "msg_id": 7})
     a.handle_message.assert_not_awaited()
@@ -177,7 +177,6 @@ async def test_addressed_commands_are_left_alone_in_dms():
 async def test_handler_forwards_addressed_command_without_suffix():
     a = _adapter({"require_mention": True})
     a.rpc.get_message.return_value = _msg("/reset@Ghost") | {"view_type": "Text"}
-    a.rpc.get_contact.return_value = {"name": "u"}
     a.handle_message = AsyncMock()
     await a._handle_incoming_message({"chat_id": 5, "msg_id": 7})
     assert a.handle_message.await_args.args[0].text == "/reset"

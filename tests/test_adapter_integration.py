@@ -449,7 +449,7 @@ class TestEventHandling:
             return_value={"chat_id": 789, "name": "Test Chat", "chat_type": "Single"}
         )
         mock_rpc.get_contact = AsyncMock(
-            return_value={"id": 456, "display_name": "Test User"}
+            return_value={"id": 456, "display_name": "Test User", "is_key_contact": True}
         )
         adapter._running = True
         adapter._mark_connected = Mock()

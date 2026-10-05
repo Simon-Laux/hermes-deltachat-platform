@@ -59,6 +59,7 @@ MAX_TESTED_DC_VERSION = "2.60.0"
 
 # Contact id core uses for this account itself (DC_CONTACT_ID_SELF).
 DC_CONTACT_ID_SELF = 1
+DC_CONTACT_ID_LAST_SPECIAL = 9
 
 # ---------------------------------------------------------------------------
 # Headless onboarding
@@ -541,6 +542,8 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._dc_config_dir: Optional[str] = None
         self._call_manager = None
         self._invite_link: Optional[str] = None
+        # Chats whose adder _intake_allows has already judged.
+        self._checked_chats: set = set()
 
         # Group mention gating (opt-in; DMs are never gated). Set
         # platforms.deltachat-platform.require_mention / mention_aliases in
@@ -560,6 +563,63 @@ class DeltaChatAdapter(BasePlatformAdapter):
         # "@spooky" and "spooky" both mean the alias spooky
         self._mention_aliases = [a for a in (str(a).strip().lstrip("@").strip() for a in raw) if a]
         self._warned_no_mention_names = False
+
+    async def _intake_allows(self, msg: Dict, chat_id) -> bool:
+        """Drop what Hermes' own authorization can't judge, and leave groups
+        we were pulled into by someone not allowed to talk to us.
+
+        Who may talk to the agent is Hermes' decision (pairing), keyed on the
+        contact ID. That only identifies a person for key-contacts: in Delta
+        Chat identity is the key, and a message without one (unencrypted
+        classic email) says nothing reliable about its sender.
+        """
+        from_id = msg.get("from_id")
+        if chat_id not in self._checked_chats:
+            try:
+                chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
+                adder = (await self._group_adder(chat_id)
+                         if chat.get("chat_type") == "Group" else None)
+            except Exception as e:
+                logger.warning("Could not check who added us to chat %s: %s", chat_id, e)
+            else:
+                # None (no auth check wired) is not a verdict: stay.
+                if (adder not in (None, DC_CONTACT_ID_SELF)
+                        and self._is_sender_authorized(str(adder), "dm") is False):
+                    logger.info("Leaving group %s: added by unauthorized contact %s",
+                                chat_id, adder)
+                    try:
+                        await self.rpc.leave_group(self.account_id, int(chat_id))
+                        await self.rpc.delete_chat(self.account_id, int(chat_id))
+                    except Exception as e:
+                        logger.warning("Could not leave group %s: %s", chat_id, e)
+                    return False
+                self._checked_chats.add(chat_id)
+        try:
+            contact = await self.rpc.get_contact(self.account_id, int(from_id))
+        except Exception as e:
+            logger.warning("Dropping message %s: could not load sender %s: %s",
+                           msg.get("id"), from_id, e)
+            return False
+        if not contact.get("is_key_contact"):
+            logger.debug("Dropping message %s from non-key contact %s", msg.get("id"), from_id)
+            return False
+        return True
+
+    async def _group_adder(self, chat_id) -> Optional[int]:
+        """Who added us to a group: the sender of its first non-local message.
+
+        Being added sends no message of its own to a new group — we learn of
+        the group from its creator's first message. Only adding us to a group
+        already in use produces "Member Me added by …". Either way that is the
+        chat's first message from a real contact; before it there are only
+        local info messages (e.g. "Messages are end-to-end encrypted"). If it
+        is our own, we created the group.
+        """
+        for mid in await self.rpc.get_message_ids(self.account_id, int(chat_id), False, False):
+            from_id = (await self.rpc.get_message(self.account_id, mid)).get("from_id") or 0
+            if from_id == DC_CONTACT_ID_SELF or from_id > DC_CONTACT_ID_LAST_SPECIAL:
+                return from_id
+        return None
 
     async def _mention_gate_allows(self, msg: Dict, chat_id) -> bool:
         """Decide whether a message is for us.
@@ -1759,6 +1819,10 @@ body {{
             )
             if not msg:
                 logger.warning(f"Could not retrieve message {msg_id}")
+                return
+
+            # Before the read receipt: a dropped sender learns nothing.
+            if not await self._intake_allows(msg, chat_id):
                 return
 
             # Send read receipt immediately
