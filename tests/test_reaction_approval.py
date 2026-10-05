@@ -131,22 +131,21 @@ async def test_prompt_matches_on_the_redacted_command_and_description(platform_c
 
 
 @pytest.mark.asyncio
-async def test_prompt_for_an_already_answered_approval_is_not_tracked(platform_config, approval):
-    """Its entry is gone, so a reaction must not resolve some other approval."""
-    _pending(approval, "r1", command="something else")
+@pytest.mark.parametrize("unknown", ["answered", "internals_moved"])
+async def test_prompt_without_known_request_id_offers_no_reactions(platform_config, approval, unknown):
+    """A reaction may only answer the approval its prompt shows: if that one can't be
+    identified (already answered, or Hermes' queue moved), reactions do nothing."""
+    if unknown == "answered":
+        _pending(approval, "r1", command="something else")
+    else:
+        del approval._gateway_queues
     a = _adapter(platform_config)
     assert (await a._send_exec_approval_prompt(_prompt())).success
+    text = _sent_texts(a)[0]
+    assert "👍" not in text and "`/approve`" in text and "`/deny`" in text
+    assert a._approval_prompts == {}
     await a._handle_reaction(_reaction())
     approval.resolve_gateway_approval.assert_not_called()
-
-
-@pytest.mark.asyncio
-async def test_unreadable_queue_falls_back_to_oldest_first(platform_config, approval):
-    del approval._gateway_queues  # a Hermes version where the internals moved
-    a = _adapter(platform_config)
-    await a._send_exec_approval_prompt(_prompt())
-    await a._handle_reaction(_reaction())
-    approval.resolve_gateway_approval.assert_called_once_with(SESSION, "once", request_id=None)
 
 
 @pytest.mark.asyncio

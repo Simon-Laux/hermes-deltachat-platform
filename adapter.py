@@ -592,8 +592,8 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._dc_config_dir: Optional[str] = None
         self._call_manager = None
         self._invite_link: Optional[str] = None
-        # Exec-approval prompt msg id -> (Hermes session key, request_id or
-        # None if unknown), oldest first.
+        # Exec-approval prompt msg id -> (Hermes session key, request_id),
+        # oldest first. Only prompts whose request_id is known are here.
         self._approval_prompts: Dict[int, tuple] = {}
 
         # Group mention gating (opt-in; DMs are never gated). Set
@@ -1427,37 +1427,45 @@ body {{
     _MAX_APPROVAL_PROMPTS = 64
 
     async def _send_exec_approval_prompt(self, prompt) -> SendResult:
-        """Send Hermes' approval prompt and remember it for _handle_reaction."""
+        """Send Hermes' approval prompt and remember it for _handle_reaction.
+
+        A reaction must only ever answer the approval its prompt shows, so
+        the prompt offers reactions only when that approval's request_id is
+        known; otherwise it's the plain /approve, /deny prompt.
+        """
         try:
             request_id = self._pending_request_id(prompt)
         except Exception as e:
-            logger.warning("Can't tell which approval prompt %r answers, a reaction to it will "
-                           "resolve the oldest pending one: %s", prompt.command[:80], e)
+            logger.warning("Can't tell which pending approval prompt %r is for, sending it "
+                           "without reactions: %s", prompt.command[:80], e)
             request_id = None
         commands = ["`/approve`"] + [f"`/approve {c}`" for c in ("session", "always")
                                      if c in prompt.choices]
-        text = (f"{prompt.text}\n\n"
-                "React to this exact message:\n👍 = approve once\n👎 = deny\n\n"
-                f"Or reply {', '.join(commands)} or `/deny`.")
+        reply = f"{', '.join(commands)} or `/deny`."
+        if request_id:
+            text = (f"{prompt.text}\n\n"
+                    "React to this exact message:\n👍 = approve once\n👎 = deny\n\n"
+                    f"Or reply {reply}")
+        else:
+            text = f"{prompt.text}\n\nReply {reply}"
         result = await self.send(prompt.chat_id, text, metadata=prompt.metadata)
-        if result.success and result.message_id and request_id != "":
+        if result.success and result.message_id and request_id:
             self._approval_prompts[int(result.message_id)] = (prompt.session_key, request_id)
             while len(self._approval_prompts) > self._MAX_APPROVAL_PROMPTS:
                 del self._approval_prompts[next(iter(self._approval_prompts))]
         return result
 
-    def _pending_request_id(self, prompt) -> str:
+    def _pending_request_id(self, prompt) -> Optional[str]:
         """The request_id of the pending approval *prompt* was rendered from.
 
-        Hermes doesn't hand it to us, so without it a reaction could only
-        resolve the session's oldest approval, which with parallel tool calls
+        Hermes doesn't hand it to us, and without it the resolver can only
+        take the session's oldest approval, which with parallel tool calls
         may be another prompt's. The entry is queued before Hermes notifies
         us; match it the way Hermes built the prompt from it (redacted
         command, description), skipping entries our other prompts answer.
         Identical entries are interchangeable, so the oldest is taken.
-        Returns "" when nothing pending matches (answered before the prompt
-        went out). Hermes' queue is internal: anything unexpected raises,
-        and the caller falls back to oldest-first, like /approve.
+        None when nothing pending matches (answered before the prompt went
+        out). Hermes' queue is internal: anything unexpected raises.
         """
         from tools import approval
         from gateway.run import _redact_approval_command
@@ -1470,7 +1478,7 @@ body {{
                     and _redact_approval_command(data.get("command", "")) == prompt.command
                     and data.get("description", "dangerous command") == prompt.description):
                 return data["request_id"]
-        return ""
+        return None
 
     async def _handle_reaction(self, event: Dict[str, Any]) -> None:
         """Resolve the exec approval a 👍/👎 reaction answers.
