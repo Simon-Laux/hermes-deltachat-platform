@@ -592,6 +592,9 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._dc_config_dir: Optional[str] = None
         self._call_manager = None
         self._invite_link: Optional[str] = None
+        # Exec-approval prompt msg id -> (Hermes session key, request_id),
+        # oldest first. Only prompts whose request_id is known are here.
+        self._approval_prompts: Dict[int, tuple] = {}
 
         # Group mention gating (opt-in; DMs are never gated). Set
         # platforms.deltachat-platform.require_mention / mention_aliases in
@@ -1418,6 +1421,111 @@ body {{
             logger.error(f"Error sending file {file_path} to chat {chat_id}: {e}")
             return SendResult(success=False, error=str(e))
 
+    # Delta Chat has no buttons: an exec-approval prompt is answered by
+    # reacting to it. Keys are compared with skin tones/variation selectors removed.
+    _APPROVAL_REACTIONS = {"👍": "once", "👎": "deny"}
+    _MAX_APPROVAL_PROMPTS = 64
+
+    async def _send_exec_approval_prompt(self, prompt) -> SendResult:
+        """Send Hermes' approval prompt and remember it for _handle_reaction.
+
+        A reaction must only ever answer the approval its prompt shows, so
+        the prompt offers reactions only when that approval's request_id is
+        known; otherwise it's the plain /approve, /deny prompt.
+        """
+        try:
+            request_id = self._pending_request_id(prompt)
+        except Exception as e:
+            logger.warning("Can't tell which pending approval prompt %r is for, sending it "
+                           "without reactions: %s", prompt.command[:80], e)
+            request_id = None
+        commands = ["`/approve`"] + [f"`/approve {c}`" for c in ("session", "always")
+                                     if c in prompt.choices]
+        reply = f"{', '.join(commands)} or `/deny`."
+        if request_id:
+            text = (f"{prompt.text}\n\n"
+                    "React to this exact message:\n👍 = approve once\n👎 = deny\n\n"
+                    f"Or reply {reply}")
+        else:
+            text = f"{prompt.text}\n\nReply {reply}"
+        result = await self.send(prompt.chat_id, text, metadata=prompt.metadata)
+        if result.success and result.message_id and request_id:
+            self._approval_prompts[int(result.message_id)] = (prompt.session_key, request_id)
+            while len(self._approval_prompts) > self._MAX_APPROVAL_PROMPTS:
+                del self._approval_prompts[next(iter(self._approval_prompts))]
+        return result
+
+    def _pending_request_id(self, prompt) -> Optional[str]:
+        """The request_id of the pending approval *prompt* was rendered from.
+
+        Hermes doesn't hand it to us, and without it the resolver can only
+        take the session's oldest approval, which with parallel tool calls
+        may be another prompt's. The entry is queued before Hermes notifies
+        us; match it the way Hermes built the prompt from it (redacted
+        command, description), skipping entries our other prompts answer.
+        Identical entries are interchangeable, so the oldest is taken.
+        None when nothing pending matches (answered before the prompt went
+        out). Hermes' queue is internal: anything unexpected raises.
+        """
+        from tools import approval
+        from gateway.run import _redact_approval_command
+
+        claimed = {rid for _, rid in self._approval_prompts.values()}
+        with approval._lock:
+            entries = [e.data for e in approval._gateway_queues.get(prompt.session_key, [])]
+        for data in entries:
+            if (data["request_id"] not in claimed
+                    and _redact_approval_command(data.get("command", "")) == prompt.command
+                    and data.get("description", "dangerous command") == prompt.description):
+                return data["request_id"]
+        return None
+
+    async def _handle_reaction(self, event: Dict[str, Any]) -> None:
+        """Resolve the exec approval a 👍/👎 reaction answers.
+
+        Hermes never sees reactions, so this is the authorization gate: the
+        reactor must be a key contact Hermes approves for this chat. The
+        prompt's session must belong to this chat and, for per-user group
+        sessions, to the reactor — whoever could have typed /approve for it.
+        """
+        msg_id, chat_id, contact_id = event.get("msg_id"), event.get("chat_id"), event.get("contact_id")
+        if msg_id not in self._approval_prompts:
+            return
+        session_key, request_id = self._approval_prompts[msg_id]
+        emojis = re.sub("[\U0001F3FB-\U0001F3FF️]", "", event.get("reaction") or "").split()
+        choices = {self._APPROVAL_REACTIONS.get(e) for e in emojis}
+        if len(choices) != 1 or None in choices:
+            return
+        if not (session_key.endswith(f":{chat_id}")
+                or session_key.endswith(f":{chat_id}:{contact_id}")):
+            logger.info("Ignoring approval reaction from contact %s on prompt %s: not their session",
+                        contact_id, msg_id)
+            return
+        try:
+            contact = await self.rpc.get_contact(self.account_id, int(contact_id))
+            chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
+        except Exception as e:
+            logger.warning("Ignoring approval reaction on prompt %s: %s", msg_id, e)
+            return
+        chat_type = "group" if chat.get("chat_type") == "Group" else "dm"
+        if not contact.get("is_key_contact") or self._is_sender_authorized(
+                str(contact_id), chat_type, str(chat_id)) is not True:
+            logger.info("Ignoring approval reaction from unauthorized contact %s", contact_id)
+            return
+
+        from tools.approval import resolve_gateway_approval
+
+        (choice,) = choices
+        del self._approval_prompts[msg_id]
+        count = resolve_gateway_approval(session_key, choice, request_id=request_id)
+        logger.info("Contact %s reacted to approval prompt %s: %s (%d resolved)",
+                    contact_id, msg_id, choice, count)
+        if not count:
+            reply = "⌛ Nothing pending anymore: it timed out or was already answered."
+        else:
+            reply = "✅ Approved." if choice == "once" else "❌ Denied."
+        await self.send(str(chat_id), reply, reply_to=str(msg_id))
+
     async def send_document(
         self,
         chat_id: str,
@@ -1927,6 +2035,8 @@ body {{
 
         if event_kind == EventType.INCOMING_MSG:
             await self._handle_incoming_message(event)
+        elif event_kind == EventType.INCOMING_REACTION:
+            await self._handle_reaction(event)
         elif event_kind == EventType.MSG_DELIVERED:
             logger.debug(f"Message delivered: {event.get('msg_id')}")
         elif event_kind == EventType.MSG_FAILED:
