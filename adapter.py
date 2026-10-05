@@ -1428,10 +1428,10 @@ body {{
 
         /workspace/ paths are container-side and never exist on the host, so
         they are taken on faith; Hermes's delivery filter translates them to
-        the host sandbox (Hermes >= 0.21.5).  Everything else must actually exist — the base extractor
-        applies the same os.path.isfile() guard, and without it a path merely
-        mentioned in prose is cut from the reply text and pushed at the user
-        as an attachment.
+        the host sandbox (Hermes >= 0.21.5).  Everything else must actually
+        exist — the base extractor applies the same os.path.isfile() guard,
+        and without it a path merely mentioned in prose is cut from the reply
+        text and pushed at the user as an attachment.
         """
         if path.startswith("/workspace/"):
             return True
