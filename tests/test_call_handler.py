@@ -381,3 +381,87 @@ class TestPerCallSession:
         monkeypatch.setattr(ch, "_CALL_THREAD_ID", None)
         assert ch._call_thread_id(1780) is None
         assert ch.CallManager.is_call_thread(None) is True
+
+
+class TestCallModelOverride:
+    """DELTACHAT_CALL_MODEL reaches the gateway session even when the message
+    handler is a closure (Hermes ≥ 0.21.5) rather than a bound method."""
+
+    class _Runner:
+        def __init__(self):
+            self._session_model_overrides = {}
+
+        def _session_key_for_source(self, source):
+            return "agent:main:deltachat-platform:dm:12:call"
+
+        async def _handle_message(self, event):  # pre-0.21.5 bound handler
+            return None
+
+    def _setup(self, monkeypatch, *, runner_ref, handler):
+        import types
+        from unittest.mock import MagicMock
+        monkeypatch.setattr(ch, "_CALL_MODEL", "ministral-14b-2512")
+        fake_run = types.ModuleType("gateway.run")
+        fake_run._gateway_runner_ref = runner_ref
+        monkeypatch.setitem(sys.modules, "gateway.run", fake_run)
+        adapter = MagicMock()
+        adapter._message_handler = handler
+        mgr = ch.CallManager(adapter=adapter)
+        return mgr, MagicMock(model_override_key=None)
+
+    @pytest.mark.asyncio
+    async def test_closure_handler_uses_the_runner_weakref(self, monkeypatch):
+        runner = self._Runner()
+
+        async def closure(*args):  # what _standalone_scoped installs
+            return None
+
+        mgr, session = self._setup(monkeypatch, runner_ref=lambda: runner, handler=closure)
+        mgr._install_model_override(session, source=object())
+
+        key = "agent:main:deltachat-platform:dm:12:call"
+        assert runner._session_model_overrides[key]["model"] == "ministral-14b-2512"
+        assert session.model_override_key == key
+
+    @pytest.mark.asyncio
+    async def test_bound_handler_still_works_without_the_weakref(self, monkeypatch):
+        runner = self._Runner()
+        mgr, session = self._setup(
+            monkeypatch, runner_ref=lambda: None, handler=runner._handle_message
+        )
+        mgr._install_model_override(session, source=object())
+        assert runner._session_model_overrides  # found via __self__
+
+    @pytest.mark.asyncio
+    async def test_greeting_turn_already_uses_the_call_model(self, monkeypatch):
+        """The greeting is the first turn — seen live: a call hung up before the
+        first sentence ran entirely on the default model."""
+        from unittest.mock import AsyncMock
+        runner = self._Runner()
+
+        async def closure(*args):
+            return None
+
+        mgr, session = self._setup(monkeypatch, runner_ref=lambda: runner, handler=closure)
+        mgr._sessions[1] = session
+        mgr._to_hermes = AsyncMock()
+        # conftest's MockMessageEvent predates channel_prompt; any kwargs will do here.
+        import types
+        monkeypatch.setattr(sys.modules["gateway.platforms.base"], "MessageEvent",
+                            lambda **kw: types.SimpleNamespace(**kw))
+
+        await mgr._play_greeting(1, "12", "11", "X")
+
+        assert runner._session_model_overrides  # installed before the greeting turn
+        mgr._to_hermes.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_unreachable_runner_warns(self, monkeypatch, caplog):
+        async def closure(*args):
+            return None
+
+        mgr, session = self._setup(monkeypatch, runner_ref=lambda: None, handler=closure)
+        with caplog.at_level("WARNING"):
+            mgr._install_model_override(session, source=object())
+        assert "DELTACHAT_CALL_MODEL" in caplog.text
+        assert session.model_override_key is None
