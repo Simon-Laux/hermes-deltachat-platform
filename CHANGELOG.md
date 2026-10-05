@@ -3,7 +3,7 @@
 Notable changes for people running the adapter. Internal refactors, test
 repairs and doc typo fixes are left out; see the git log for those.
 
-## Unreleased (on `dev`)
+## 2.0.0 (2026-10-05)
 
 ### Breaking / requires action
 
