@@ -162,6 +162,8 @@ repairs and doc typo fixes are left out; see the git log for those.
 
 - `require_mention` applies to all groups; individual groups cannot be
   exempted yet.
+- The opt-in raw `dc_rpc_call` does not validate file paths; only
+  `dc_safe_rpc_call` does.
 - A file in the Docker sandbox can be swapped for a symlink between Hermes's
   path check and Delta Chat core reading it. The fix belongs in Hermes (see
   docs/upstreaming-to-hermes.md).
