@@ -213,3 +213,15 @@ class TestOtherHomes:
         monkeypatch.setattr(adapter.os.path, "realpath", lambda p: p)
         assert adapter._is_inside(str(tmp_path / "ALIAS" / "dc.db"), [str(protected)])
         assert not adapter._is_inside(str(tmp_path / "elsewhere.txt"), [str(protected)])
+
+    @pytest.mark.asyncio
+    async def test_helper_failure_falls_back_to_own_home(self, safe_handler, connected, tmp_path, monkeypatch):
+        """A core without (or with a broken) _credential_home_roots keeps the old protection."""
+        def broken():
+            raise RuntimeError("no profiles here")
+        base = __import__("sys").modules["gateway.platforms.base"]
+        monkeypatch.setattr(base, "_credential_home_roots", broken, raising=False)
+        target = _touch(tmp_path / "logs" / "gateway.log")
+        connected.filter_local_delivery_paths.side_effect = lambda paths: [target]
+        result = json.loads(await _call(safe_handler, "send_msg", [{"file": target}]))
+        assert "refused" in result["error"]

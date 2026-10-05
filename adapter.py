@@ -391,10 +391,11 @@ def _unchecked_path_name(names) -> Optional[str]:
 def _protected_dirs(adapter) -> list:
     """Directories whose contents must never be sent: Delta Chat state and logs.
 
-    Covers every Hermes home, not just ours: with several profiles, each one's
+    Covers every profile of this Hermes root, not just ours: each one's
     deltachat-platform/ sits under <root>/profiles/<name>/, and a bot steered
     in profile A could otherwise send profile B's dc.db. Hermes' own helper
-    enumerates those homes; older cores lack it, so fall back to ours.
+    enumerates those homes; older cores lack it, so fall back to ours. A
+    separate install with its own unrelated HERMES_HOME is not covered.
     """
     from gateway.config import get_hermes_home
 
@@ -416,6 +417,9 @@ def _is_inside(path: str, dirs) -> bool:
     why: inode, not string prefix. On a case-insensitive filesystem (macOS)
     realpath keeps the caller's spelling, so ~/.HERMES/deltachat-platform/
     opens the same files while missing a prefix match.
+
+    A hardlink to dc.db elsewhere passes, but creating one needs host write
+    access on the same filesystem, which could just copy the file anyway.
     """
     ids = set()
     for d in dirs:
