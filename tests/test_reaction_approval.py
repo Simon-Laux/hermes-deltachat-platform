@@ -1,6 +1,7 @@
 """Tests for answering exec-approval prompts with 👍/👎 reactions."""
 
 import sys
+import threading
 from types import ModuleType, SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -12,12 +13,32 @@ SESSION = "agent:main:deltachat-platform:dm:5"
 
 
 @pytest.fixture
-def resolver(monkeypatch):
+def approval(monkeypatch):
+    """Stand-in for Hermes' tools.approval, with its pending-approval queue."""
     approval = ModuleType("tools.approval")
     approval.resolve_gateway_approval = MagicMock(return_value=1)
-    monkeypatch.setitem(sys.modules, "tools", ModuleType("tools"))
+    approval._lock = threading.Lock()
+    approval._gateway_queues = {}
+    tools = ModuleType("tools")
+    tools.approval = approval
+    run = ModuleType("gateway.run")
+    run._redact_approval_command = lambda cmd: cmd.replace("hunter2", "***")
+    monkeypatch.setitem(sys.modules, "tools", tools)
     monkeypatch.setitem(sys.modules, "tools.approval", approval)
+    monkeypatch.setitem(sys.modules, "gateway.run", run)
+    return approval
+
+
+@pytest.fixture
+def resolver(approval):
     return approval.resolve_gateway_approval
+
+
+def _pending(approval, request_id, command="rm -rf /tmp/x", description="dangerous command",
+             session_key=SESSION):
+    """Queue a pending approval the way Hermes does before it notifies us."""
+    approval._gateway_queues.setdefault(session_key, []).append(SimpleNamespace(
+        data={"request_id": request_id, "command": command, "description": description}))
 
 
 def _adapter(platform_config, verdict=True, chat_type="Single"):
@@ -31,8 +52,10 @@ def _adapter(platform_config, verdict=True, chat_type="Single"):
     return a
 
 
-def _prompt(session_key=SESSION, choices=("once", "session", "always", "deny")):
+def _prompt(session_key=SESSION, choices=("once", "session", "always", "deny"),
+            command="rm -rf /tmp/x", description="dangerous command"):
     return SimpleNamespace(chat_id="5", session_key=session_key, metadata=None,
+                           command=command, description=description,
                            text="⚠️ Dangerous command requires approval", choices=list(choices))
 
 
@@ -45,31 +68,89 @@ def _sent_texts(a):
     return [c.args[2].text for c in a.rpc.send_msg.await_args_list]
 
 
+@pytest.fixture
+def queued(approval):
+    """One approval pending in SESSION, request_id "r1"."""
+    _pending(approval, "r1")
+
+
 @pytest.mark.asyncio
-async def test_prompt_explains_reactions_and_is_remembered(platform_config):
+async def test_prompt_explains_reactions_and_is_remembered(platform_config, queued):
     a = _adapter(platform_config)
     result = await a._send_exec_approval_prompt(_prompt(choices=("once", "deny")))
     assert result.message_id == "42"
     text = _sent_texts(a)[0]
     assert "👍 = approve once" in text and "👎 = deny" in text
     assert "`/approve session`" not in text
-    assert a._approval_prompts == {42: SESSION}
+    assert a._approval_prompts == {42: (SESSION, "r1")}
 
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("reaction,choice,reply", [
     ("👍", "once", "✅ Approved."), ("👍🏽", "once", "✅ Approved."), ("👎", "deny", "❌ Denied.")])
-async def test_reaction_resolves_prompt(platform_config, resolver, reaction, choice, reply):
+async def test_reaction_resolves_its_prompt(platform_config, resolver, queued, reaction, choice, reply):
     a = _adapter(platform_config)
     await a._send_exec_approval_prompt(_prompt())
     await a._handle_dc_event(_reaction(reaction))
-    resolver.assert_called_once_with(SESSION, choice)
+    resolver.assert_called_once_with(SESSION, choice, request_id="r1")
     assert _sent_texts(a)[-1] == reply
     assert a._approval_prompts == {}
 
 
 @pytest.mark.asyncio
-async def test_second_reaction_does_not_resolve_another_approval(platform_config, resolver):
+async def test_reaction_resolves_the_prompt_reacted_to_not_the_oldest(platform_config, approval):
+    """Parallel tool calls: both entries are queued before either prompt goes out."""
+    _pending(approval, "r1", command="rm -rf /tmp/a")
+    _pending(approval, "r2", command="rm -rf /tmp/b")
+    a = _adapter(platform_config)
+    a.rpc.send_msg.side_effect = [42, 43, 44]
+    await a._send_exec_approval_prompt(_prompt(command="rm -rf /tmp/b"))
+    await a._send_exec_approval_prompt(_prompt(command="rm -rf /tmp/a"))
+    await a._handle_reaction(_reaction(msg_id=42))
+    approval.resolve_gateway_approval.assert_called_once_with(SESSION, "once", request_id="r2")
+
+
+@pytest.mark.asyncio
+async def test_identical_prompts_each_claim_their_own_entry(platform_config, approval):
+    _pending(approval, "r1")
+    _pending(approval, "r2")
+    a = _adapter(platform_config)
+    a.rpc.send_msg.side_effect = [42, 43]
+    await a._send_exec_approval_prompt(_prompt())
+    await a._send_exec_approval_prompt(_prompt())
+    assert a._approval_prompts == {42: (SESSION, "r1"), 43: (SESSION, "r2")}
+
+
+@pytest.mark.asyncio
+async def test_prompt_matches_on_the_redacted_command_and_description(platform_config, approval):
+    _pending(approval, "r1", command="curl -u me:hunter2 x", description="network")
+    _pending(approval, "r2", command="curl -u me:hunter2 x", description="exfiltration")
+    a = _adapter(platform_config)
+    await a._send_exec_approval_prompt(_prompt(command="curl -u me:*** x", description="exfiltration"))
+    assert a._approval_prompts == {42: (SESSION, "r2")}
+
+
+@pytest.mark.asyncio
+async def test_prompt_for_an_already_answered_approval_is_not_tracked(platform_config, approval):
+    """Its entry is gone, so a reaction must not resolve some other approval."""
+    _pending(approval, "r1", command="something else")
+    a = _adapter(platform_config)
+    assert (await a._send_exec_approval_prompt(_prompt())).success
+    await a._handle_reaction(_reaction())
+    approval.resolve_gateway_approval.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_unreadable_queue_falls_back_to_oldest_first(platform_config, approval):
+    del approval._gateway_queues  # a Hermes version where the internals moved
+    a = _adapter(platform_config)
+    await a._send_exec_approval_prompt(_prompt())
+    await a._handle_reaction(_reaction())
+    approval.resolve_gateway_approval.assert_called_once_with(SESSION, "once", request_id=None)
+
+
+@pytest.mark.asyncio
+async def test_second_reaction_does_not_resolve_another_approval(platform_config, resolver, queued):
     a = _adapter(platform_config)
     await a._send_exec_approval_prompt(_prompt())
     await a._handle_reaction(_reaction())
@@ -78,7 +159,7 @@ async def test_second_reaction_does_not_resolve_another_approval(platform_config
 
 
 @pytest.mark.asyncio
-async def test_expired_approval_is_reported(platform_config, resolver):
+async def test_expired_approval_is_reported(platform_config, resolver, queued):
     resolver.return_value = 0
     a = _adapter(platform_config)
     await a._send_exec_approval_prompt(_prompt())
@@ -89,7 +170,7 @@ async def test_expired_approval_is_reported(platform_config, resolver):
 @pytest.mark.asyncio
 @pytest.mark.parametrize("event", [
     _reaction("❤️"), _reaction(""), _reaction("👍 👎"), _reaction(msg_id=43), _reaction(chat_id=6)])
-async def test_unrelated_reactions_are_ignored(platform_config, resolver, event):
+async def test_unrelated_reactions_are_ignored(platform_config, resolver, queued, event):
     a = _adapter(platform_config)
     await a._send_exec_approval_prompt(_prompt())
     await a._handle_reaction(event)
@@ -98,31 +179,36 @@ async def test_unrelated_reactions_are_ignored(platform_config, resolver, event)
 
 @pytest.mark.asyncio
 @pytest.mark.parametrize("verdict,key_contact", [(False, True), (None, True), (True, False)])
-async def test_unauthorized_reactor_is_ignored(platform_config, resolver, verdict, key_contact):
+async def test_unauthorized_reactor_is_ignored(platform_config, resolver, queued, verdict, key_contact):
     a = _adapter(platform_config, verdict=verdict)
     a.rpc.get_contact.return_value = {"name": "Eve", "is_key_contact": key_contact}
     await a._send_exec_approval_prompt(_prompt())
     await a._handle_reaction(_reaction())
     resolver.assert_not_called()
-    assert a._approval_prompts == {42: SESSION}
+    assert a._approval_prompts == {42: (SESSION, "r1")}
 
 
 @pytest.mark.asyncio
-async def test_per_user_group_session_only_answers_to_its_user(platform_config, resolver):
+async def test_per_user_group_session_only_answers_to_its_user(platform_config, approval):
+    group_session = "agent:main:deltachat-platform:group:5:10"
+    _pending(approval, "r1", session_key=group_session)
     a = _adapter(platform_config, chat_type="Group")
-    await a._send_exec_approval_prompt(_prompt("agent:main:deltachat-platform:group:5:10"))
+    await a._send_exec_approval_prompt(_prompt(group_session))
     await a._handle_reaction(_reaction(contact_id=11))
-    resolver.assert_not_called()
+    approval.resolve_gateway_approval.assert_not_called()
     await a._handle_reaction(_reaction(contact_id=10))
-    resolver.assert_called_once()
+    approval.resolve_gateway_approval.assert_called_once()
     a._is_sender_authorized.assert_called_with("10", "group", "5")
 
 
 @pytest.mark.asyncio
-async def test_remembered_prompts_are_capped(platform_config):
+async def test_remembered_prompts_are_capped(platform_config, approval):
+    n = DeltaChatAdapter._MAX_APPROVAL_PROMPTS + 1
+    for i in range(n):
+        _pending(approval, f"r{i}")
     a = _adapter(platform_config)
-    a.rpc.send_msg.side_effect = range(1, a._MAX_APPROVAL_PROMPTS + 2)
-    for _ in range(a._MAX_APPROVAL_PROMPTS + 1):
+    a.rpc.send_msg.side_effect = range(1, n + 1)
+    for _ in range(n):
         await a._send_exec_approval_prompt(_prompt())
-    assert len(a._approval_prompts) == a._MAX_APPROVAL_PROMPTS
+    assert len(a._approval_prompts) == n - 1
     assert 1 not in a._approval_prompts
