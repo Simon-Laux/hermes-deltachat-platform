@@ -199,6 +199,24 @@ rather than a dump:
    injector's own docstring frames the mechanism as existing "so users can
    configure Teams / IRC / Google Chat without the core repo ever needing to
    know they exist."
+4. **Docker sandbox paths are checked, then opened later by someone else.**
+   `validate_media_delivery_path` (`gateway/platforms/base.py`, 0.21.5)
+   translates `/workspace/…` via `_translate_docker_container_media_path`:
+   `resolve(strict=True)`, check `_path_is_within(host_root)`, return the
+   path *string*. The platform opens it later — for us, Delta Chat core
+   copies it into its blob dir when `send_msg` runs. The host sandbox dir is
+   writable from inside the container, so a process there can replace the
+   checked file with a symlink to e.g. `~/.hermes/.env` after the check and
+   before the open; the reader follows it. Needs the agent steered into
+   running a background swap loop and retrying sends, but it is a read of
+   host files from the sandbox, which is what the sandbox exists to stop.
+   From reading the code, not reproduced. Affects every platform that
+   delivers sandbox files, and an adapter cannot close it: the open happens
+   in code it does not own. Fix belongs in core — e.g. copy the translated
+   file into a Hermes-owned cache via `open(O_NOFOLLOW)` + `fstat` (regular
+   file, same inode as the checked path) and hand the platform the copy.
+   We had the same pattern in our own `/workspace/` copy-to-cache remap,
+   worse because the cache is trusted unconditionally; #47 removed it.
 
 Fixing 1–2 also benefits us directly if we *stay* out of tree.
 
