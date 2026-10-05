@@ -306,6 +306,59 @@ def _is_on(value) -> bool:
     return str(value).strip().lower() not in ("", "0", "false", "no", "off")
 
 
+# why: /start only acknowledges Telegram's start ping and /topic refuses everything but
+# Telegram DMs; every other gateway command works here (/branch falls back to in place).
+_BIO_SKIP_COMMANDS = frozenset({"start", "topic"})
+
+
+# Everything above this line in the bio is the operator's own text and is kept;
+# everything below it is regenerated on connect.
+_BIO_MARKER = "Hermes commands:"
+_BIO_DEFAULT_INTRO = "Hermes AI assistant – just write to me."
+
+
+def _own_bio(current: str) -> Optional[str]:
+    """The operator's text above the command list, or None when *current* has no list."""
+    # splitlines: a bio edited on another client may come back with \r\n line endings
+    lines = current.splitlines()
+    for i, line in enumerate(lines):
+        if line.strip() == _BIO_MARKER:
+            return "\n".join(lines[:i]).strip()
+    return None
+
+
+def _commands_bio(own: str, extra: Dict) -> Optional[str]:
+    """*own* bio text with the gateway's slash commands appended, one "/cmd args – what" per line.
+
+    So people can see what the bot understands from its profile. Built from Hermes' own
+    registry so it follows the installed version; None when that API isn't there.
+    why: core sends the bio as the signature of every outgoing message (not every
+    14 days like the avatar), so this costs a few KB per reply.
+    """
+    try:
+        # private helpers, but the same ones Hermes builds Telegram's command menu from
+        from hermes_cli.commands_platforms import _gateway_available_commands
+        from hermes_cli.commands import _iter_plugin_command_entries
+        from gateway.slash_access import policy_from_extra
+        entries = [(c.name, c.args_hint, c.description) for c in _gateway_available_commands()]
+        entries += [(name, hint, desc) for name, desc, hint in _iter_plugin_command_entries()]
+        # Everyone who gets a message sees the bio, so list what a non-admin may run in a
+        # DM -- the same filter Hermes' /help applies when slash-command gating is on.
+        policy = policy_from_extra(extra, "dm")
+    except Exception as e:
+        logger.warning(f"Not setting the commands bio, Hermes command registry unavailable: {e}")
+        return None
+    lines = [own or _BIO_DEFAULT_INTRO, "", _BIO_MARKER]
+    for name, hint, desc in entries:
+        if name in _BIO_SKIP_COMMANDS or not policy.can_run(None, name):
+            continue
+        usage = f"/{name} {hint}".strip()
+        # one line per command, without the parenthesised details:
+        # "Compress conversation context (add 'here [N]'..."
+        lines.append(f"{usage} – {' '.join(desc.split()).split(' (')[0]}")
+    return "\n".join(lines)
+
+
 # Methods the RPC tools refuse, beyond the delete_*/remove_* prefix rule.
 # Each is here for what it does, not for what it is called.
 _BLOCKED_METHODS = frozenset({
@@ -611,6 +664,12 @@ class DeltaChatAdapter(BasePlatformAdapter):
         # "@spooky" and "spooky" both mean the alias spooky
         self._mention_aliases = [a for a in (str(a).strip().lstrip("@").strip() for a in raw) if a]
         self._warned_no_mention_names = False
+
+        # On by default; off removes the list again and keeps your own bio text.
+        raw = extra.get("commands_bio")
+        self._commands_bio_enabled = _is_on(
+            # `or`: a blank answer to the plugin.yaml prompt means the default
+            (os.getenv("DELTACHAT_COMMANDS_BIO") or "1") if raw is None else raw)
 
     async def _intake_allows(self, msg: Dict, chat_id) -> bool:
         """Drop what Hermes' own authorization can't judge, and leave groups
@@ -946,6 +1005,26 @@ class DeltaChatAdapter(BasePlatformAdapter):
             return False
         return True
 
+    async def _update_commands_bio(self) -> None:
+        """Write the command list into the profile bio, or take it out again when disabled."""
+        try:
+            current = await self.rpc.get_config(self.account_id, "selfstatus") or ""
+            own = _own_bio(current)
+            if self._commands_bio_enabled:
+                bio = _commands_bio(current.strip() if own is None else own,
+                                    self.config.extra or {})
+            elif own is not None:
+                # turned off: take the list out again, it costs ~5 KB per message
+                bio = "" if own == _BIO_DEFAULT_INTRO else own
+            else:
+                bio = None
+            # only on change: a write is synced to the account's other devices
+            if bio is not None and bio != current:
+                await self.rpc.set_config(self.account_id, "selfstatus", bio)
+                logger.info("Updated the command list in the profile bio")
+        except Exception as e:
+            logger.warning(f"Could not update the commands bio: {e}")
+
     async def _publish_invite_link(self) -> None:
         """Log and persist the SecureJoin invite link.
 
@@ -1094,6 +1173,8 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 logger.debug("Bot mode enabled: contact requests will be auto-accepted")
             except Exception as e:
                 logger.warning(f"Could not set bot config: {e}")
+
+            await self._update_commands_bio()
 
             # Start IO for the account to receive events
             await self.rpc.start_io(self.account_id)
