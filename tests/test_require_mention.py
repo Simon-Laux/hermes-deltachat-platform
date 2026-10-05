@@ -22,6 +22,7 @@ def _adapter(extra=None, chat_type="Group", quoted_from=None, displayname="Ghost
         "configured_addr": "ghost-agent@chat.example", "displayname": displayname}.get(key)
     a.rpc.get_message.return_value = {"from_id": quoted_from}
     a.rpc.get_contact.return_value = {"name": "u", "is_key_contact": True}
+    a.rpc.get_chat_contacts.return_value = [1, 9]  # mock base has no auth check: stays
     return a
 
 

@@ -18,16 +18,14 @@ def _adapter(platform_config, verdict=None, key_contact=True):
     return a
 
 
-def _group(a, history, verdict):
-    """Make chat 5 a group whose messages, oldest first, have these from_ids.
-
-    Shapes taken from a live run: a new group starts with the local
-    "end-to-end encrypted" note (from 2), then the adder's first message.
-    """
+def _group(a, members, approved):
+    """Make chat 5 a group with these member ids; Hermes approves *approved*
+    (a verdict for everyone else is False, or None to model "unknown")."""
     a.rpc.get_basic_chat_info.return_value = {"chat_type": "Group", "name": "g"}
-    a.rpc.get_message_ids.return_value = list(range(len(history)))
-    a.rpc.get_message.side_effect = lambda acc, mid: {"id": mid, "from_id": history[mid]}
-    a._is_sender_authorized.return_value = verdict
+    a.rpc.get_chat_contacts.return_value = [DC_CONTACT_ID_SELF, *members]
+    a._is_sender_authorized.side_effect = (
+        lambda uid, chat_type, chat_id: True if int(uid) in approved else a.verdict)
+    a.verdict = False
 
 
 @pytest.mark.asyncio
@@ -56,40 +54,49 @@ async def test_unreadable_sender_is_dropped(platform_config):
 
 
 @pytest.mark.asyncio
-async def test_group_started_by_unauthorized_contact_is_left(platform_config):
+async def test_group_without_approved_member_is_left(platform_config):
     a = _adapter(platform_config)
-    _group(a, [2, 10, 11], verdict=False)
+    _group(a, [10, 11], approved=())
     assert not await a._intake_allows({"id": 2, "from_id": 11}, 5)
-    a._is_sender_authorized.assert_called_once_with("10", "dm")
+    a._is_sender_authorized.assert_any_call("10", "group", "5")
     a.rpc.leave_group.assert_awaited_once_with(1, 5)
     a.rpc.delete_chat.assert_awaited_once_with(1, 5)
 
 
 @pytest.mark.asyncio
-@pytest.mark.parametrize("verdict", [True, None])
-async def test_group_started_by_authorized_or_unchecked_contact_stays(platform_config, verdict):
+async def test_group_with_an_approved_member_stays(platform_config):
+    """Even when the sender is a stranger: Hermes ignores them, we stay."""
     a = _adapter(platform_config)
-    _group(a, [2, 10], verdict=verdict)
-    assert await a._intake_allows({"id": 1, "from_id": 10}, 5)
+    _group(a, [10, 11], approved=(10,))
+    assert await a._intake_allows({"id": 2, "from_id": 11}, 5)
     a.rpc.leave_group.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_group_we_created_stays(platform_config):
+async def test_unknown_verdict_stays(platform_config):
     a = _adapter(platform_config)
-    _group(a, [2, DC_CONTACT_ID_SELF, 10], verdict=False)
+    _group(a, [10, 11], approved=())
+    a.verdict = None
+    assert await a._intake_allows({"id": 2, "from_id": 11}, 5)
+    a.rpc.leave_group.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_member_lookup_failure_stays(platform_config):
+    a = _adapter(platform_config)
+    _group(a, [10], approved=())
+    a.rpc.get_chat_contacts.side_effect = RuntimeError("rpc down")
     assert await a._intake_allows({"id": 2, "from_id": 10}, 5)
-    a._is_sender_authorized.assert_not_called()
     a.rpc.leave_group.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_group_is_judged_once(platform_config):
-    a = _adapter(platform_config)
-    _group(a, [2, 10], verdict=True)
-    await a._intake_allows({"id": 1, "from_id": 10}, 5)
-    await a._intake_allows({"id": 1, "from_id": 10}, 5)
-    a.rpc.get_message_ids.assert_awaited_once()
+async def test_non_key_sender_never_makes_us_leave(platform_config):
+    """Leaving is visible to the group; a sender without a key gets nothing."""
+    a = _adapter(platform_config, key_contact=False)
+    _group(a, [10], approved=())
+    assert not await a._intake_allows({"id": 2, "from_id": 10}, 5)
+    a.rpc.leave_group.assert_not_awaited()
 
 
 @pytest.mark.asyncio

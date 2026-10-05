@@ -171,6 +171,10 @@ class MockBasePlatformAdapter:
             return
         self._disconnected = True
 
+    def _is_sender_authorized(self, user_id, chat_type=None, chat_id=None, **kwargs):
+        # The real base without a runner-registered check: "unknown".
+        return None
+
     def build_source(
         self,
         chat_id: str,
