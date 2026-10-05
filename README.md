@@ -300,6 +300,7 @@ hermes gateway start
 | `DELTACHAT_RAW_RPC_ALLOWLIST` | No | — | Comma-separated methods `dc_rpc_call` may call (blank = any method not refused above) |
 | `DELTACHAT_REQUIRE_MENTION` | No | — | In **group** chats, only answer messages that say `@<display name>` (or an alias), or quote-reply to the bot; commands must be addressed as `/cmd@<name>`. DMs are never gated. Also `platforms.deltachat-platform.require_mention: true` in `config.yaml` |
 | `DELTACHAT_MENTION_ALIASES` | No | — | Comma-separated extra names that count as a mention (`@<alias>`); also `platforms.deltachat-platform.mention_aliases` |
+| `DELTACHAT_COMMANDS_BIO` | No | on | Append the slash commands that work in Delta Chat to the bot's profile bio, below a `Hermes commands:` line, one `/cmd args – what` per line so people can look them up in its profile. Your own text above that line is kept. Commands that only admins may run (`allow_admin_from`) are left out. `0` turns it off and takes the list out again, which saves ~4.9 KB per message: Delta Chat isn't optimized for long bios and sends the whole bio with every message, not only now and then like the avatar. Also `platforms.deltachat-platform.commands_bio` |
 
 ### Multiple Agents
 

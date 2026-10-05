@@ -48,6 +48,9 @@ optional_env:
   - name: DELTACHAT_MENTION_ALIASES
     description: "Comma-separated extra names that count as a mention when written as @<alias>."
     prompt: "Mention aliases (comma-separated)"
+  - name: DELTACHAT_COMMANDS_BIO
+    description: "The bot's slash commands are appended to its profile bio, below a 'Hermes commands:' line; your own text above it is kept. The bio is sent with every message (~5 KB). Set to 0 to turn it off and remove the list again."
+    prompt: "Commands in bio (blank = yes, 0 = no)"
 
 # Python packages this plugin needs in Hermes' venv. Hermes resolves them together with its own
 # pinned ranges when the plugin is installed and RE-APPLIES them after every `hermes update`

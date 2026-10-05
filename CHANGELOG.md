@@ -29,6 +29,12 @@ repairs and doc typo fixes are left out; see the git log for those.
 
 ### New
 
+- **The bot's profile bio lists its slash commands**, below a `Hermes commands:`
+  line, so people can look them up in its profile. Text you put
+  above that line is kept; the list below it is rewritten on connect when the
+  commands change. Admin-only commands are left out when `allow_admin_from`
+  is set. `DELTACHAT_COMMANDS_BIO=0` (or `commands_bio: false`) turns it off
+  and takes the list out again.
 - **Headless account onboarding.** Set `DELTACHAT_EMAIL=auto` (chatmail),
   `DELTACHAT_EMAIL` + `DELTACHAT_PASSWORD` (existing mailbox), or
   `DELTACHAT_CHATMAIL_SERVERS`. The adapter then creates its account on first
