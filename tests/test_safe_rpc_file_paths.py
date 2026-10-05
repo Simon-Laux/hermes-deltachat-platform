@@ -46,8 +46,10 @@ def safe_handler():
 
 
 @pytest.fixture
-def connected(monkeypatch):
+def connected(monkeypatch, tmp_path):
+    monkeypatch.setenv("HERMES_HOME_TEST", str(tmp_path))
     fake = MagicMock()
+    fake._get_dc_config_dir.return_value = str(tmp_path / "deltachat-platform")
     fake.account_id = 1
     fake.rpc = MagicMock()
     for m in SPEC["methods"]:
@@ -117,3 +119,66 @@ class TestAllowed:
     async def test_clearing_profile_image(self, safe_handler, connected):
         await _call(safe_handler, "set_chat_profile_image", [None])
         connected.rpc.set_chat_profile_image.assert_awaited_once_with(1, CHAT_ID, None)
+
+
+class TestOwnSecrets:
+    """Hermes' denylist knows its own secrets, not the Delta Chat account store."""
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("rel", [
+        "deltachat-platform/accounts.toml",
+        "deltachat-platform/abc-uuid/dc.db",
+        "deltachat-platform/abc-uuid/dc.db-blobs/photo.jpg",
+        "deltachat-platform/invite.txt",
+        "logs/gateway.log",
+    ])
+    async def test_refused_even_when_hermes_accepts(self, safe_handler, connected, tmp_path, rel):
+        target = str(tmp_path / rel)
+        connected.filter_local_delivery_paths.side_effect = lambda paths: [target]
+        result = json.loads(await _call(safe_handler, "send_msg", [{"file": target}]))
+        assert "refused" in result["error"]
+        connected.rpc.send_msg.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_symlink_into_account_dir_is_refused(self, safe_handler, connected, tmp_path):
+        """A symlinked parent must not hide where the file really lives."""
+        (tmp_path / "deltachat-platform").mkdir()
+        (tmp_path / "deltachat-platform" / "dc.db").write_text("x")
+        (tmp_path / "out").symlink_to(tmp_path / "deltachat-platform")
+        target = str(tmp_path / "out" / "dc.db")
+        connected.filter_local_delivery_paths.side_effect = lambda paths: [target]
+        result = json.loads(await _call(safe_handler, "send_msg", [{"file": target}]))
+        assert "refused" in result["error"]
+
+    @pytest.mark.asyncio
+    async def test_sibling_with_shared_prefix_is_allowed(self, safe_handler, connected, tmp_path):
+        """deltachat-platform-export/ is not inside deltachat-platform/."""
+        target = str(tmp_path / "deltachat-platform-export" / "out.png")
+        connected.filter_local_delivery_paths.side_effect = lambda paths: [target]
+        await _call(safe_handler, "send_msg", [{"file": target}])
+        connected.rpc.send_msg.assert_awaited_once_with(1, CHAT_ID, {"file": target})
+
+
+class TestFailClosed:
+    """Path-shaped names this code does not know are refused, not passed through."""
+
+    @pytest.mark.asyncio
+    async def test_unknown_path_param_in_spec(self, safe_handler, connected, monkeypatch):
+        spec = {"methods": SPEC["methods"] + [{"name": "send_voice", "params": [
+            {"name": "accountId"}, {"name": "chatId"}, {"name": "voicePath"}]}]}
+        monkeypatch.setattr(adapter, "_spec_cache", spec)
+        connected.rpc.send_voice = AsyncMock()
+        result = json.loads(await _call(safe_handler, "send_voice", ["/etc/passwd"]))
+        assert "voicePath" in result["error"]
+        connected.rpc.send_voice.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_unknown_path_key_in_data(self, safe_handler, connected):
+        result = json.loads(await _call(safe_handler, "send_msg", [{"filePath": SECRET}]))
+        assert "filePath" in result["error"]
+        connected.rpc.send_msg.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_filename_is_a_display_name(self, safe_handler, connected):
+        await _call(safe_handler, "send_msg", [{"text": "hi", "filename": "report.pdf"}])
+        connected.rpc.send_msg.assert_awaited_once_with(1, CHAT_ID, {"text": "hi", "filename": "report.pdf"})
