@@ -23,6 +23,12 @@ def approval(monkeypatch):
     tools.approval = approval
     run = ModuleType("gateway.run")
     run._redact_approval_command = lambda cmd: cmd.replace("hunter2", "***")
+    access = ModuleType("gateway.slash_access")
+    # stand-in for Hermes' policy: with admins set, only they may /approve or /deny
+    access.policy_from_extra = lambda extra, scope: SimpleNamespace(
+        can_run=lambda user, cmd: user in extra.get(
+            {"dm": "allow_admin_from", "group": "group_allow_admin_from"}[scope], [user]))
+    monkeypatch.setitem(sys.modules, "gateway.slash_access", access)
     monkeypatch.setitem(sys.modules, "tools", tools)
     monkeypatch.setitem(sys.modules, "tools.approval", approval)
     monkeypatch.setitem(sys.modules, "gateway.run", run)
@@ -198,6 +204,31 @@ async def test_per_user_group_session_only_answers_to_its_user(platform_config, 
     await a._handle_reaction(_reaction(contact_id=10))
     approval.resolve_gateway_approval.assert_called_once()
     a._is_sender_authorized.assert_called_with("10", "group", "5")
+
+
+@pytest.mark.asyncio
+async def test_per_user_session_whose_user_id_equals_the_chat_id_is_not_the_chats(platform_config, approval):
+    # group 12, contact 12's own session: its key ends in ":12" like a shared session's would
+    group_session = "agent:main:deltachat-platform:group:12:12"
+    _pending(approval, "r1", session_key=group_session)
+    a = _adapter(platform_config, chat_type="Group")
+    await a._send_exec_approval_prompt(_prompt(group_session))
+    await a._handle_reaction(_reaction(chat_id=12, contact_id=10))
+    approval.resolve_gateway_approval.assert_not_called()
+    await a._handle_reaction(_reaction(chat_id=12, contact_id=12))
+    approval.resolve_gateway_approval.assert_called_once()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("reaction", ["👍", "👎"])
+async def test_non_admin_cannot_react_past_slash_gating(platform_config, resolver, queued, reaction):
+    platform_config.extra = {"allow_admin_from": ["7"]}
+    a = _adapter(platform_config)
+    await a._send_exec_approval_prompt(_prompt())
+    await a._handle_reaction(_reaction(reaction, contact_id=10))
+    resolver.assert_not_called()
+    await a._handle_reaction(_reaction(reaction, contact_id=7))
+    resolver.assert_called_once()
 
 
 @pytest.mark.asyncio

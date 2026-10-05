@@ -1577,11 +1577,7 @@ body {{
         choices = {self._APPROVAL_REACTIONS.get(e) for e in emojis}
         if len(choices) != 1 or None in choices:
             return
-        if not (session_key.endswith(f":{chat_id}")
-                or session_key.endswith(f":{chat_id}:{contact_id}")):
-            logger.info("Ignoring approval reaction from contact %s on prompt %s: not their session",
-                        contact_id, msg_id)
-            return
+        (choice,) = choices
         try:
             contact = await self.rpc.get_contact(self.account_id, int(contact_id))
             chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
@@ -1589,14 +1585,28 @@ body {{
             logger.warning("Ignoring approval reaction on prompt %s: %s", msg_id, e)
             return
         chat_type = "group" if chat.get("chat_type") == "Group" else "dm"
+        # why: exact keys, not a ":<chat_id>" suffix -- chat and contact ids share a range,
+        # so group 12's per-user key for contact 12 ("...:group:12:12") ends in ":12" too
+        own = f":{chat_type}:{chat_id}"
+        if not (session_key.endswith(own) or session_key.endswith(f"{own}:{contact_id}")):
+            logger.info("Ignoring approval reaction from contact %s on prompt %s: not their session",
+                        contact_id, msg_id)
+            return
         if not contact.get("is_key_contact") or self._is_sender_authorized(
                 str(contact_id), chat_type, str(chat_id)) is not True:
             logger.info("Ignoring approval reaction from unauthorized contact %s", contact_id)
             return
+        from gateway.slash_access import policy_from_extra
+        # why: Hermes refuses /approve and /deny from non-admins when allow_admin_from is set;
+        # a reaction must not get around that
+        command = "deny" if choice == "deny" else "approve"
+        if not policy_from_extra(self.config.extra or {}, chat_type).can_run(str(contact_id), command):
+            logger.info("Ignoring approval reaction from contact %s: /%s is admin-only",
+                        contact_id, command)
+            return
 
         from tools.approval import resolve_gateway_approval
 
-        (choice,) = choices
         del self._approval_prompts[msg_id]
         count = resolve_gateway_approval(session_key, choice, request_id=request_id)
         logger.info("Contact %s reacted to approval prompt %s: %s (%d resolved)",
