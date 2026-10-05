@@ -1056,6 +1056,17 @@ body {{
         if self._call_manager and self._call_manager.has_active_call(chat_id):
             thread_id = (metadata or {}).get("thread_id")
             if self._call_manager.is_call_thread(thread_id):
+                # Only the turn's final reply is spoken. Hermes also sends status
+                # traffic through send() — "💾 Memory updated", tool progress,
+                # busy acks, the "⏳ Working" heartbeat, interim commentary,
+                # turn errors — and marks only the final reply with
+                # metadata["notify"] (base.py `_mark_notify_metadata`; the A2A
+                # adapter filters on the same flag). Checked before the call-ack
+                # drop so a status line can't use up that one-shot drop.
+                if not (metadata or {}).get("notify"):
+                    logger.debug("Call %s: not speaking non-final send: %r",
+                                 chat_id, (content or "")[:80])
+                    return SendResult(success=True, message_id=None)
                 # Reply belongs to the call conversation — speak it into the call.
                 # In shared-history mode the placing agent's "call connected" ack
                 # also lands here (same session), so drop that one line.

@@ -292,6 +292,48 @@ class TestSendMessage:
         mock_rpc.get_config.assert_not_awaited()
         assert mock_rpc.send_msg.await_args.args[1] == 789
 
+    def _in_call(self, platform_config, mock_rpc):
+        adapter = DeltaChatAdapter(platform_config)
+        adapter.rpc = mock_rpc
+        adapter.account_id = 1
+        cm = Mock()
+        cm.is_call_end_reply = lambda r: False
+        cm.has_active_call = lambda chat_id: True
+        cm.is_call_thread = lambda thread_id: thread_id == "call-1780"
+        cm.consume_call_ack = Mock(return_value=False)
+        cm.play_response = AsyncMock()
+        adapter._call_manager = cm
+        mock_rpc.send_msg = AsyncMock(return_value=55)
+        return adapter, cm
+
+    @pytest.mark.asyncio
+    async def test_call_speaks_only_the_final_reply(self, platform_config, mock_rpc):
+        """Status sends (memory notices, tool progress, busy acks) carry no
+        `notify`; seen live being read aloud in calls."""
+        adapter, cm = self._in_call(platform_config, mock_rpc)
+
+        for status in ("💾 Memory updated", "⏳ Queued", "🔧 terminal: ls"):
+            result = await adapter.send("19", status, metadata={"thread_id": "call-1780"})
+            assert result.success is True
+        cm.play_response.assert_not_called()
+        cm.consume_call_ack.assert_not_called()   # a status line must not use up the ack drop
+        mock_rpc.send_msg.assert_not_awaited()     # nor leak into the chat as text
+
+        await adapter.send("19", "Here's a joke.",
+                           metadata={"thread_id": "call-1780", "notify": True})
+        await asyncio.sleep(0)
+        cm.play_response.assert_called_once_with("19", "Here's a joke.")
+
+    @pytest.mark.asyncio
+    async def test_text_thread_during_a_call_still_sends(self, platform_config, mock_rpc):
+        """The filter is call-only: a text-chat send during a call is delivered."""
+        adapter, cm = self._in_call(platform_config, mock_rpc)
+
+        await adapter.send("19", "💾 Memory updated", metadata={"thread_id": None})
+
+        mock_rpc.send_msg.assert_awaited_once()
+        cm.play_response.assert_not_called()
+
     @pytest.mark.asyncio
     async def test_reply_to_a_call_end_note_is_suppressed(self, platform_config, mock_rpc):
         """Hermes anchors the reply on the note's synthetic id — seen live as
