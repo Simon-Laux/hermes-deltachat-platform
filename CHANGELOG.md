@@ -75,6 +75,10 @@ repairs and doc typo fixes are left out; see the git log for those.
   ever-growing thread, which was slow and made the model copy old replies
   instead of following the call prompt. The text chat still gets the
   end-of-call note.
+- **Voice calls no longer read status messages aloud.** Memory-update
+  notices, tool progress, busy and "⏳ Working" notices, interim commentary
+  and error notices were spoken like replies. Only the turn's final reply is
+  spoken now. Text-chat messages sent during a call are unaffected.
 - **Replies to the "call ended" note leaked into chat or failed to send.** The
   adapter now recognizes them by what they reply to instead of by a counter. A
   non-numeric `reply_to` now sends without a quote instead of failing the send.
