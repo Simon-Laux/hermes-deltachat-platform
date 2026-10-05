@@ -354,14 +354,73 @@ def _is_blocked(method: str) -> bool:
 
     It is still a *name* rule, so it bounds names rather than capabilities. It
     does not stop set_config(delete_device_after), which wipes the whole message
-    store under an innocuous name, nor the `file` parameter on send_msg, which
-    takes any local path (#32). The allowlist is the real control (#22).
+    store under an innocuous name. File paths (send_msg's data.file and
+    friends, #32) are a parameter problem, not a name problem, and are checked
+    in the safe call handler. The allowlist is the real control (#22).
 
     Draft methods are deliberately absent *from the named set*: the agent
     writing and clearing its own drafts is ordinary use. Note remove_draft is
     still refused, by the prefix rule rather than by choice.
     """
     return method in _BLOCKED_METHODS or method.startswith(("delete_", "remove_"))
+
+
+# Spec parameter names that carry a local filesystem path for core to read.
+# send_msg's path is nested as data.file and handled separately.
+_PATH_PARAMS = frozenset({"file", "imagePath", "stickerPath"})
+# Names that look like paths but are not: filename is the display name only.
+_NOT_PATH_PARAMS = frozenset({"filename"})
+
+
+def _unchecked_path_name(names) -> Optional[str]:
+    """First name that looks like a path but has no handling here, else None.
+
+    why: _PATH_PARAMS matches today's spec by name, and the spec is fetched
+    from whatever core is installed. A future core that renames `file` or adds
+    a chat-scoped `filePath` would otherwise slip past unchecked; refusing
+    unknown path-shaped names makes that fail closed instead.
+    """
+    for name in names:
+        lowered = name.lower()
+        if (("file" in lowered or "path" in lowered)
+                and name not in _PATH_PARAMS and name not in _NOT_PATH_PARAMS):
+            return name
+    return None
+
+
+def _safe_delivery_path(adapter, path) -> Optional[str]:
+    """The validated host path for `path`, or None if delivery policy refuses it.
+
+    Hermes' policy denylists its own secrets (.env, state.db, ~/.ssh) but knows
+    nothing about ours: the Delta Chat account dir holds dc.db (PGP secret key,
+    mail password, every chat), accounts.toml and the securejoin invite.txt,
+    and core keeps dc.db fresh enough to pass even strict mode's recency rule.
+    The logs carry message content too. Refuse both on top of Hermes' check.
+    """
+    from gateway.config import get_hermes_home
+
+    if not isinstance(path, str):
+        return None
+    safe = adapter.filter_local_delivery_paths([path])
+    if not safe:
+        return None
+    resolved = os.path.realpath(safe[0])
+    for protected in (adapter._get_dc_config_dir(), os.path.join(get_hermes_home(), "logs")):
+        root = os.path.realpath(protected)
+        if resolved == root or resolved.startswith(root + os.sep):
+            return None
+    return safe[0]
+
+
+def _refuse_path(method: str, path) -> str:
+    # %r for the same reason as the raw RPC audit line: the path is model-supplied.
+    logger.warning("Safe RPC call %r REFUSED (unsafe file path): %r", method, path)
+    return json.dumps({
+        "error": (
+            f"'{method}': file path refused — it does not exist on this host "
+            "or lies under a location the delivery policy protects"
+        )
+    })
 
 
 # Cached OpenRPC spec (fetched lazily on first use).
@@ -2297,6 +2356,31 @@ def register_rpc_tools(ctx) -> None:
                     f"so pass only the rest — {len(supplied)} too many were given"
                 )
             })
+
+        # why: core copies whatever local path it is handed into the blob dir
+        # and sends it, so without this one call mails ~/.hermes/.env to any
+        # chat the caller can steer (#32). The token scopes the chat, not the
+        # file. Run each path through the same filter the adapter's own sends
+        # use; that also maps /workspace/ sandbox paths to the host.
+        unchecked = _unchecked_path_name(param_names)
+        for name, value in zip(param_names, full_params):
+            if unchecked is None and name == "data" and isinstance(value, dict):
+                unchecked = _unchecked_path_name(value)
+        if unchecked is not None:
+            logger.warning("Safe RPC call %r REFUSED (unchecked path parameter %r)", method, unchecked)
+            return json.dumps({"error": f"'{method}' takes a file path ('{unchecked}') this tool cannot validate"})
+        for i, name in enumerate(param_names[:len(full_params)]):
+            value = full_params[i]
+            if name == "data" and isinstance(value, dict) and value.get("file"):
+                safe = _safe_delivery_path(adapter, value["file"])
+                if safe is None:
+                    return _refuse_path(method, value["file"])
+                full_params[i] = {**value, "file": safe}
+            elif name in _PATH_PARAMS and value:
+                safe = _safe_delivery_path(adapter, value)
+                if safe is None:
+                    return _refuse_path(method, value)
+                full_params[i] = safe
 
         try:
             result = await getattr(adapter.rpc, method)(*full_params)
