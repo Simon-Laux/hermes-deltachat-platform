@@ -118,6 +118,23 @@ mentioned? That isn't implemented yet —
 
 `DELTACHAT_REQUIRE_MENTION` applies to all groups; exempting single groups is not supported yet — open an issue for that too.
 
+### Who can talk to it
+Hermes decides that, not this plugin: someone writing to the bot for the first time gets a
+pairing code, and the agent only answers them after you run
+`hermes pairing approve deltachat-platform <code>` on the host. In groups, messages from members
+you haven't approved are ignored.
+
+Hermes stores those approvals under Delta Chat's contact IDs, which only mean something inside
+one Delta Chat database. If that database is lost and recreated, the same IDs go to other
+people — so the plugin pairs the database with Hermes' state (`ui.hermes.db_id` in the account,
+`.deltachat-db-id` in the Hermes profile directory) and refuses to start when they don't
+match. The error tells you what to clear to start over. Installs upgrading to this version adopt
+their current database as-is; the check protects from then on.
+
+It can't tell an *older backup* of the same database from the current one: after restoring one,
+contacts approved since that backup was made can lose their IDs to new people. Restore Hermes'
+state from the same point in time, or clear the approvals as the error message describes.
+
 ### Voice Calls (WebRTC)
 - **Incoming calls**: auto-answer, live speech-to-text → AI → text-to-speech pipeline
 - **Outgoing calls**: the AI can call you from a scheduled task (`dc_start_call` tool)
