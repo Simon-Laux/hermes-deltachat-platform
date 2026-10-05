@@ -7,7 +7,8 @@ WebRTC call.
 
 Requires `aiortc` (see [nixos-installation.md](nixos-installation.md) for the
 NixOS setup). Incoming calls are auto-answered; hang up from your Delta Chat
-client (or the bot can hang up via `dc_end_call`).
+client, or the bot hangs up after its goodbye — it ends the reply with `[[hangup]]`,
+which the adapter strips before TTS. `dc_end_call` does the same as a tool.
 
 ## Outgoing calls (the bot calls you)
 
@@ -106,7 +107,7 @@ DELTACHAT_CALL_STT_VOXTRAL=true
 
 | Variable | Default | Description |
 |---|---|---|
-| `DELTACHAT_CALL_PROMPT` | (built-in) | Ephemeral per-call system prompt that keeps replies short and TTS-friendly. Applied only during calls, never persisted to chat history. Override to change the calling persona/brevity. |
+| `DELTACHAT_CALL_PROMPT` | (built-in) | Ephemeral per-call system prompt that keeps replies short and TTS-friendly. Applied only during calls, never persisted to chat history. Override to change the calling persona/brevity — keep the `[[hangup]]` instruction, or the bot can only hang up via `dc_end_call`. |
 
 The built-in prompt instructs the agent to reply in 1-2 short spoken sentences
 with no markdown/lists/emojis/URLs (cuts both AI and TTS latency, which scale
@@ -124,7 +125,7 @@ run in a **separate session** by default (a distinct `thread_id`).
 
 | Variable | Default | Description |
 |---|---|---|
-| `DELTACHAT_CALL_SHARED_HISTORY` | off | When `true`, calls share one session with the text DM — the bot remembers across call↔text, at the cost of mixing spoken transcripts into the text history. When off (default), calls are isolated. |
+| `DELTACHAT_CALL_SHARED_HISTORY` | off | When `true`, calls share one session with the text DM — the bot remembers across call↔text, at the cost of mixing spoken transcripts into the text history. When off (default), every call gets its own fresh session (`call-<msg_id>`), so old calls never pile up in the context. |
 
 Note: the `channel_prompt` itself is **never** persisted to history in either
 mode — only the transcript and the AI's spoken reply are stored (in whichever
@@ -151,6 +152,27 @@ DELTACHAT_CALL_MODEL=mistral-small-latest
 
 > This feature is implemented and tested but **not enabled by default** — leave
 > `DELTACHAT_CALL_MODEL` unset to use your normal model for calls.
+
+**Reasoning settings follow the model, not the call.** Hermes sends a global
+`agent.reasoning_effort` with every model, including the call model, and
+`hermes model` sets that global value. If the call model can't take it, every
+call turn fails with HTTP 400 and the call stays silent. For example,
+`ministral-14b-2512` answers "reasoning_effort is not enabled for this model".
+Hermes 0.21.5 doesn't recognise that wording, so it doesn't retry without the
+field. Set the effort per model instead, and mark the call model as
+non-reasoning so Hermes leaves the field out. A plain `none` doesn't work for
+this: it is sent as `reasoning_effort: "none"`.
+
+```yaml
+agent:
+  reasoning_effort: ''                # no global effort
+  reasoning_overrides:
+    mistral-medium-3.5: high          # your main model
+model_overrides:                      # top-level key
+  custom:                             # the provider name Hermes uses
+    ministral-14b-2512:
+      supports_reasoning: false
+```
 
 ## Performance
 

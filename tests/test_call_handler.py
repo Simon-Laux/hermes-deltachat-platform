@@ -191,14 +191,16 @@ class TestBargeIn:
         mgr._chat_to_msg[session.chat_id] = session.msg_id
         return mgr
 
-    def test_no_interrupt_when_not_speaking(self):
+    @pytest.mark.asyncio
+    async def test_no_interrupt_when_not_speaking(self):
         session = self._session(0)            # nothing queued
         session.is_responding = False
         mgr = self._manager(session)
         mgr._handle_barge_in(1)
         assert session.interrupted is False   # nothing to interrupt
 
-    def test_interrupt_flushes_and_stops_tts(self):
+    @pytest.mark.asyncio
+    async def test_interrupt_flushes_and_stops_tts(self):
         session = self._session(10)
         session.is_responding = True
         mgr = self._manager(session)
@@ -206,7 +208,8 @@ class TestBargeIn:
         assert session.interrupted is True
         assert session.outgoing_track.is_speaking() is False   # queue flushed
 
-    def test_barge_in_cancels_pending_hangup(self):
+    @pytest.mark.asyncio
+    async def test_barge_in_cancels_pending_hangup(self):
         session = self._session(10)
         session.hangup_pending = True
         session.hanging_up = True             # goodbye drain in progress
@@ -214,6 +217,92 @@ class TestBargeIn:
         mgr._handle_barge_in(1)
         assert session.hangup_pending is False
         assert session.hangup_cancelled is True   # _hangup_session will abort
+
+
+class TestHangupMarker:
+    """A reply ending in [[hangup]] is spoken without the marker, then hangs up."""
+
+    def _manager(self, monkeypatch):
+        import json
+        import types
+        from unittest.mock import AsyncMock, MagicMock
+
+        spoken = []
+        fake_tts = types.ModuleType("tools.tts_tool")
+        # TTS "fails" so no audio decode is needed; we only check what was sent.
+        fake_tts.text_to_speech_tool = lambda s: spoken.append(s) or json.dumps({"success": False})
+        monkeypatch.setitem(sys.modules, "tools.tts_tool", fake_tts)
+
+        session = ch.CallSession(
+            pc=MagicMock(), chat_id="12", msg_id=1, caller_id="11", caller_name="X",
+            outgoing_track=ch.HermesAudioTrack(), audio_buffer=MagicMock(),
+            ice_channel=MagicMock(),
+        )
+        mgr = ch.CallManager(adapter=MagicMock())
+        mgr._sessions[1] = session
+        mgr._chat_to_msg["12"] = 1
+        mgr._hangup_session = AsyncMock()
+        return mgr, session, spoken
+
+    @pytest.mark.asyncio
+    async def test_marker_is_stripped_and_hangs_up(self, monkeypatch):
+        mgr, session, spoken = self._manager(monkeypatch)
+        await mgr._play_response("12", "Tschüss, bis bald! [[hangup]]")
+        assert spoken == ["Tschüss, bis bald!"]
+        mgr._hangup_session.assert_awaited_once_with(session)
+
+    @pytest.mark.asyncio
+    async def test_marker_spelling_is_lenient(self, monkeypatch):
+        mgr, _, spoken = self._manager(monkeypatch)
+        await mgr._play_response("12", "Bye! [[ Hang-Up ]]")
+        assert spoken == ["Bye!"]
+        mgr._hangup_session.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_marker_alone_hangs_up_without_speaking(self, monkeypatch):
+        mgr, _, spoken = self._manager(monkeypatch)
+        await mgr._play_response("12", "[[hangup]]")
+        assert spoken == []
+        mgr._hangup_session.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_no_marker_keeps_the_call(self, monkeypatch):
+        mgr, _, spoken = self._manager(monkeypatch)
+        await mgr._play_response("12", "Sure, here is a joke.")
+        assert spoken == ["Sure, here is a joke."]
+        mgr._hangup_session.assert_not_awaited()
+
+
+class TestIncomingCallAuthorization:
+    """Calls from contacts Hermes wouldn't talk to are declined, not answered."""
+
+    def _manager(self, verdict):
+        from unittest.mock import AsyncMock, MagicMock
+        adapter = MagicMock()
+        adapter.rpc.get_message = AsyncMock(return_value={"from_id": 10})
+        adapter.rpc.get_contact = AsyncMock(return_value={"name": "Eve"})
+        adapter.rpc.end_call = AsyncMock()
+        adapter._is_sender_authorized = MagicMock(return_value=verdict)
+        mgr = ch.CallManager(adapter=adapter)
+        mgr._answer_call = AsyncMock()
+        mgr._warmup_stt = AsyncMock()
+        return mgr, adapter
+
+    @pytest.mark.asyncio
+    async def test_unauthorized_caller_is_declined(self):
+        mgr, adapter = self._manager(False)
+        await mgr._handle_incoming_call({"msg_id": 5, "chat_id": 12, "place_call_info": "sdp"})
+        adapter._is_sender_authorized.assert_called_once_with("10", "dm", "12")
+        adapter.rpc.end_call.assert_awaited_once()
+        mgr._answer_call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("verdict", [True, None])
+    async def test_authorized_or_unchecked_caller_is_answered(self, verdict):
+        mgr, adapter = self._manager(verdict)
+        await mgr._handle_incoming_call({"msg_id": 5, "chat_id": 12, "place_call_info": "sdp"})
+        mgr._answer_call.assert_awaited_once()
+        adapter.rpc.end_call.assert_not_awaited()
 
 
 class TestOutgoingCall:
@@ -260,12 +349,14 @@ class TestOutgoingCall:
         with pytest.raises(RuntimeError):
             fut.result()
 
-    def test_consume_drop_response_is_one_shot(self):
-        mgr = self._manager()
-        mgr._drop_next_response.add("12")
-        assert mgr.consume_drop_response("12") is True   # call-ended note's reply → drop
-        assert mgr.consume_drop_response("12") is False  # subsequent replies go through
-        assert mgr.consume_drop_response("99") is False
+    def test_call_end_reply_is_recognised_by_its_anchor(self):
+        # Both injected notes (call thread + main thread) share the prefix.
+        assert ch.CallManager.is_call_end_reply("callend-35422583") is True
+        assert ch.CallManager.is_call_end_reply("callend-main-35422590") is True
+        # Real DC message ids and missing anchors go through.
+        assert ch.CallManager.is_call_end_reply("1756") is False
+        assert ch.CallManager.is_call_end_reply(None) is False
+        assert ch.CallManager.is_call_end_reply("") is False
 
 
 class TestDecodeTts:
@@ -302,3 +393,107 @@ class TestDecodeTts:
         total = sum(f.samples for f in frames)
         expected = seconds * ch._SAMPLE_RATE        # 48 kHz target
         assert abs(total - expected) < ch.HermesAudioTrack._FRAME_SAMPLES * 2
+
+
+class TestPerCallSession:
+    """Each call gets its own session thread, so old calls never pile up."""
+
+    def test_thread_id_is_per_call(self, monkeypatch):
+        monkeypatch.setattr(ch, "_CALL_THREAD_ID", "call")
+        assert ch._call_thread_id(1780) == "call-1780"
+        assert ch._call_thread_id(1781) != ch._call_thread_id(1780)
+
+    def test_replies_from_any_call_thread_are_spoken(self, monkeypatch):
+        monkeypatch.setattr(ch, "_CALL_THREAD_ID", "call")
+        assert ch.CallManager.is_call_thread("call-1780") is True
+        assert ch.CallManager.is_call_thread(None) is False      # text chat
+        assert ch.CallManager.is_call_thread("") is False
+
+    def test_shared_history_mode_has_no_call_thread(self, monkeypatch):
+        monkeypatch.setattr(ch, "_CALL_THREAD_ID", None)
+        assert ch._call_thread_id(1780) is None
+        assert ch.CallManager.is_call_thread(None) is True
+
+
+class TestCallModelOverride:
+    """DELTACHAT_CALL_MODEL reaches the gateway session even when the message
+    handler is a closure (Hermes ≥ 0.21.5) rather than a bound method."""
+
+    class _Runner:
+        def __init__(self):
+            self._session_model_overrides = {}
+
+        def _session_key_for_source(self, source):
+            return "agent:main:deltachat-platform:dm:12:call"
+
+        async def _handle_message(self, event):  # pre-0.21.5 bound handler
+            return None
+
+    def _setup(self, monkeypatch, *, runner_ref, handler):
+        import types
+        from unittest.mock import MagicMock
+        monkeypatch.setattr(ch, "_CALL_MODEL", "ministral-14b-2512")
+        fake_run = types.ModuleType("gateway.run")
+        fake_run._gateway_runner_ref = runner_ref
+        monkeypatch.setitem(sys.modules, "gateway.run", fake_run)
+        adapter = MagicMock()
+        adapter._message_handler = handler
+        mgr = ch.CallManager(adapter=adapter)
+        return mgr, MagicMock(model_override_key=None)
+
+    @pytest.mark.asyncio
+    async def test_closure_handler_uses_the_runner_weakref(self, monkeypatch):
+        runner = self._Runner()
+
+        async def closure(*args):  # what _standalone_scoped installs
+            return None
+
+        mgr, session = self._setup(monkeypatch, runner_ref=lambda: runner, handler=closure)
+        mgr._install_model_override(session, source=object())
+
+        key = "agent:main:deltachat-platform:dm:12:call"
+        assert runner._session_model_overrides[key]["model"] == "ministral-14b-2512"
+        assert session.model_override_key == key
+
+    @pytest.mark.asyncio
+    async def test_bound_handler_still_works_without_the_weakref(self, monkeypatch):
+        runner = self._Runner()
+        mgr, session = self._setup(
+            monkeypatch, runner_ref=lambda: None, handler=runner._handle_message
+        )
+        mgr._install_model_override(session, source=object())
+        assert runner._session_model_overrides  # found via __self__
+
+    @pytest.mark.asyncio
+    async def test_greeting_turn_already_uses_the_call_model(self, monkeypatch):
+        """The greeting is the first turn — seen live: a call hung up before the
+        first sentence ran entirely on the default model."""
+        from unittest.mock import AsyncMock
+        runner = self._Runner()
+
+        async def closure(*args):
+            return None
+
+        mgr, session = self._setup(monkeypatch, runner_ref=lambda: runner, handler=closure)
+        mgr._sessions[1] = session
+        mgr._to_hermes = AsyncMock()
+        # conftest's MockMessageEvent predates channel_prompt; any kwargs will do here.
+        import types
+        monkeypatch.setattr(sys.modules["gateway.platforms.base"], "MessageEvent",
+                            lambda **kw: types.SimpleNamespace(**kw))
+
+        await mgr._play_greeting(1, "12", "11", "X")
+
+        assert runner._session_model_overrides  # installed before the greeting turn
+        mgr._to_hermes.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    async def test_unreachable_runner_warns(self, monkeypatch, caplog):
+        async def closure(*args):
+            return None
+
+        mgr, session = self._setup(monkeypatch, runner_ref=lambda: None, handler=closure)
+        with caplog.at_level("WARNING"):
+            mgr._install_model_override(session, source=object())
+        assert "DELTACHAT_CALL_MODEL" in caplog.text
+        assert session.model_override_key is None

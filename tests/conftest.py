@@ -3,6 +3,7 @@
 Provides mocks for Hermes gateway module that match the real API.
 """
 
+import asyncio
 import sys
 import os
 from unittest.mock import MagicMock, Mock, AsyncMock
@@ -107,14 +108,72 @@ class MockBasePlatformAdapter:
         self.platform = platform
         self._connected = False
         self._disconnected = False
+        # Mirrors the real base: _running *is* is_connected, and the fatal-error
+        # trio is what an adapter uses to hand a dead transport back to the
+        # gateway's reconnect watcher.
+        self._running = False
+        self._fatal_error_code = None
+        self._fatal_error_message = None
+        self._fatal_error_retryable = True
+        self._fatal_error_handler = None
+
+    @property
+    def is_connected(self) -> bool:
+        return self._running
+
+    @property
+    def has_fatal_error(self) -> bool:
+        return self._fatal_error_message is not None
+
+    @property
+    def fatal_error_code(self):
+        return self._fatal_error_code
+
+    @property
+    def fatal_error_message(self):
+        return self._fatal_error_message
+
+    @property
+    def fatal_error_retryable(self) -> bool:
+        return self._fatal_error_retryable
+
+    def set_fatal_error_handler(self, handler) -> None:
+        self._fatal_error_handler = handler
+
+    def _set_fatal_error(self, code: str, message: str, *, retryable: bool) -> None:
+        self._running = False
+        self._fatal_error_code = code
+        self._fatal_error_message = message
+        self._fatal_error_retryable = retryable
+
+    async def _notify_fatal_error(self) -> None:
+        handler = self._fatal_error_handler
+        if not handler:
+            return
+        result = handler(self)
+        if asyncio.iscoroutine(result):
+            await result
 
     def _mark_connected(self) -> None:
         """Mark adapter as connected."""
         self._connected = True
+        self._running = True
+        self._fatal_error_code = None
+        self._fatal_error_message = None
+        self._fatal_error_retryable = True
 
     def _mark_disconnected(self) -> None:
         """Mark adapter as disconnected."""
+        self._running = False
+        # The real base refuses to downgrade a recorded fatal error to a plain
+        # "disconnected" status.
+        if self.has_fatal_error:
+            return
         self._disconnected = True
+
+    def _is_sender_authorized(self, user_id, chat_type=None, chat_id=None, **kwargs):
+        # The real base without a runner-registered check: "unknown".
+        return None
 
     def build_source(
         self,
@@ -138,6 +197,50 @@ class MockBasePlatformAdapter:
     async def handle_message(self, event: MockMessageEvent) -> None:
         """Handle a message event (to be overridden by adapter)."""
         pass
+
+    @staticmethod
+    def extract_media(content: str):
+        """Mock base extractor.
+
+        The real base only picks up MEDIA_DELIVERY_EXTS (which excludes .xdc),
+        so for the adapter's .xdc-focused overrides an empty base result with
+        the content passed through unchanged is a faithful stand-in.
+        """
+        return [], content
+
+    @staticmethod
+    def extract_local_files(content: str):
+        """Mock base local-file extractor (see extract_media note)."""
+        return [], content
+
+    @staticmethod
+    def filter_media_delivery_paths(media_files, session_key: str = ""):
+        """Mock base media filter — pass through unchanged."""
+        return list(media_files or [])
+
+    @staticmethod
+    def filter_local_delivery_paths(file_paths, session_key: str = ""):
+        """Mock base local filter — pass through unchanged."""
+        return list(file_paths or [])
+
+    @staticmethod
+    def _mask_protected_spans(content: str) -> str:
+        """Minimal stand-in for the real span masker.
+
+        The real one also handles blockquotes and spares backtick-quoted
+        MEDIA: paths; fenced and inline code is enough to pin the contract
+        the adapter depends on — masking is offset-preserving, so match
+        spans stay valid against the unmasked text.
+        """
+        import re
+
+        chars = list(content)
+        for pattern in (r"```[^\n]*\n.*?```", r"`[^`\n]+`"):
+            for m in re.finditer(pattern, content, re.DOTALL):
+                for i in range(m.start(), m.end()):
+                    if chars[i] != "\n":
+                        chars[i] = " "
+        return "".join(chars)
 
 
 class MockGatewayBase:
@@ -200,10 +303,14 @@ def mock_platform_config():
 
 @pytest.fixture
 def mock_rpc():
-    """Create a mock deltachat2.Rpc instance."""
-    rpc = MagicMock()
-    # Make call an async method that returns a coroutine
-    rpc.call = AsyncMock()
-    rpc.start = AsyncMock()
+    """Create a mock of the adapter's _AsyncRpc wrapper.
+
+    The adapter does not call ``rpc.call(...)`` — it calls RPC methods by
+    attribute (``rpc.get_basic_chat_info(...)``), which _AsyncRpc turns into
+    awaitables via run_in_executor. So the mock has to be an AsyncMock, or
+    every un-stubbed attribute yields a plain MagicMock that blows up with
+    "object MagicMock can't be used in 'await' expression".
+    """
+    rpc = AsyncMock()
     rpc.close = Mock()
     return rpc

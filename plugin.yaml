@@ -1,9 +1,13 @@
 name: deltachat-platform
 label: Delta Chat
 kind: platform
-version: 1.0.0
+version: 2.0.0
 description: Delta Chat messaging platform adapter for Hermes Agent. Supports text, webxdc mini apps, voice messages, images, and videos.
 author: Simon Laux
+# Load gate: a Hermes that knows this key refuses to load the plugin below it (hermes_cli/
+# plugins_manifest.py `requires_hermes_error`). Releases that predate the key (e.g. 0.15.x) ignore
+# it and load anyway, so it cannot protect those — see docs/version-compatibility.md.
+requires_hermes: ">=0.21.5"
 requires_env:
   - name: DELTACHAT_RPC_SERVER
     description: "Path to deltachat-rpc-server binary. After setting, run: python ~/.hermes/plugins/deltachat-platform/setup.py"
@@ -11,4 +15,61 @@ optional_env:
   - name: DELTACHAT_HOME_CHANNEL
     description: "Default chat for cron delivery"
     prompt: "Home chat"
-    password: false
+  # Headless onboarding — setting either of the two below opts in, and the
+  # adapter creates its own account on first connect instead of requiring
+  # setup.py. See docs/headless-onboarding.md.
+  - name: DELTACHAT_EMAIL
+    description: "Email address for the bot account, or 'auto' to register a free chatmail account on first connect. Leave unset to onboard interactively with setup.py instead."
+    prompt: "Bot email address (or 'auto')"
+  - name: DELTACHAT_PASSWORD
+    description: "Password for DELTACHAT_EMAIL. Not needed when DELTACHAT_EMAIL=auto. Cleared from the process environment once the transport is configured."
+    prompt: "Bot email password"
+    # Both keys, but not for the reason you'd guess: the wizard
+    # (hermes_cli/config.py) masks on `password` OR `secret`, and the name
+    # ending in _PASSWORD would make it mask anyway. The install-time prompt
+    # (plugins_cmd.py) reads `secret` only — but it walks `requires_env` and
+    # never `optional_env`, so it never asks for this at all. Both keys are
+    # therefore redundant today; kept so the masking survives a rename or
+    # `optional_env` later being wired into the install prompt.
+    password: true
+    secret: true
+  - name: DELTACHAT_ENABLE_RAW_RPC
+    description: "Set to 1 to expose the account-wide dc_rpc_call tool in addition to the chat-scoped dc_safe_rpc_call. Trusted deployments only. Leave blank to keep it off; 0/false/no/off also count as off."
+    prompt: "Enable unrestricted dc_rpc_call (blank = no)"
+  - name: DELTACHAT_RAW_RPC_ALLOWLIST
+    description: "Comma-separated RPC methods dc_rpc_call may call. Leave blank to allow any method not already refused."
+    prompt: "Raw RPC allowlist (comma-separated)"
+  - name: DELTACHAT_CHATMAIL_SERVERS
+    description: "Comma-separated chatmail relays to register on when DELTACHAT_EMAIL=auto (e.g. nine.testrun.org,mehl.cloud). Unset picks nine.testrun.org plus two random relays from chatmail.at/relays for redundancy."
+    prompt: "Chatmail relays (comma-separated)"
+  - name: DELTACHAT_REQUIRE_MENTION
+    description: "Set to 1 to answer group messages only when they mention the bot (@<display name> or @<alias>) or quote-reply to it. DMs are never gated."
+    prompt: "Require @mention in groups (blank = no)"
+  - name: DELTACHAT_MENTION_ALIASES
+    description: "Comma-separated extra names that count as a mention when written as @<alias>."
+    prompt: "Mention aliases (comma-separated)"
+  - name: DELTACHAT_COMMANDS_BIO
+    description: "The bot's slash commands are appended to its profile bio, below a 'Hermes commands:' line; your own text above it is kept. The bio is sent with every message (~5 KB). Set to 0 to turn it off and remove the list again."
+    prompt: "Commands in bio (blank = yes, 0 = no)"
+
+# Python packages this plugin needs in Hermes' venv. Hermes resolves them together with its own
+# pinned ranges when the plugin is installed and RE-APPLIES them after every `hermes update`
+# (grep Hermes for `_install_plugin_python_deps` — the module holding it gets renamed between
+# releases). Without the declaration they were installed by hand, so a Hermes update that bumped
+# `cryptography` left aiortc's `pyOpenSSL` on a release built for the old one: importing it failed
+# with "module 'lib' has no attribute 'GEN_EMAIL'" and the update then disabled the plugin.
+# pyOpenSSL/cryptography are deliberately not listed — the resolver picks the pyOpenSSL that
+# matches the cryptography Hermes pins. Releases without `python_dependencies` support ignore this
+# key, so on those the packages still have to be installed by hand (see README).
+#
+# why: DC core does not use semver — a *minor* bump may break the JSON-RPC API (major is reserved
+# for heavily breaking wire-format changes, patch is never used), so the ceiling has to exclude the
+# first minor whose API nobody checked. 2.61.0 removes `Account::Configured.addr` (read at
+# adapter.py:714, setup.py:297) and `Contact.nameAndAddr` (adapter.py:1440,1562,1764,
+# call_handler.py:602,911); both reads are `.get()` fallbacks so they degrade rather than crash,
+# but `get_my_address()` loses its only non-SecureJoin fallback. 2.60.0 is the newest release whose
+# full RPC surface — all 25 methods this plugin calls, plus the MsgData payload — was verified
+# against the real `--openrpc` spec and a live server.
+python_dependencies:
+  - deltachat-rpc-server>=2.51.0,<2.61
+  - aiortc>=1.9.0
