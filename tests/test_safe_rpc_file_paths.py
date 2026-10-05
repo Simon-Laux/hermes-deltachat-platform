@@ -64,6 +64,13 @@ def connected(monkeypatch, tmp_path):
     return fake
 
 
+def _touch(path) -> str:
+    """Hermes only accepts files that exist, so the protected-dir check sees real ones."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("x")
+    return str(path)
+
+
 async def _call(handler, method, params):
     return await handler({"method": method, "chat_token": TOKEN, "params": params})
 
@@ -133,7 +140,7 @@ class TestOwnSecrets:
         "logs/gateway.log",
     ])
     async def test_refused_even_when_hermes_accepts(self, safe_handler, connected, tmp_path, rel):
-        target = str(tmp_path / rel)
+        target = _touch(tmp_path / rel)
         connected.filter_local_delivery_paths.side_effect = lambda paths: [target]
         result = json.loads(await _call(safe_handler, "send_msg", [{"file": target}]))
         assert "refused" in result["error"]
@@ -182,3 +189,39 @@ class TestFailClosed:
     async def test_filename_is_a_display_name(self, safe_handler, connected):
         await _call(safe_handler, "send_msg", [{"text": "hi", "filename": "report.pdf"}])
         connected.rpc.send_msg.assert_awaited_once_with(1, CHAT_ID, {"text": "hi", "filename": "report.pdf"})
+
+
+class TestOtherHomes:
+    @pytest.mark.asyncio
+    async def test_other_profiles_account_dir_is_refused(self, safe_handler, connected, tmp_path, monkeypatch):
+        """Profile A's bot must not send profile B's dc.db."""
+        other = tmp_path / "profiles" / "work"
+        base = __import__("sys").modules["gateway.platforms.base"]
+        monkeypatch.setattr(base, "_credential_home_roots", lambda: [tmp_path, other], raising=False)
+        target = _touch(other / "deltachat-platform" / "abc-uuid" / "dc.db")
+        connected.filter_local_delivery_paths.side_effect = lambda paths: [target]
+        result = json.loads(await _call(safe_handler, "send_msg", [{"file": target}]))
+        assert "refused" in result["error"]
+        connected.rpc.send_msg.assert_not_awaited()
+
+    def test_same_dir_under_another_spelling(self, tmp_path, monkeypatch):
+        """Stands in for macOS: realpath keeps the caller's case there, so the
+        string differs from the protected dir while the directory is the same."""
+        protected = tmp_path / "deltachat-platform"
+        _touch(protected / "dc.db")
+        (tmp_path / "ALIAS").symlink_to(protected)
+        monkeypatch.setattr(adapter.os.path, "realpath", lambda p: p)
+        assert adapter._is_inside(str(tmp_path / "ALIAS" / "dc.db"), [str(protected)])
+        assert not adapter._is_inside(str(tmp_path / "elsewhere.txt"), [str(protected)])
+
+    @pytest.mark.asyncio
+    async def test_helper_failure_falls_back_to_own_home(self, safe_handler, connected, tmp_path, monkeypatch):
+        """A core without (or with a broken) _credential_home_roots keeps the old protection."""
+        def broken():
+            raise RuntimeError("no profiles here")
+        base = __import__("sys").modules["gateway.platforms.base"]
+        monkeypatch.setattr(base, "_credential_home_roots", broken, raising=False)
+        target = _touch(tmp_path / "logs" / "gateway.log")
+        connected.filter_local_delivery_paths.side_effect = lambda paths: [target]
+        result = json.loads(await _call(safe_handler, "send_msg", [{"file": target}]))
+        assert "refused" in result["error"]

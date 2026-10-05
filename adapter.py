@@ -388,6 +388,60 @@ def _unchecked_path_name(names) -> Optional[str]:
     return None
 
 
+def _protected_dirs(adapter) -> list:
+    """Directories whose contents must never be sent: Delta Chat state and logs.
+
+    Covers every profile of this Hermes root, not just ours: each one's
+    deltachat-platform/ sits under <root>/profiles/<name>/, and a bot steered
+    in profile A could otherwise send profile B's dc.db. Hermes' own helper
+    enumerates those homes; older cores lack it, so fall back to ours. A
+    separate install with its own unrelated HERMES_HOME is not covered.
+    """
+    from gateway.config import get_hermes_home
+
+    try:
+        from gateway.platforms.base import _credential_home_roots
+        homes = [str(h) for h in _credential_home_roots()]
+    except Exception:
+        homes = []
+    homes.append(str(get_hermes_home()))
+    dirs = [adapter._get_dc_config_dir()]
+    for home in homes:
+        dirs += [os.path.join(home, "deltachat-platform"), os.path.join(home, "logs")]
+    return dirs
+
+
+def _is_inside(path: str, dirs) -> bool:
+    """True if `path` or any parent is one of `dirs`, compared by inode.
+
+    why: inode, not string prefix. On a case-insensitive filesystem (macOS)
+    realpath keeps the caller's spelling, so ~/.HERMES/deltachat-platform/
+    opens the same files while missing a prefix match.
+
+    A hardlink to dc.db elsewhere passes, but creating one needs host write
+    access on the same filesystem, which could just copy the file anyway.
+    """
+    ids = set()
+    for d in dirs:
+        try:
+            st = os.stat(d)
+        except OSError:
+            continue
+        ids.add((st.st_dev, st.st_ino))
+    current = os.path.realpath(path)
+    while True:
+        try:
+            st = os.stat(current)
+            if (st.st_dev, st.st_ino) in ids:
+                return True
+        except OSError:
+            pass
+        parent = os.path.dirname(current)
+        if parent == current:
+            return False
+        current = parent
+
+
 def _safe_delivery_path(adapter, path) -> Optional[str]:
     """The validated host path for `path`, or None if delivery policy refuses it.
 
@@ -397,18 +451,11 @@ def _safe_delivery_path(adapter, path) -> Optional[str]:
     and core keeps dc.db fresh enough to pass even strict mode's recency rule.
     The logs carry message content too. Refuse both on top of Hermes' check.
     """
-    from gateway.config import get_hermes_home
-
     if not isinstance(path, str):
         return None
     safe = adapter.filter_local_delivery_paths([path])
-    if not safe:
+    if not safe or _is_inside(safe[0], _protected_dirs(adapter)):
         return None
-    resolved = os.path.realpath(safe[0])
-    for protected in (adapter._get_dc_config_dir(), os.path.join(get_hermes_home(), "logs")):
-        root = os.path.realpath(protected)
-        if resolved == root or resolved.startswith(root + os.sep):
-            return None
     return safe[0]
 
 
