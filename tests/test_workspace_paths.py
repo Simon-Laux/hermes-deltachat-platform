@@ -1,11 +1,9 @@
 """Tests for workspace/agent path handling in the Delta Chat adapter.
 
-Covers the container->host mapping (with traversal containment) and the
-generalized bare-.xdc / MEDIA .xdc extractors. All five cases exercise
-pure/near-pure adapter methods and need no live RPC.
+Covers the generalized bare-.xdc / MEDIA .xdc extractors. These exercise
+pure/near-pure adapter methods and need no live RPC. Container->host
+translation of /workspace/ paths is Hermes's job since 0.21.5.
 """
-
-import os
 
 # conftest.py installs the gateway mocks, so importing adapter here is safe.
 from adapter import DeltaChatAdapter
@@ -14,48 +12,6 @@ from adapter import DeltaChatAdapter
 def _make_adapter(platform_config):
     """Construct an adapter without touching RPC (mirrors integration tests)."""
     return DeltaChatAdapter(platform_config)
-
-
-class TestContainerWorkspaceToHost:
-    """_container_workspace_to_host mapping + traversal containment."""
-
-    def test_maps_workspace_path_to_host_sandbox(self, monkeypatch, tmp_path):
-        # Make the fallback (get_hermes_home) deterministic. tools.environments
-        # is not importable in the test env, so the ImportError branch is used.
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
-        host = DeltaChatAdapter._container_workspace_to_host("/workspace/app.xdc")
-
-        assert host is not None
-        # The resolved host path lives under the sandbox workspace root.
-        expected = os.path.realpath(
-            str(tmp_path / "sandboxes" / "docker" / "default" / "workspace" / "app.xdc")
-        )
-        assert host == expected
-
-    def test_traversal_escape_returns_none(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
-        assert (
-            DeltaChatAdapter._container_workspace_to_host(
-                "/workspace/../../../etc/passwd"
-            )
-            is None
-        )
-        # A .pdf escape is rejected the same way.
-        assert (
-            DeltaChatAdapter._container_workspace_to_host(
-                "/workspace/../../secret/report.pdf"
-            )
-            is None
-        )
-
-    def test_non_workspace_path_returns_none(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
-        assert (
-            DeltaChatAdapter._container_workspace_to_host("/home/user/app.xdc") is None
-        )
 
 
 class TestExtractLocalFiles:
@@ -107,7 +63,7 @@ class TestExtractLocalFiles:
         """Regression: Docker /workspace/ paths must still be picked up.
 
         These are container-side and never exist on the host, so they are
-        exempt from the isfile() guard.
+        exempt from the isfile() guard; Hermes translates them at delivery.
         """
         adapter = _make_adapter(platform_config)
         content = "Built it: /workspace/app.xdc done."
