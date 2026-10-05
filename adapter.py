@@ -592,6 +592,8 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._dc_config_dir: Optional[str] = None
         self._call_manager = None
         self._invite_link: Optional[str] = None
+        # Exec-approval prompt msg id -> its Hermes session key, oldest first.
+        self._approval_prompts: Dict[int, str] = {}
 
         # Group mention gating (opt-in; DMs are never gated). Set
         # platforms.deltachat-platform.require_mention / mention_aliases in
@@ -1418,6 +1420,72 @@ body {{
             logger.error(f"Error sending file {file_path} to chat {chat_id}: {e}")
             return SendResult(success=False, error=str(e))
 
+    # Delta Chat has no buttons: an exec-approval prompt is answered by
+    # reacting to it. Keys are compared with skin tones/variation selectors removed.
+    _APPROVAL_REACTIONS = {"👍": "once", "👎": "deny"}
+    _MAX_APPROVAL_PROMPTS = 64
+
+    async def _send_exec_approval_prompt(self, prompt) -> SendResult:
+        """Send Hermes' approval prompt and remember it for _handle_reaction."""
+        commands = ["`/approve`"] + [f"`/approve {c}`" for c in ("session", "always")
+                                     if c in prompt.choices]
+        text = (f"{prompt.text}\n\n"
+                "React to this exact message:\n👍 = approve once\n👎 = deny\n\n"
+                f"Or reply {', '.join(commands)} or `/deny`.")
+        result = await self.send(prompt.chat_id, text, metadata=prompt.metadata)
+        if result.success and result.message_id:
+            self._approval_prompts[int(result.message_id)] = prompt.session_key
+            while len(self._approval_prompts) > self._MAX_APPROVAL_PROMPTS:
+                del self._approval_prompts[next(iter(self._approval_prompts))]
+        return result
+
+    async def _handle_reaction(self, event: Dict[str, Any]) -> None:
+        """Resolve the exec approval a 👍/👎 reaction answers.
+
+        Hermes never sees reactions, so this is the authorization gate: the
+        reactor must be a key contact Hermes approves for this chat. The
+        prompt's session must belong to this chat and, for per-user group
+        sessions, to the reactor — whoever could have typed /approve for it.
+        Like /approve, it resolves the session's oldest pending approval.
+        """
+        msg_id, chat_id, contact_id = event.get("msg_id"), event.get("chat_id"), event.get("contact_id")
+        session_key = self._approval_prompts.get(msg_id)
+        if session_key is None:
+            return
+        emojis = re.sub("[\U0001F3FB-\U0001F3FF️]", "", event.get("reaction") or "").split()
+        choices = {self._APPROVAL_REACTIONS.get(e) for e in emojis}
+        if len(choices) != 1 or None in choices:
+            return
+        if not (session_key.endswith(f":{chat_id}")
+                or session_key.endswith(f":{chat_id}:{contact_id}")):
+            logger.info("Ignoring approval reaction from contact %s on prompt %s: not their session",
+                        contact_id, msg_id)
+            return
+        try:
+            contact = await self.rpc.get_contact(self.account_id, int(contact_id))
+            chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
+        except Exception as e:
+            logger.warning("Ignoring approval reaction on prompt %s: %s", msg_id, e)
+            return
+        chat_type = "group" if chat.get("chat_type") == "Group" else "dm"
+        if not contact.get("is_key_contact") or self._is_sender_authorized(
+                str(contact_id), chat_type, str(chat_id)) is not True:
+            logger.info("Ignoring approval reaction from unauthorized contact %s", contact_id)
+            return
+
+        from tools.approval import resolve_gateway_approval
+
+        (choice,) = choices
+        del self._approval_prompts[msg_id]
+        count = resolve_gateway_approval(session_key, choice)
+        logger.info("Contact %s reacted to approval prompt %s: %s (%d resolved)",
+                    contact_id, msg_id, choice, count)
+        if not count:
+            reply = "⌛ Nothing pending anymore: it timed out or was already answered."
+        else:
+            reply = "✅ Approved." if choice == "once" else "❌ Denied."
+        await self.send(str(chat_id), reply, reply_to=str(msg_id))
+
     async def send_document(
         self,
         chat_id: str,
@@ -1927,6 +1995,8 @@ body {{
 
         if event_kind == EventType.INCOMING_MSG:
             await self._handle_incoming_message(event)
+        elif event_kind == EventType.INCOMING_REACTION:
+            await self._handle_reaction(event)
         elif event_kind == EventType.MSG_DELIVERED:
             logger.debug(f"Message delivered: {event.get('msg_id')}")
         elif event_kind == EventType.MSG_FAILED:
