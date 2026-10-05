@@ -153,6 +153,27 @@ DELTACHAT_CALL_MODEL=mistral-small-latest
 > This feature is implemented and tested but **not enabled by default** — leave
 > `DELTACHAT_CALL_MODEL` unset to use your normal model for calls.
 
+**Reasoning settings follow the model, not the call.** Hermes sends a global
+`agent.reasoning_effort` with every model, including the call model, and
+`hermes model` sets that global value. If the call model can't take it, every
+call turn fails with HTTP 400 and the call stays silent. For example,
+`ministral-14b-2512` answers "reasoning_effort is not enabled for this model".
+Hermes 0.21.5 doesn't recognise that wording, so it doesn't retry without the
+field. Set the effort per model instead, and mark the call model as
+non-reasoning so Hermes leaves the field out. A plain `none` doesn't work for
+this: it is sent as `reasoning_effort: "none"`.
+
+```yaml
+agent:
+  reasoning_effort: ''                # no global effort
+  reasoning_overrides:
+    mistral-medium-3.5: high          # your main model
+model_overrides:                      # top-level key
+  custom:                             # the provider name Hermes uses
+    ministral-14b-2512:
+      supports_reasoning: false
+```
+
 ## Performance
 
 Typical per-turn latency once warmed up (with Voxtral STT enabled):
