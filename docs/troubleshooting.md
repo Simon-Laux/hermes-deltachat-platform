@@ -158,6 +158,17 @@ file /path/to/your/file.xdc
 # Ensure file exists before sending
 ```
 
+**Docker sandbox (`MEDIA:/workspace/...`) in strict mode:** Hermes maps
+`/workspace/` to the host sandbox (`~/.hermes/sandboxes/docker/<...>/workspace/`)
+before validating it. With `HERMES_MEDIA_DELIVERY_STRICT=1`, that sandbox is not
+an allowed root, so a file is only accepted while it is "recently produced"
+(default 600 s, never if `trust_recent_files` is off). Older files are dropped
+with `Skipping MEDIA directive path (denied by the delivery policy)`. Add the
+sandbox directory to `HERMES_MEDIA_ALLOW_DIRS` (or
+`gateway.media_delivery_allow_dirs`) to deliver them regardless of age. The same
+fix applies if your `HERMES_HOME` sits under a denied system prefix
+(e.g. `/var/lib/...`), which rejects sandbox files even in default mode.
+
 ## Voice Call Issues
 
 **Symptom:** Incoming call events not handled

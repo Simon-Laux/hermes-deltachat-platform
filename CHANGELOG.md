@@ -79,6 +79,12 @@ repairs and doc typo fixes are left out; see the git log for those.
   adapter now recognizes them by what they reply to instead of by a counter. A
   non-numeric `reply_to` now sends without a quote instead of failing the send.
 - **Delivery failures (`MSG_FAILED`) are logged with their chat and reason.**
+- **No more "Docker MEDIA path … did not resolve" warning on every file sent
+  from the Docker sandbox.** Hermes now maps `/workspace/` paths to the host
+  itself, so the adapter no longer copies them into `cache/documents/`. If you
+  run with `HERMES_MEDIA_DELIVERY_STRICT=1`, add the sandbox directory to
+  `HERMES_MEDIA_ALLOW_DIRS`, or files older than about 10 minutes are refused
+  (see docs/troubleshooting.md).
 
 ### Security hardening of the RPC tools
 

@@ -1,11 +1,9 @@
 """Tests for workspace/agent path handling in the Delta Chat adapter.
 
-Covers the container->host mapping (with traversal containment) and the
-generalized bare-.xdc / MEDIA .xdc extractors. All five cases exercise
-pure/near-pure adapter methods and need no live RPC.
+Covers the generalized bare-.xdc / MEDIA .xdc extractors. These exercise
+pure/near-pure adapter methods and need no live RPC. Container->host
+translation of /workspace/ paths is Hermes's job since 0.21.5.
 """
-
-import os
 
 # conftest.py installs the gateway mocks, so importing adapter here is safe.
 from adapter import DeltaChatAdapter
@@ -14,48 +12,6 @@ from adapter import DeltaChatAdapter
 def _make_adapter(platform_config):
     """Construct an adapter without touching RPC (mirrors integration tests)."""
     return DeltaChatAdapter(platform_config)
-
-
-class TestContainerWorkspaceToHost:
-    """_container_workspace_to_host mapping + traversal containment."""
-
-    def test_maps_workspace_path_to_host_sandbox(self, monkeypatch, tmp_path):
-        # Make the fallback (get_hermes_home) deterministic. tools.environments
-        # is not importable in the test env, so the ImportError branch is used.
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
-        host = DeltaChatAdapter._container_workspace_to_host("/workspace/app.xdc")
-
-        assert host is not None
-        # The resolved host path lives under the sandbox workspace root.
-        expected = os.path.realpath(
-            str(tmp_path / "sandboxes" / "docker" / "default" / "workspace" / "app.xdc")
-        )
-        assert host == expected
-
-    def test_traversal_escape_returns_none(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
-        assert (
-            DeltaChatAdapter._container_workspace_to_host(
-                "/workspace/../../../etc/passwd"
-            )
-            is None
-        )
-        # A .pdf escape is rejected the same way.
-        assert (
-            DeltaChatAdapter._container_workspace_to_host(
-                "/workspace/../../secret/report.pdf"
-            )
-            is None
-        )
-
-    def test_non_workspace_path_returns_none(self, monkeypatch, tmp_path):
-        monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-
-        assert (
-            DeltaChatAdapter._container_workspace_to_host("/home/user/app.xdc") is None
-        )
 
 
 class TestExtractLocalFiles:
@@ -107,7 +63,7 @@ class TestExtractLocalFiles:
         """Regression: Docker /workspace/ paths must still be picked up.
 
         These are container-side and never exist on the host, so they are
-        exempt from the isfile() guard.
+        exempt from the isfile() guard; Hermes translates them at delivery.
         """
         adapter = _make_adapter(platform_config)
         content = "Built it: /workspace/app.xdc done."
@@ -151,6 +107,17 @@ class TestExtractMedia:
 
         assert any(p == "~/app.xdc" for p, _ in media)
 
+    def test_extracts_media_workspace_xdc_verbatim(self, platform_config):
+        """Docker paths pass through untouched; Hermes translates them later."""
+        adapter = _make_adapter(platform_config)
+
+        media, remaining = adapter.extract_media(
+            "Here you go. MEDIA:/workspace/myapp.xdc"
+        )
+
+        assert media == [("/workspace/myapp.xdc", False)]
+        assert "MEDIA:" not in remaining
+
     def test_ignores_media_xdc_inside_code_block(self, platform_config):
         """A MEDIA: tag shown as documentation is not a delivery request."""
         adapter = _make_adapter(platform_config)
@@ -160,3 +127,51 @@ class TestExtractMedia:
 
         assert media == []
         assert "MEDIA:/workspace/myapp.xdc" in remaining
+
+
+class TestDeliveryFiltersNotOverridden:
+    """Regression guard for #44.
+
+    Hermes >= 0.21.5 translates /workspace/ container paths in its own
+    filter_*_delivery_paths. An adapter override that rewrites those paths
+    first (e.g. to a cache copy) hands Hermes a host path it then tries to
+    translate as a container path, logging a "did not resolve" warning for
+    every delivered file. Cron delivery also bypasses adapter overrides, so
+    anything done there would be inconsistent anyway.
+    """
+
+    def test_adapter_uses_base_filters(self):
+        for name in ("filter_media_delivery_paths", "filter_local_delivery_paths"):
+            assert name not in DeltaChatAdapter.__dict__, name
+
+    def test_workspace_paths_reach_base_filter_unchanged(
+        self, platform_config, monkeypatch
+    ):
+        from gateway.platforms.base import BasePlatformAdapter
+
+        seen = {}
+
+        def media(media_files, session_key=""):
+            seen["media"] = (list(media_files), session_key)
+            return []
+
+        def local(file_paths, session_key=""):
+            seen["local"] = (list(file_paths), session_key)
+            return []
+
+        monkeypatch.setattr(
+            BasePlatformAdapter, "filter_media_delivery_paths", staticmethod(media)
+        )
+        monkeypatch.setattr(
+            BasePlatformAdapter, "filter_local_delivery_paths", staticmethod(local)
+        )
+        adapter = _make_adapter(platform_config)
+        key = "agent:main:deltachat:dm:12"
+
+        adapter.filter_media_delivery_paths(
+            [("/workspace/clip.mp4", False)], session_key=key
+        )
+        adapter.filter_local_delivery_paths(["/workspace/app.xdc"], session_key=key)
+
+        assert seen["media"] == ([("/workspace/clip.mp4", False)], key)
+        assert seen["local"] == (["/workspace/app.xdc"], key)

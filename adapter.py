@@ -1376,74 +1376,6 @@ body {{
                 error=str(e),
             )
 
-    # ------------------------------------------------------------------
-    # Container-to-host file path mapping
-    # ------------------------------------------------------------------
-    # The Docker LLM sandbox mounts /workspace inside the container to
-    #   ~/.hermes/sandboxes/docker/default/workspace/   on the host.
-    # When the agent writes output files to /workspace/ and emits MEDIA
-    # directives or bare paths, Hermes's path validator runs on the HOST
-    # and can't find container-local paths.  These overrides remap any
-    # /workspace/<rel> path to the host sandbox path, copy the file to
-    # the Hermes documents cache (a validated safe root), and return the
-    # cache path so the base-class validator accepts it.
-    #
-    # The same pattern works for any output file type (.pdf, .html, .zip,
-    # .xdc, etc.) — just write to /workspace/ in the container.
-    # ------------------------------------------------------------------
-
-    @staticmethod
-    def _container_workspace_to_host(container_path: str) -> Optional[str]:
-        """Map a /workspace/<rel> container path to its host-side sandbox path.
-
-        Returns None when the path is not under /workspace/, or when the
-        resolved target escapes the sandbox workspace root (path traversal).
-        """
-        from pathlib import Path
-
-        p = str(container_path)
-        if not p.startswith("/workspace/"):
-            return None
-        rel = p[len("/workspace/"):]
-        try:
-            from tools.environments.base import get_sandbox_dir
-            sandbox_workspace = get_sandbox_dir() / "docker" / "default" / "workspace"
-        except ImportError:
-            from gateway.config import get_hermes_home
-            sandbox_workspace = Path(get_hermes_home()) / "sandboxes" / "docker" / "default" / "workspace"
-        root = sandbox_workspace.resolve()
-        candidate = (root / rel).resolve()
-        if not candidate.is_relative_to(root):
-            logger.warning("Rejected container path escaping workspace: %s", p)
-            return None
-        return str(candidate)
-
-    def _copy_container_file_to_cache(self, container_path: str) -> Optional[str]:
-        """Copy a /workspace/ container file to the Hermes docs cache.
-
-        Returns the cache path on success, None if the file doesn't exist.
-        Same pattern as _copy_to_hermes_cache for DC audio blobs.
-        """
-        import shutil
-        from pathlib import Path
-        from gateway.config import get_hermes_home
-
-        host_path_str = self._container_workspace_to_host(container_path)
-        if host_path_str is None:
-            return None
-
-        host_path = Path(host_path_str)
-        if not host_path.is_file():
-            logger.warning("Container output file not found on host: %s", host_path)
-            return None
-
-        docs_dir = Path(get_hermes_home()) / "cache" / "documents"
-        docs_dir.mkdir(parents=True, exist_ok=True)
-        dest = docs_dir / host_path.name
-        shutil.copy2(str(host_path), str(dest))
-        logger.info("Copied container output %s → %s", host_path.name, dest)
-        return str(dest)
-
     @staticmethod
     def _mask_for_scan(text: str) -> str:
         """Blank out code blocks / quotes / JSON strings before scanning.
@@ -1495,11 +1427,11 @@ body {{
         """True for a bare .xdc path worth handing to the delivery pipeline.
 
         /workspace/ paths are container-side and never exist on the host, so
-        they are taken on faith and resolved by filter_local_delivery_paths
-        later.  Everything else must actually exist — the base extractor
-        applies the same os.path.isfile() guard, and without it a path merely
-        mentioned in prose is cut from the reply text and pushed at the user
-        as an attachment.
+        they are taken on faith; Hermes's delivery filter translates them to
+        the host sandbox (Hermes >= 0.21.5).  Everything else must actually
+        exist — the base extractor applies the same os.path.isfile() guard,
+        and without it a path merely mentioned in prose is cut from the reply
+        text and pushed at the user as an attachment.
         """
         if path.startswith("/workspace/"):
             return True
@@ -1549,8 +1481,8 @@ body {{
         never picks up bare .xdc paths.  We add them explicitly here for both
         deployment shapes:
           * Docker sandbox container paths like /workspace/app.xdc, which don't
-            exist on the host — filter_local_delivery_paths then maps them to
-            the host sandbox before validation.
+            exist on the host — Hermes's filter_local_delivery_paths then maps
+            them to the host sandbox before validation.
           * Agent-workspace paths on non-Docker deployments (absolute /... or
             home ~/... paths already visible on the host) — these flow
             untouched to the base validator, which enforces the denylist.
@@ -1574,59 +1506,6 @@ body {{
             spans.append(span)
 
         return files, self._delete_spans(remaining, spans)
-
-    @staticmethod
-    def _base_filter_kwargs(base_fn, session_key: str) -> Dict[str, Any]:
-        """Pass session_key to a base filter only if this core accepts it.
-
-        Hermes grew ``session_key: str = ""`` on filter_media_delivery_paths /
-        filter_local_delivery_paths after 0.15.1 and calls the adapter
-        overrides with it as a keyword, so the overrides must accept it
-        unconditionally.  Forwarding it unconditionally is a different matter:
-        against an older base it raises the very TypeError we are fixing, only
-        pointed the other way.  Ask the installed base what it takes.
-        """
-        import inspect
-
-        try:
-            params = inspect.signature(base_fn).parameters
-        except (TypeError, ValueError):
-            return {}
-        return {"session_key": session_key} if "session_key" in params else {}
-
-    def filter_media_delivery_paths(self, media_files, session_key: str = ""):
-        """Remap /workspace/ container paths to host cache before validation."""
-        from gateway.platforms.base import BasePlatformAdapter
-
-        remapped = []
-        for media_path, is_voice in media_files or []:
-            p = str(media_path)
-            if p.startswith("/workspace/"):
-                cached = self._copy_container_file_to_cache(p)
-                if cached:
-                    remapped.append((cached, is_voice))
-                    continue
-                logger.warning("Could not resolve container path for delivery: %s", p)
-            remapped.append((media_path, is_voice))
-        base_fn = BasePlatformAdapter.filter_media_delivery_paths
-        return base_fn(remapped, **self._base_filter_kwargs(base_fn, session_key))
-
-    def filter_local_delivery_paths(self, file_paths, session_key: str = ""):
-        """Remap /workspace/ container paths to host cache before validation."""
-        from gateway.platforms.base import BasePlatformAdapter
-
-        remapped = []
-        for file_path in file_paths or []:
-            p = str(file_path)
-            if p.startswith("/workspace/"):
-                cached = self._copy_container_file_to_cache(p)
-                if cached:
-                    remapped.append(cached)
-                    continue
-                logger.warning("Could not resolve container path for delivery: %s", p)
-            remapped.append(file_path)
-        base_fn = BasePlatformAdapter.filter_local_delivery_paths
-        return base_fn(remapped, **self._base_filter_kwargs(base_fn, session_key))
 
     def _rpc_server_exit_code(self) -> Optional[int]:
         """Exit code of the deltachat-rpc-server subprocess, or None if alive.
