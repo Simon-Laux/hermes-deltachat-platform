@@ -11,6 +11,7 @@ import random
 import re
 import secrets
 import sys
+import uuid
 import asyncio
 import logging
 from typing import Optional, Dict, Any, List
@@ -665,30 +666,48 @@ class DeltaChatAdapter(BasePlatformAdapter):
         an approved contact 10 can now be a stranger, inheriting the access and
         the conversation history. So the same random ID is kept in the DC
         config and in a file next to (not inside) the accounts dir; on mismatch
-        we stop instead of guessing.
+        we stop instead of guessing. The file is a dotfile so that
+        `rm -rf deltachat*` style resets can't take it along with the database.
 
         Neither side having an ID is a fresh install *or* an upgrade from
         before this check: both just adopt a new one, nothing to verify against.
+        With self.account_id None (no DC account yet) only a mismatch is
+        detected, so that headless onboarding doesn't create an account first.
         """
-        marker = os.path.join(os.path.dirname(self._get_dc_config_dir()),
-                              "deltachat-platform.db-id")
-        dc_id = await self.rpc.get_config(self.account_id, _DB_ID_KEY) or None
+        marker = os.path.join(os.path.dirname(self._get_dc_config_dir()), ".deltachat-db-id")
+        dc_id = None
+        if self.account_id is not None:
+            dc_id = await self.rpc.get_config(self.account_id, _DB_ID_KEY) or None
         try:
-            with open(marker) as f:
-                hermes_id = f.read().strip() or None
-        except FileNotFoundError:
-            hermes_id = None
-
-        if hermes_id is None:
-            if dc_id is None:
-                dc_id = secrets.token_hex(16)
-                await self.rpc.set_config(self.account_id, _DB_ID_KEY, dc_id)
-                self._warn_if_already_paired()
-            # else: Hermes' state was wiped while DC's survived — nothing left
-            # that could point at the wrong contact, so adopt DC's ID.
-            with open(marker, "w") as f:
-                f.write(dc_id + "\n")
-            return True
+            try:
+                with open(marker) as f:
+                    hermes_id = f.read().strip() or None
+            except FileNotFoundError:
+                hermes_id = None
+            if hermes_id is None:
+                if self.account_id is None:
+                    return True
+                if dc_id is None:
+                    # DC first: dying before the file is written leaves the
+                    # adoptable state below, never a refusing one.
+                    dc_id = str(uuid.uuid4())
+                    await self.rpc.set_config(self.account_id, _DB_ID_KEY, dc_id)
+                    self._warn_if_already_paired()
+                # else: only the marker is gone (deleted by hand, as the
+                # recovery below says) — adopt the database's ID.
+                tmp = marker + ".tmp"
+                with open(tmp, "w") as f:
+                    f.write(dc_id + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, marker)
+                return True
+        except OSError as e:
+            message = f"Cannot read or write the Delta Chat database marker {marker}: {e}"
+            logger.error(message)
+            # Not retryable: needs the operator to fix permissions or the disk.
+            self._set_fatal_error("deltachat_db_marker_io", message, retryable=False)
+            return False
 
         if dc_id == hermes_id:
             return True
@@ -698,12 +717,15 @@ class DeltaChatAdapter(BasePlatformAdapter):
             f"(ID {dc_id or 'missing'} in the database, {hermes_id} in {marker}). "
             "It was probably recreated, so its contact and chat IDs now mean "
             "different people. Refusing to start: Hermes' pairing approvals, "
-            "sessions and DELTACHAT_HOME_CHANNEL would apply to the wrong "
-            "contacts. To start over on this database, revoke the "
-            "deltachat-platform approvals (`hermes pairing list`, `hermes "
-            "pairing revoke deltachat-platform <id>`), delete its sessions "
-            "(`hermes sessions list --source deltachat-platform`), unset "
-            f"DELTACHAT_HOME_CHANNEL, then delete {marker} and restart."
+            "sessions, DELTACHAT_HOME_CHANNEL and cron delivery targets would "
+            "apply to the wrong contacts. To start over on this database "
+            "(add `-p <profile>` to the hermes commands if this isn't the "
+            "default profile): revoke the deltachat-platform approvals "
+            "(`hermes pairing list`, `hermes pairing revoke deltachat-platform "
+            "<id>`) and remove Delta Chat IDs from GATEWAY_ALLOWED_USERS; delete "
+            "its sessions (`hermes sessions prune --source deltachat-platform`); "
+            "unset DELTACHAT_HOME_CHANNEL and fix cron jobs that deliver to "
+            f"Delta Chat; then delete {marker} and restart."
         )
         logger.error(message)
         # Not retryable: a reconnect would find the same mismatch.
@@ -919,6 +941,10 @@ class DeltaChatAdapter(BasePlatformAdapter):
 
             # Get or create account - use first available
             accounts = await self.rpc.get_all_accounts()
+            # A lost database must be refused before onboarding creates a new one.
+            if not accounts and not await self._check_db_id():
+                self._cleanup()
+                return False
             onboarding = _headless_onboarding()
             if accounts:
                 self.account_id = accounts[0]["id"]
