@@ -16,6 +16,7 @@ import fractions
 import json
 import logging
 import os
+import re
 import sys
 import threading
 import time
@@ -130,10 +131,17 @@ _DEFAULT_CALL_PROMPT = (
     "subagent (it runs on the more capable default model) and then give a brief "
     "spoken summary of the result — do not attempt heavy work inline, especially "
     "since this call may be running on a smaller, faster model. "
-    "When the user says goodbye or asks to end the call, end it gracefully: "
-    "say goodbye, then call dc_end_call to hang up. The tool waits for your "
-    "goodbye to finish playing before disconnecting."
+    "When the user says goodbye (bye, ciao, tschüss, that's all) or asks "
+    "to end the call, say a short goodbye and end your reply with [[hangup]] — "
+    "the call disconnects once your goodbye has finished playing. Do not ask "
+    "whether they want to hang up; just do it."
 )
+
+# why a text marker and not only the dc_end_call tool: Hermes ≥ 0.21.5 hides
+# plugin tools behind tool_search/tool_describe/tool_call, so hanging up took
+# three correct tool steps and a call model routinely missed a plain "bye".
+# dc_end_call stays registered for explicit use.
+_HANGUP_MARKER_RE = re.compile(r"\[\[\s*hang\s*-?\s*up\s*\]\]", re.IGNORECASE)
 _CALL_PROMPT = os.getenv("DELTACHAT_CALL_PROMPT", _DEFAULT_CALL_PROMPT).strip()
 
 # Isolate the call conversation in its own session so spoken turns don't mix
@@ -144,6 +152,20 @@ _CALL_PROMPT = os.getenv("DELTACHAT_CALL_PROMPT", _DEFAULT_CALL_PROMPT).strip()
 # into the text chat) with DELTACHAT_CALL_SHARED_HISTORY=true.
 _CALL_SHARED_HISTORY = _env_flag("DELTACHAT_CALL_SHARED_HISTORY")
 _CALL_THREAD_ID = None if _CALL_SHARED_HISTORY else "call"
+
+
+def _call_thread_id(msg_id) -> Optional[str]:
+    """Session thread for one call: ``call-<msg_id>``, or None in shared mode.
+
+    why per call, not one "call" thread: that session outlived every call and
+    grew to 200+ messages; the model copied its old goodbyes (no [[hangup]],
+    emojis) over the call prompt at the end of a 26k system prompt, and each
+    turn paid for the whole backlog. The text chat still gets an end-of-call note.
+    """
+    if _CALL_THREAD_ID is None:
+        return None
+    return f"{_CALL_THREAD_ID}-{msg_id}"
+
 
 # message_id prefix of the injected "call ended" notes. Hermes anchors a reply on
 # the id of the message it answers (base.py `_reply_anchor_for_event`), so a reply
@@ -1094,7 +1116,7 @@ class CallManager:
             chat_type="dm",
             user_id=caller_id,
             user_name=caller_name,
-            thread_id=_CALL_THREAD_ID,
+            thread_id=_call_thread_id(msg_id),
         )
 
         event = MessageEvent(
@@ -1289,7 +1311,7 @@ class CallManager:
             chat_type="dm",
             user_id=caller_id,
             user_name=caller_name,
-            thread_id=_CALL_THREAD_ID,   # isolate call session from text DM (unless shared)
+            thread_id=_call_thread_id(msg_id),   # own session per call (unless shared)
         )
         # MessageType.TEXT since we already did STT — Hermes won't re-transcribe.
         # channel_prompt is an ephemeral per-message system prompt (applied at
@@ -1356,7 +1378,17 @@ class CallManager:
         session.resp_start_frames = track.played_count
         session.tts_checkpoints = []
 
-        sentences = _split_sentences(text) or [text]
+        # Spoken-goodbye hangup: the marker rides in the reply text, so ending a
+        # call needs no tool call. Same drain path as dc_end_call (finally block
+        # below), and a barge-in during the goodbye still cancels it.
+        text, n_markers = _HANGUP_MARKER_RE.subn("", text)
+        text = text.strip()
+        if n_markers:
+            session.last_response_text = text
+            session.hangup_pending = True
+            logger.info("play_response: hangup marker — hanging up after this reply")
+
+        sentences = (_split_sentences(text) or [text]) if text else []
         t0 = time.monotonic()
         first_audio_s = None
         text_cursor = 0   # real offset into `text`, tracked for barge-in accounting
@@ -1505,9 +1537,10 @@ class CallManager:
         logger.info("Call session %s torn down", msg_id)
         # Tell the AI the call is over so it doesn't think it's still connected.
         if notify_ai:
-            asyncio.ensure_future(self._note_call_ended(chat_id, caller_id, caller_name))
+            asyncio.ensure_future(self._note_call_ended(chat_id, caller_id, caller_name, msg_id))
 
-    async def _note_call_ended(self, chat_id: str, caller_id: str, caller_name: str) -> None:
+    async def _note_call_ended(self, chat_id: str, caller_id: str, caller_name: str,
+                               msg_id: int) -> None:
         """Inject a 'call ended' turn into the call session so the AI knows the
         voice call is over. The AI's reply to this note is suppressed in send()
         (we don't want to text the user) — it's only to update conversation state.
@@ -1518,7 +1551,7 @@ class CallManager:
         source = self._adapter.build_source(
             chat_id=chat_id, chat_name=f"Call {chat_id}", chat_type="dm",
             user_id=caller_id or "user", user_name=caller_name or "User",
-            thread_id=_CALL_THREAD_ID,
+            thread_id=_call_thread_id(msg_id),
         )
         event = MessageEvent(
             text="[The voice call has ended — you are no longer connected to the user "
@@ -1573,7 +1606,7 @@ class CallManager:
         session, so every reply for the chat counts as the call conversation."""
         if _CALL_THREAD_ID is None:
             return True
-        return str(thread_id or "") == str(_CALL_THREAD_ID)
+        return str(thread_id or "").startswith(f"{_CALL_THREAD_ID}-")
 
     def consume_call_ack(self, chat_id: str) -> bool:
         """True if the next spoken reply for chat_id should be dropped — the
