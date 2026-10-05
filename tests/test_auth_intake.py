@@ -73,6 +73,41 @@ async def test_group_with_an_approved_member_stays(platform_config):
 
 
 @pytest.mark.asyncio
+async def test_already_removed_still_deletes_the_chat(platform_config):
+    a = _adapter(platform_config)
+    _group(a, [10], approved=())
+    a.rpc.leave_group.side_effect = RuntimeError("not a member")
+    assert not await a._intake_allows({"id": 2, "from_id": 10}, 5)
+    a.rpc.delete_chat.assert_awaited_once_with(1, 5)
+
+
+@pytest.mark.asyncio
+async def test_group_with_only_us_stays(platform_config):
+    a = _adapter(platform_config)
+    _group(a, [], approved=())
+    assert await a._intake_allows({"id": 2, "from_id": 10}, 5)
+    a.rpc.leave_group.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_one_unknown_verdict_among_rejections_stays(platform_config):
+    a = _adapter(platform_config)
+    _group(a, [10, 11], approved=())
+    a._is_sender_authorized.side_effect = lambda uid, ct, cid: None if uid == "11" else False
+    assert await a._intake_allows({"id": 2, "from_id": 10}, 5)
+    a.rpc.leave_group.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_non_group_chat_types_are_never_left(platform_config):
+    a = _adapter(platform_config, verdict=False)
+    a.rpc.get_basic_chat_info.return_value = {"chat_type": "InBroadcast", "name": "b"}
+    a.rpc.get_chat_contacts.return_value = [1, 10]
+    assert await a._intake_allows({"id": 2, "from_id": 10}, 5)
+    a.rpc.leave_group.assert_not_awaited()
+
+
+@pytest.mark.asyncio
 async def test_unknown_verdict_stays(platform_config):
     a = _adapter(platform_config)
     _group(a, [10, 11], approved=())

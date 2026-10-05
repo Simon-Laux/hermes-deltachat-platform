@@ -583,11 +583,13 @@ class DeltaChatAdapter(BasePlatformAdapter):
             return False
         if await self._group_has_no_approved_member(chat_id):
             logger.info("Leaving group %s: none of its members is approved", chat_id)
-            try:
-                await self.rpc.leave_group(self.account_id, int(chat_id))
-                await self.rpc.delete_chat(self.account_id, int(chat_id))
-            except Exception as e:
-                logger.warning("Could not leave group %s: %s", chat_id, e)
+            # Separate steps: if we were removed already, leaving fails but
+            # the chat should still go.
+            for step in (self.rpc.leave_group, self.rpc.delete_chat):
+                try:
+                    await step(self.account_id, int(chat_id))
+                except Exception as e:
+                    logger.warning("Could not leave group %s: %s", chat_id, e)
             return False
         return True
 

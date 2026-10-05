@@ -635,7 +635,9 @@ class CallManager:
         # Hermes drops everything an unauthorized caller says anyway, so don't
         # answer and load STT for them. None (no check wired) is not a verdict.
         if self._adapter._is_sender_authorized(caller_id, "dm", chat_id) is False:
-            logger.info("Declining call %s from unauthorized contact %s", msg_id, caller_id)
+            # caller_id "caller": the lookup above failed, so nobody to authorize.
+            logger.info("Declining call %s from unauthorized contact %s", msg_id,
+                        caller_id if caller_id != "caller" else "(caller lookup failed)")
             with contextlib.suppress(Exception):
                 await self._adapter.rpc.end_call(self._adapter.account_id, msg_id)
             return
