@@ -26,6 +26,22 @@ repairs and doc typo fixes are left out; see the git log for those.
   gate) applies to them for the first time. In particular, Hermes now keeps a
   separate conversation per group member by default; set
   `group_sessions_per_user: false` for one shared conversation per group.
+- **The adapter refuses to start on a Delta Chat database that isn't Hermes'
+  own.** Hermes keys pairing approvals, sessions, `DELTACHAT_HOME_CHANNEL` and
+  cron targets on Delta Chat contact and chat IDs, which are only meaningful
+  inside one database. A recreated database could hand an approved contact's ID
+  to a stranger. The two are now paired by an ID stored in the account
+  (`ui.hermes.db_id`) and in `<HERMES_HOME>/.deltachat-db-id`. On a mismatch the
+  adapter stops with steps to clear the stale state. Existing installs adopt
+  their current database on first start. Restoring an *older backup* of the
+  same database is not detected (see the README).
+- **Senders without a key are dropped, unread.** Identity in Delta Chat is the
+  key, so unencrypted mail is ignored before any read receipt.
+- **The bot leaves groups in which Hermes approves no member.** Existing
+  installs: such a group is left on its next message. Someone who wants to add
+  the bot should message it directly first and get approved.
+- **Calls from contacts Hermes hasn't approved are declined** instead of
+  answered.
 
 ### New
 
@@ -59,6 +75,11 @@ repairs and doc typo fixes are left out; see the git log for those.
 - **Voice calls hang up on goodbye.** The bot ends its goodbye with a
   `[[hangup]]` marker, so the goodbye plays out and then the call ends. If you
   set a custom `DELTACHAT_CALL_PROMPT`, it must keep this instruction.
+- **Approval prompts can be answered with reactions.** React 👍 to approve once
+  or 👎 to deny; `/approve` and `/deny` still work. A reaction only answers the
+  prompt it was given to, and only from someone who could have typed
+  `/approve` in that chat. Prompts arriving during a voice call are not
+  delivered.
 
 ### Fixed
 
@@ -95,6 +116,17 @@ repairs and doc typo fixes are left out; see the git log for those.
   run with `HERMES_MEDIA_DELIVERY_STRICT=1`, add the sandbox directory to
   `HERMES_MEDIA_ALLOW_DIRS`, or files older than about 10 minutes are refused
   (see docs/troubleshooting.md).
+- **`DELTACHAT_CALL_MODEL` was silently ignored on Hermes 0.21.5**, so calls
+  ran on the default model. It applies again, and if the gateway can't be
+  reached the adapter now logs a warning instead of a debug line. If your call
+  model doesn't support reasoning, see docs/voice-calls.md: a global
+  `reasoning_effort` makes it reject every call turn.
+- **Clearer formatting instructions for the agent.** It is told not to use
+  markdown, to keep replies under 40 lines (longer ones get cut into a
+  "show full message" HTML part), and to send long output as a PDF or webxdc
+  app instead.
+- **The webxdc skill's snippets work outside Docker.** They wrote to
+  `/workspace/` literally and now use the working directory (#3).
 
 ### Security hardening of the RPC tools
 
@@ -118,10 +150,18 @@ repairs and doc typo fixes are left out; see the git log for those.
   token for.
 - `dc_rpc_spec` / `dc_chat_rpc_spec` no longer list the refused methods. They
   do not apply the allowlist.
+- **File paths passed through `dc_safe_rpc_call` are validated** (#32).
+  `send_msg`, `misc_send_msg`, `misc_set_draft`, `set_chat_profile_image` and
+  `send_sticker` used to hand any local path to core, so a steered call could
+  send `~/.hermes/.env` or the account database. Paths now go through Hermes's
+  delivery policy. On top of that, every Hermes profile's Delta Chat folder and
+  `logs/` are refused, compared by inode so a differently spelled path can't
+  slip past. Unknown path-like parameters refuse the call.
 
 ### Known gaps
 
-- `send_msg`, `misc_send_msg` and `misc_set_draft` take a `file` path that
-  bypasses delivery-path filtering (#32).
 - `require_mention` applies to all groups; individual groups cannot be
   exempted yet.
+- A file in the Docker sandbox can be swapped for a symlink between Hermes's
+  path check and Delta Chat core reading it. The fix belongs in Hermes (see
+  docs/upstreaming-to-hermes.md).
