@@ -92,7 +92,7 @@ When converting an existing artifact or HTML file:
 
 ## Step 3: Package it
 
-**Where to write files:** Write all outputs (source files, the `.xdc`, and any build artifacts) to your **current working directory** — run `pwd` to find it. In the Docker sandbox that is `/workspace/`; on other deployments it is wherever the agent runs (`$PWD`). Never write to `/tmp/` — on Docker it is container-local tmpfs the host cannot read. The examples below use `/workspace` as a concrete stand-in; substitute your actual working directory.
+**Where to write files:** Write all outputs (source files, the `.xdc`, and any build artifacts) to your **current working directory** — run `pwd` to find it. In the Docker sandbox that is `/workspace/`; on other deployments it is wherever the agent runs (`$PWD`). Never write to `/tmp/` — on Docker it is container-local tmpfs the host cannot read. The examples below use paths **relative to the working directory**, so they run unchanged in Docker and elsewhere. Never assume `/workspace/` exists — outside the Docker sandbox you usually cannot create it.
 
 ### Create manifest.toml
 
@@ -107,7 +107,8 @@ Optionally add `source_code_url = "https://..."` if the user provides one.
 If the user supplies an icon, use it. Otherwise create a small SVG inline — icons are optional but improve the app's appearance in chat:
 
 ```bash
-cat > /workspace/myapp/icon.svg << 'EOF'
+mkdir -p myapp
+cat > myapp/icon.svg << 'EOF'
 <svg xmlns="http://www.w3.org/2000/svg" width="128" height="128">
   <rect width="128" height="128" rx="20" fill="#4ECDC4"/>
   <text x="64" y="84" font-size="64" font-family="sans-serif" text-anchor="middle" fill="white">AB</text>
@@ -125,17 +126,17 @@ A `.xdc` file is a ZIP archive. Use Python's `zipfile` — it is always availabl
 # Single-file app
 python3 -c "
 import zipfile
-with zipfile.ZipFile('/workspace/myapp.xdc', 'w', zipfile.ZIP_DEFLATED) as zf:
-    zf.write('/workspace/myapp/index.html', 'index.html')
-    zf.write('/workspace/myapp/manifest.toml', 'manifest.toml')
-    zf.write('/workspace/myapp/icon.svg', 'icon.svg')
+with zipfile.ZipFile('myapp.xdc', 'w', zipfile.ZIP_DEFLATED) as zf:
+    zf.write('myapp/index.html', 'index.html')
+    zf.write('myapp/manifest.toml', 'manifest.toml')
+    zf.write('myapp/icon.svg', 'icon.svg')
 "
 
 # Multi-file app — walk the entire app directory
 python3 -c "
 import zipfile, os
-base = '/workspace/myapp'
-with zipfile.ZipFile('/workspace/myapp.xdc', 'w', zipfile.ZIP_DEFLATED) as zf:
+base = 'myapp'
+with zipfile.ZipFile('myapp.xdc', 'w', zipfile.ZIP_DEFLATED) as zf:
     for root, dirs, files in os.walk(base):
         for f in files:
             path = os.path.join(root, f)
@@ -146,8 +147,8 @@ with zipfile.ZipFile('/workspace/myapp.xdc', 'w', zipfile.ZIP_DEFLATED) as zf:
 npm run build   # produces dist/index.html, dist/assets/, etc.
 python3 -c "
 import zipfile, os
-base = '/workspace/myapp/dist'
-with zipfile.ZipFile('/workspace/myapp.xdc', 'w', zipfile.ZIP_DEFLATED) as zf:
+base = 'myapp/dist'
+with zipfile.ZipFile('myapp.xdc', 'w', zipfile.ZIP_DEFLATED) as zf:
     for root, dirs, files in os.walk(base):
         for f in files:
             path = os.path.join(root, f)
@@ -155,7 +156,7 @@ with zipfile.ZipFile('/workspace/myapp.xdc', 'w', zipfile.ZIP_DEFLATED) as zf:
 "
 ```
 
-`index.html` MUST be at the root of the archive (arcname `'index.html'`, not a subdirectory path). All output files must go to your current working directory (`/workspace/` in the Docker sandbox, `$PWD` otherwise) — **not** `/tmp/`. On Docker the `/tmp/` directory is container-local tmpfs and the host cannot read it.
+`index.html` MUST be at the root of the archive (arcname `'index.html'`, not a subdirectory path). All output files must go to your current working directory — **not** `/tmp/`. On Docker the `/tmp/` directory is container-local tmpfs and the host cannot read it.
 
 **Always use ZIP format** — `.xdc` is a ZIP file. Never use tar, tar.gz, or any other archive format; webxdc clients will not open them.
 
@@ -166,7 +167,7 @@ Always verify the archive before delivering. This catches wrong arcnames, missin
 ```bash
 python3 -c "
 import zipfile, sys
-path = '/workspace/myapp.xdc'
+path = 'myapp.xdc'
 with zipfile.ZipFile(path) as zf:
     names = zf.namelist()
     print('Files in archive:', names)
@@ -185,16 +186,16 @@ Aim for under 1 MB. Under 10 MB is the practical ceiling — beyond that it beco
 
 ### Deliver the file
 
-Write the `.xdc` to your working directory, then emit a MEDIA directive referencing it by **absolute path** — the adapter delivers it via `send_document`, exactly like Telegram does for any other file. (In the Docker sandbox the working directory is `/workspace/`, so the absolute path there is `/workspace/myapp.xdc`.) DC core auto-detects `.xdc` and delivers it as a webxdc mini app.
+Write the `.xdc` to your working directory, then emit a MEDIA directive referencing it by **absolute path** — the adapter delivers it via `send_document`, exactly like Telegram does for any other file. This is the one place a relative path will not do; get the absolute one with `echo "$PWD/myapp.xdc"` (in the Docker sandbox that resolves to `/workspace/myapp.xdc`). DC core auto-detects `.xdc` and delivers it as a webxdc mini app.
 
 ```
 Here's your mini app! Tap Start to launch it.
-MEDIA:/workspace/myapp.xdc
+MEDIA:<absolute path of your working directory>/myapp.xdc
 ```
 
 The same works for any other output file type (use its absolute path):
 ```
-Here is your report. MEDIA:/workspace/report.pdf
+Here is your report. MEDIA:<absolute path of your working directory>/report.pdf
 ```
 
 **For Level 0 apps, you're done here.** The sections below are only for apps that need shared state.
