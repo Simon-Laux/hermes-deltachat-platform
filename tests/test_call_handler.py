@@ -361,3 +361,23 @@ class TestDecodeTts:
         total = sum(f.samples for f in frames)
         expected = seconds * ch._SAMPLE_RATE        # 48 kHz target
         assert abs(total - expected) < ch.HermesAudioTrack._FRAME_SAMPLES * 2
+
+
+class TestPerCallSession:
+    """Each call gets its own session thread, so old calls never pile up."""
+
+    def test_thread_id_is_per_call(self, monkeypatch):
+        monkeypatch.setattr(ch, "_CALL_THREAD_ID", "call")
+        assert ch._call_thread_id(1780) == "call-1780"
+        assert ch._call_thread_id(1781) != ch._call_thread_id(1780)
+
+    def test_replies_from_any_call_thread_are_spoken(self, monkeypatch):
+        monkeypatch.setattr(ch, "_CALL_THREAD_ID", "call")
+        assert ch.CallManager.is_call_thread("call-1780") is True
+        assert ch.CallManager.is_call_thread(None) is False      # text chat
+        assert ch.CallManager.is_call_thread("") is False
+
+    def test_shared_history_mode_has_no_call_thread(self, monkeypatch):
+        monkeypatch.setattr(ch, "_CALL_THREAD_ID", None)
+        assert ch._call_thread_id(1780) is None
+        assert ch.CallManager.is_call_thread(None) is True

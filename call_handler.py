@@ -153,6 +153,20 @@ _CALL_PROMPT = os.getenv("DELTACHAT_CALL_PROMPT", _DEFAULT_CALL_PROMPT).strip()
 _CALL_SHARED_HISTORY = _env_flag("DELTACHAT_CALL_SHARED_HISTORY")
 _CALL_THREAD_ID = None if _CALL_SHARED_HISTORY else "call"
 
+
+def _call_thread_id(msg_id) -> Optional[str]:
+    """Session thread for one call: ``call-<msg_id>``, or None in shared mode.
+
+    why per call, not one "call" thread: that session outlived every call and
+    grew to 200+ messages; the model copied its old goodbyes (no [[hangup]],
+    emojis) over the call prompt at the end of a 26k system prompt, and each
+    turn paid for the whole backlog. The text chat still gets an end-of-call note.
+    """
+    if _CALL_THREAD_ID is None:
+        return None
+    return f"{_CALL_THREAD_ID}-{msg_id}"
+
+
 # message_id prefix of the injected "call ended" notes. Hermes anchors a reply on
 # the id of the message it answers (base.py `_reply_anchor_for_event`), so a reply
 # carrying this prefix is the AI acknowledging the note — never meant for the user.
@@ -1102,7 +1116,7 @@ class CallManager:
             chat_type="dm",
             user_id=caller_id,
             user_name=caller_name,
-            thread_id=_CALL_THREAD_ID,
+            thread_id=_call_thread_id(msg_id),
         )
 
         event = MessageEvent(
@@ -1297,7 +1311,7 @@ class CallManager:
             chat_type="dm",
             user_id=caller_id,
             user_name=caller_name,
-            thread_id=_CALL_THREAD_ID,   # isolate call session from text DM (unless shared)
+            thread_id=_call_thread_id(msg_id),   # own session per call (unless shared)
         )
         # MessageType.TEXT since we already did STT — Hermes won't re-transcribe.
         # channel_prompt is an ephemeral per-message system prompt (applied at
@@ -1523,9 +1537,10 @@ class CallManager:
         logger.info("Call session %s torn down", msg_id)
         # Tell the AI the call is over so it doesn't think it's still connected.
         if notify_ai:
-            asyncio.ensure_future(self._note_call_ended(chat_id, caller_id, caller_name))
+            asyncio.ensure_future(self._note_call_ended(chat_id, caller_id, caller_name, msg_id))
 
-    async def _note_call_ended(self, chat_id: str, caller_id: str, caller_name: str) -> None:
+    async def _note_call_ended(self, chat_id: str, caller_id: str, caller_name: str,
+                               msg_id: int) -> None:
         """Inject a 'call ended' turn into the call session so the AI knows the
         voice call is over. The AI's reply to this note is suppressed in send()
         (we don't want to text the user) — it's only to update conversation state.
@@ -1536,7 +1551,7 @@ class CallManager:
         source = self._adapter.build_source(
             chat_id=chat_id, chat_name=f"Call {chat_id}", chat_type="dm",
             user_id=caller_id or "user", user_name=caller_name or "User",
-            thread_id=_CALL_THREAD_ID,
+            thread_id=_call_thread_id(msg_id),
         )
         event = MessageEvent(
             text="[The voice call has ended — you are no longer connected to the user "
@@ -1591,7 +1606,7 @@ class CallManager:
         session, so every reply for the chat counts as the call conversation."""
         if _CALL_THREAD_ID is None:
             return True
-        return str(thread_id or "") == str(_CALL_THREAD_ID)
+        return str(thread_id or "").startswith(f"{_CALL_THREAD_ID}-")
 
     def consume_call_ack(self, chat_id: str) -> bool:
         """True if the next spoken reply for chat_id should be dropped — the

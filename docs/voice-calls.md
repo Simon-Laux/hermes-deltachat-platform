@@ -125,7 +125,7 @@ run in a **separate session** by default (a distinct `thread_id`).
 
 | Variable | Default | Description |
 |---|---|---|
-| `DELTACHAT_CALL_SHARED_HISTORY` | off | When `true`, calls share one session with the text DM — the bot remembers across call↔text, at the cost of mixing spoken transcripts into the text history. When off (default), calls are isolated. |
+| `DELTACHAT_CALL_SHARED_HISTORY` | off | When `true`, calls share one session with the text DM — the bot remembers across call↔text, at the cost of mixing spoken transcripts into the text history. When off (default), every call gets its own fresh session (`call-<msg_id>`), so old calls never pile up in the context. |
 
 Note: the `channel_prompt` itself is **never** persisted to history in either
 mode — only the transcript and the AI's spoken reply are stored (in whichever
