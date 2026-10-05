@@ -60,6 +60,9 @@ MAX_TESTED_DC_VERSION = "2.60.0"
 # Contact id core uses for this account itself (DC_CONTACT_ID_SELF).
 DC_CONTACT_ID_SELF = 1
 
+# DC config key pairing the database with Hermes' state; see _check_db_id.
+_DB_ID_KEY = "ui.hermes.db_id"
+
 # ---------------------------------------------------------------------------
 # Headless onboarding
 # ---------------------------------------------------------------------------
@@ -653,6 +656,75 @@ class DeltaChatAdapter(BasePlatformAdapter):
             os.makedirs(self._dc_config_dir, exist_ok=True)
         return self._dc_config_dir
 
+    async def _check_db_id(self) -> bool:
+        """Refuse to run on a Delta Chat database Hermes' state doesn't belong to.
+
+        Hermes keys pairing approvals, sessions, the home channel and cron
+        targets on DC contact and chat IDs, which are local to one DC database.
+        If that database is lost and recreated, the IDs are handed out again —
+        an approved contact 10 can now be a stranger, inheriting the access and
+        the conversation history. So the same random ID is kept in the DC
+        config and in a file next to (not inside) the accounts dir; on mismatch
+        we stop instead of guessing.
+
+        Neither side having an ID is a fresh install *or* an upgrade from
+        before this check: both just adopt a new one, nothing to verify against.
+        """
+        marker = os.path.join(os.path.dirname(self._get_dc_config_dir()),
+                              "deltachat-platform.db-id")
+        dc_id = await self.rpc.get_config(self.account_id, _DB_ID_KEY) or None
+        try:
+            with open(marker) as f:
+                hermes_id = f.read().strip() or None
+        except FileNotFoundError:
+            hermes_id = None
+
+        if hermes_id is None:
+            if dc_id is None:
+                dc_id = secrets.token_hex(16)
+                await self.rpc.set_config(self.account_id, _DB_ID_KEY, dc_id)
+                self._warn_if_already_paired()
+            # else: Hermes' state was wiped while DC's survived — nothing left
+            # that could point at the wrong contact, so adopt DC's ID.
+            with open(marker, "w") as f:
+                f.write(dc_id + "\n")
+            return True
+
+        if dc_id == hermes_id:
+            return True
+
+        message = (
+            f"The Delta Chat database does not belong to this Hermes state "
+            f"(ID {dc_id or 'missing'} in the database, {hermes_id} in {marker}). "
+            "It was probably recreated, so its contact and chat IDs now mean "
+            "different people. Refusing to start: Hermes' pairing approvals, "
+            "sessions and DELTACHAT_HOME_CHANNEL would apply to the wrong "
+            "contacts. To start over on this database, revoke the "
+            "deltachat-platform approvals (`hermes pairing list`, `hermes "
+            "pairing revoke deltachat-platform <id>`), delete its sessions "
+            "(`hermes sessions list --source deltachat-platform`), unset "
+            f"DELTACHAT_HOME_CHANNEL, then delete {marker} and restart."
+        )
+        logger.error(message)
+        # Not retryable: a reconnect would find the same mismatch.
+        self._set_fatal_error("deltachat_db_mismatch", message, retryable=False)
+        return False
+
+    @staticmethod
+    def _warn_if_already_paired() -> None:
+        """On upgrade, note that existing approvals were trusted unverified."""
+        try:
+            from gateway.pairing import PairingStore
+            approved = PairingStore().list_approved("deltachat-platform")
+        except Exception:
+            return
+        if approved:
+            logger.warning(
+                "Delta Chat database ID created with %d pairing approval(s) "
+                "already present. They are assumed to belong to this database; "
+                "if it was recreated earlier, check `hermes pairing list`.",
+                len(approved))
+
     def _get_rpc_server_path(self) -> str:
         """Get deltachat-rpc-server binary path.
 
@@ -880,6 +952,11 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 if not await self._configure_transports(onboarding):
                     self._cleanup()
                     return False
+
+            # Before start_io: no message may be handled on a mismatched DB.
+            if not await self._check_db_id():
+                self._cleanup()
+                return False
 
             # Enable bot mode: auto-accept contact requests
             try:
