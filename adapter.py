@@ -702,7 +702,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
                     os.fsync(f.fileno())
                 os.replace(tmp, marker)
                 return True
-        except OSError as e:
+        except (OSError, UnicodeDecodeError) as e:
             message = f"Cannot read or write the Delta Chat database marker {marker}: {e}"
             logger.error(message)
             # Not retryable: needs the operator to fix permissions or the disk.
@@ -723,7 +723,10 @@ class DeltaChatAdapter(BasePlatformAdapter):
             "default profile): revoke the deltachat-platform approvals "
             "(`hermes pairing list`, `hermes pairing revoke deltachat-platform "
             "<id>`) and remove Delta Chat IDs from GATEWAY_ALLOWED_USERS; delete "
-            "its sessions (`hermes sessions prune --source deltachat-platform`); "
+            "its sessions — prune only removes ended ones, so also delete each "
+            "open one (`hermes sessions prune --source deltachat-platform "
+            "--include-pinned --include-archived`, then `hermes sessions list "
+            "--source deltachat-platform` and `hermes sessions delete <id>`); "
             "unset DELTACHAT_HOME_CHANNEL and fix cron jobs that deliver to "
             f"Delta Chat; then delete {marker} and restart."
         )
@@ -962,6 +965,12 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 self._cleanup()
                 return False
 
+            # Before start_io (no message may be handled on a mismatched DB) and
+            # before onboarding configures a transport on an empty account.
+            if not await self._check_db_id():
+                self._cleanup()
+                return False
+
             # add_account() persists an account row before any transport is
             # attached, so a bootstrap that fails half way leaves an unusable
             # account behind that get_all_accounts() hands back on the next
@@ -978,11 +987,6 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 if not await self._configure_transports(onboarding):
                     self._cleanup()
                     return False
-
-            # Before start_io: no message may be handled on a mismatched DB.
-            if not await self._check_db_id():
-                self._cleanup()
-                return False
 
             # Enable bot mode: auto-accept contact requests
             try:

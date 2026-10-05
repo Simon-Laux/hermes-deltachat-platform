@@ -112,11 +112,12 @@ async def test_upgrade_with_existing_approvals_warns(adapter, monkeypatch, caplo
 @pytest.mark.asyncio
 async def test_connect_stops_before_start_io_on_mismatch(adapter, marker, monkeypatch):
     """No message may be handled on a database that isn't ours."""
+    monkeypatch.delenv("DC_ACCOUNTS_PATH", raising=False)  # connect() sets it
     marker.write_text("abc\n")
     adapter.dc_config[_DB_ID_KEY] = "other"
     rpc = adapter.rpc
     rpc.get_all_accounts = AsyncMock(return_value=[{"id": 1}])
-    rpc.is_configured = AsyncMock(return_value=True)
+    rpc.is_configured = AsyncMock(return_value=False)  # refused before onboarding
     rpc.start_io = AsyncMock()
     adapter.account_id = None
     transport = types.ModuleType("deltachat2.transport")
@@ -128,7 +129,17 @@ async def test_connect_stops_before_start_io_on_mismatch(adapter, marker, monkey
     monkeypatch.setattr(adapter_mod, "_AsyncRpc", lambda _: rpc)
     monkeypatch.setattr(adapter_mod.asyncio, "sleep", AsyncMock())
 
+    monkeypatch.setattr(adapter, "_configure_transports", AsyncMock(return_value=True))
+    monkeypatch.setattr(adapter_mod, "_headless_onboarding", lambda: {"mode": "chatmail"})
     assert not await adapter.connect()
     rpc.start_io.assert_not_awaited()
+    adapter._configure_transports.assert_not_awaited()
     assert adapter.fatal_error_code == "deltachat_db_mismatch"
     assert adapter.rpc is None  # cleaned up
+
+
+@pytest.mark.asyncio
+async def test_undecodable_marker_is_a_fatal_error(adapter, marker):
+    marker.write_bytes(b"\xff\xfe")
+    assert not await adapter._check_db_id()
+    assert adapter.fatal_error_code == "deltachat_db_marker_io"
