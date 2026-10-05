@@ -1126,6 +1126,12 @@ class CallManager:
             message_id=str(msg_id),
             channel_prompt=_CALL_PROMPT or None,
         )
+        # The greeting is the call's first turn: install the call model here,
+        # not only on the first utterance, or the greeting runs on the default
+        # model (and a call hung up before speaking never uses the call model).
+        session = self._sessions.get(msg_id)
+        if session is not None:
+            self._install_model_override(session, source)
         logger.info("Injecting call-start greeting for msg_id=%s", msg_id)
         try:
             await self._to_hermes(event)

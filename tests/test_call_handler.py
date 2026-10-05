@@ -433,6 +433,29 @@ class TestCallModelOverride:
         assert runner._session_model_overrides  # found via __self__
 
     @pytest.mark.asyncio
+    async def test_greeting_turn_already_uses_the_call_model(self, monkeypatch):
+        """The greeting is the first turn — seen live: a call hung up before the
+        first sentence ran entirely on the default model."""
+        from unittest.mock import AsyncMock
+        runner = self._Runner()
+
+        async def closure(*args):
+            return None
+
+        mgr, session = self._setup(monkeypatch, runner_ref=lambda: runner, handler=closure)
+        mgr._sessions[1] = session
+        mgr._to_hermes = AsyncMock()
+        # conftest's MockMessageEvent predates channel_prompt; any kwargs will do here.
+        import types
+        monkeypatch.setattr(sys.modules["gateway.platforms.base"], "MessageEvent",
+                            lambda **kw: types.SimpleNamespace(**kw))
+
+        await mgr._play_greeting(1, "12", "11", "X")
+
+        assert runner._session_model_overrides  # installed before the greeting turn
+        mgr._to_hermes.assert_awaited_once()
+
+    @pytest.mark.asyncio
     async def test_unreachable_runner_warns(self, monkeypatch, caplog):
         async def closure(*args):
             return None
