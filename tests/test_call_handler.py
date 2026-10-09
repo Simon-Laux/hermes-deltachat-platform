@@ -289,17 +289,18 @@ class TestIncomingCallAuthorization:
         return mgr, adapter
 
     @pytest.mark.asyncio
-    async def test_unauthorized_caller_is_declined(self):
-        mgr, adapter = self._manager(False)
+    @pytest.mark.parametrize("verdict", [False, None])
+    async def test_unauthorized_or_unknown_caller_is_declined(self, verdict):
+        # None: the gateway's check raised or returned a non-bool -- fail closed
+        mgr, adapter = self._manager(verdict)
         await mgr._handle_incoming_call({"msg_id": 5, "chat_id": 12, "place_call_info": "sdp"})
         adapter._is_sender_authorized.assert_called_once_with("10", "dm", "12")
         adapter.rpc.end_call.assert_awaited_once()
         mgr._answer_call.assert_not_awaited()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("verdict", [True, None])
-    async def test_authorized_or_unchecked_caller_is_answered(self, verdict):
-        mgr, adapter = self._manager(verdict)
+    async def test_authorized_caller_is_answered(self):
+        mgr, adapter = self._manager(True)
         await mgr._handle_incoming_call({"msg_id": 5, "chat_id": 12, "place_call_info": "sdp"})
         mgr._answer_call.assert_awaited_once()
         adapter.rpc.end_call.assert_not_awaited()

@@ -633,8 +633,10 @@ class CallManager:
                     msg_id, chat_id, caller_id, event.get("has_video"))
 
         # Hermes drops everything an unauthorized caller says anyway, so don't
-        # answer and load STT for them. None (no check wired) is not a verdict.
-        if self._adapter._is_sender_authorized(caller_id, "dm", chat_id) is False:
+        # answer and load STT for them. Fail closed: the gateway always wires a
+        # check, so None only means it raised or returned junk (base.py treats
+        # that as "unknown", never as authorization).
+        if self._adapter._is_sender_authorized(caller_id, "dm", chat_id) is not True:
             # caller_id "caller": the lookup above failed, so nobody to authorize.
             logger.info("Declining call %s from unauthorized contact %s", msg_id,
                         caller_id if caller_id != "caller" else "(caller lookup failed)")
