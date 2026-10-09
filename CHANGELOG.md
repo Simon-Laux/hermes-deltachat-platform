@@ -33,6 +33,11 @@ repairs and doc typo fixes are left out; see the git log for those.
 
 ### Fixed
 
+- **Messages a previous run never handed to Hermes are replayed on connect.**
+  A message stored just before a crash, or still queued when
+  `deltachat-rpc-server` died, used to be lost. The read receipt now goes out
+  only after the hand-off to Hermes, so a message that fails before it stays
+  unread and is picked up on the next start.
 - **Attachments over Hermes' size cap still reached the agent.** When
   Hermes refused to cache a file over `gateway.max_inbound_media_bytes`
   (default 128 MiB), the adapter passed the raw Delta Chat file instead, and
