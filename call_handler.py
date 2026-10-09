@@ -1597,6 +1597,15 @@ class CallManager:
         # is torn down; don't take the new call's routing with us
         if self._chat_to_msg.get(chat_id) == msg_id:
             self._chat_to_msg.pop(chat_id)
+        newer = self._sessions.get(self._chat_to_msg.get(chat_id))
+        if newer is not None and _call_thread_id(newer.msg_id) == _call_thread_id(msg_id):
+            # why: shared-history mode gives both calls the same gateway session,
+            # so clearing "our" override and noting "call ended" would hit the
+            # live redialled call. Hand the override to it so its teardown clears it.
+            if newer.model_override_key is None:
+                newer.model_override_key = session.model_override_key
+            session.model_override_key = None
+            notify_ai = False
         self._clear_model_override(session)
         session.audio_buffer.stop()
         # pc.close() can hang if ICE is in a bad state — don't let it block shutdown

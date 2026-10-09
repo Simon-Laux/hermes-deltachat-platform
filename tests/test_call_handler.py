@@ -477,6 +477,37 @@ class TestDeadCall:
         await asyncio.sleep(0)
         mgr._play_greeting.assert_not_called()
 
+    def _redial(self, mgr, monkeypatch, thread_id):
+        from unittest.mock import MagicMock
+        monkeypatch.setattr(ch, "_CALL_THREAD_ID", thread_id)
+        gw = MagicMock()
+        gw._session_model_overrides = {"k5": {"model": "m"}}
+        mgr._gateway = lambda: gw
+        self._register(mgr, 5)
+        mgr._sessions[5].model_override_key = "k5"
+        self._register(mgr, 6)   # redial in the same chat
+        return gw
+
+    @pytest.mark.asyncio
+    async def test_shared_history_old_call_teardown_spares_redialled_call(self, monkeypatch):
+        mgr, _ = self._manager()
+        gw = self._redial(mgr, monkeypatch, None)
+        await mgr._teardown_session(5)
+        assert "k5" in gw._session_model_overrides   # same session key: still in use
+        mgr._note_call_ended.assert_not_called()
+        # the redialled call now owns the override and clears it when it ends
+        await mgr._teardown_session(6)
+        assert gw._session_model_overrides == {}
+        mgr._note_call_ended.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_separate_threads_old_call_teardown_unchanged(self, monkeypatch):
+        mgr, _ = self._manager()
+        gw = self._redial(mgr, monkeypatch, "call")
+        await mgr._teardown_session(5)
+        assert gw._session_model_overrides == {}
+        mgr._note_call_ended.assert_called_once()
+
 
 class TestDecodeTts:
     def _write_wav(self, path, seconds=0.4, rate=22050):
