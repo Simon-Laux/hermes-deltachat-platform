@@ -160,7 +160,11 @@ class IOTransport:
                     if pending is not None:
                         pending.set(response)
                 else:
-                    self.logger.warning("Got a response without ID: %s", response)
+                    # Not the whole response: a result can carry message text
+                    # or addresses. The error object is what explains it.
+                    self.logger.warning("Got a response without ID: %s",
+                                        response.get("error", sorted(response)))
+                    self.logger.debug("Response without ID: %s", response)
         except Exception:
             # Log an exception if the reader loop dies.
             self.logger.exception("Exception in the reader loop")

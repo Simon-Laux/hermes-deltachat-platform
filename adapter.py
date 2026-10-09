@@ -1745,7 +1745,7 @@ body {{
             SendResult with success status and message ID
         """
         import os
-        logger.info(f"send_voice called: chat_id={chat_id}, audio_path={audio_path}, caption={caption[:50] if caption else None}")
+        logger.debug(f"send_voice called: chat_id={chat_id}, audio_path={audio_path}, caption={caption[:50] if caption else None}")
         logger.debug(f"send_voice kwargs: {kwargs}")
 
         # Validate audio file exists and is accessible
@@ -1762,7 +1762,7 @@ body {{
                 error=f"Path is not a file: {audio_path}",
             )
         file_size = os.path.getsize(audio_path)
-        logger.info(f"send_voice: Audio file exists, size={file_size} bytes")
+        logger.debug(f"send_voice: Audio file exists, size={file_size} bytes")
 
         # Delta Chat sends voice messages as files with VOICE viewtype
         from deltachat2.types import MsgData, MessageViewtype
@@ -2191,9 +2191,8 @@ body {{
             # (happens for image+caption combos or pending downloads).
             if not text or view_type not in ("Text", "", None) or has_file:
                 logger.info(
-                    "Non-text message: view_type=%r text=%r file=%r file_mime=%r msg_id=%s",
-                    view_type, text[:80] if text else text,
-                    msg.get("file"), msg.get("file_mime"), msg_id,
+                    "Non-text message: view_type=%r has_text=%s file=%r file_mime=%r msg_id=%s",
+                    view_type, bool(text), msg.get("file"), msg.get("file_mime"), msg_id,
                 )
                 await self._handle_non_text_message(msg, chat_id, msg_id)
                 return
@@ -2288,7 +2287,7 @@ body {{
                 dest = cache_image_from_bytes(data, ext=ext or ".jpg")
             else:
                 return src
-            logger.info("Copied %s blob to Hermes cache: %s -> %s", kind, src, dest)
+            logger.debug("Copied %s blob to Hermes cache: %s -> %s", kind, src, dest)
             return dest
         except Exception as e:
             logger.warning("Could not copy %s to Hermes cache: %s", src, e, exc_info=True)
@@ -2422,7 +2421,8 @@ body {{
                     data = open(resolved, "rb").read()
                     file_name = msg.get("file_name") or os.path.basename(resolved)
                     resolved = cache_document_from_bytes(data, file_name)
-                    logger.info("Copied document to Hermes cache: %s", resolved)
+                    # debug: the cache path carries the sender's original file name
+                    logger.debug("Copied document to Hermes cache: %s", resolved)
                 except Exception as e:
                     logger.warning("Could not copy document to Hermes cache: %s", e)
             caption = msg.get("text", "") or ""

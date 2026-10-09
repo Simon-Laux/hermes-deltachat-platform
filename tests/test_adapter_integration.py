@@ -470,6 +470,41 @@ class TestEventHandling:
         assert call_args.message_id == "123"
 
     @pytest.mark.asyncio
+    async def test_info_logs_omit_message_content(self, platform_config, mock_rpc, tmp_path, caplog):
+        """Captions must not reach INFO+, which Hermes writes to disk by default."""
+        adapter = DeltaChatAdapter(platform_config)
+        adapter.rpc = mock_rpc
+        adapter.account_id = 1
+        mock_rpc.get_message = AsyncMock(return_value={
+            "id": 123, "text": "inbound-caption-secret", "from_id": 456,
+            "view_type": "Voice", "file": str(tmp_path / "missing.ogg"),
+            "file_mime": "audio/ogg",
+        })
+        mock_rpc.get_basic_chat_info = AsyncMock(
+            return_value={"chat_id": 789, "name": "Test Chat", "chat_type": "Single"}
+        )
+        mock_rpc.get_contact = AsyncMock(
+            return_value={"id": 456, "display_name": "Test User", "is_key_contact": True}
+        )
+        mock_rpc.send_msg = AsyncMock(return_value=55)
+        adapter._running = True
+        adapter.handle_message = AsyncMock()
+        voice = tmp_path / "reply.ogg"
+        voice.write_bytes(b"ogg")
+
+        # The mock MessageEvent knows no media_urls; the real one is not needed here.
+        with patch("adapter.MessageEvent", MagicMock()), \
+                caplog.at_level("INFO", logger="hermes_plugins.deltachat"):
+            await adapter._handle_dc_event({"kind": "IncomingMsg", "chat_id": 789, "msg_id": 123})
+            result = await adapter.send_voice("789", str(voice), caption="outbound-caption-secret")
+
+        assert adapter.handle_message.called
+        assert result.success
+        assert "Non-text message" in caplog.text
+        assert "inbound-caption-secret" not in caplog.text
+        assert "outbound-caption-secret" not in caplog.text
+
+    @pytest.mark.asyncio
     async def test_handle_delivered_event(self, platform_config, mock_rpc, caplog):
         """Test handling of MSG_DELIVERED event."""
         adapter = DeltaChatAdapter(platform_config)

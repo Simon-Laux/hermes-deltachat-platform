@@ -107,8 +107,14 @@ logger = logging.getLogger(__name__)                     # wrong — goes to age
 
 Hermes log files:
 - `~/.hermes/logs/gateway.log` — `gateway.*` and `hermes_plugins.*` loggers (INFO+)
-- `~/.hermes/logs/agent.log` — everything (the catch-all)
+- `~/.hermes/logs/agent.log` — every logger, at the configured level (INFO unless `logging.level` says otherwise)
 - `~/.hermes/logs/errors.log` — WARNING+ only
+
+What goes in at INFO and above is written to disk by default, so keep it free of message
+text, captions, call transcripts and the names of files people send. IDs (chat, msg,
+contact), view types, sizes, error text and our own paths are fine; they are what makes
+the logs useful. Content belongs at DEBUG, which is opt-in. Hermes's `RedactingFormatter`
+masks credential-shaped strings, not message content.
 
 ## Architecture
 

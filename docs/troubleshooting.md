@@ -116,12 +116,17 @@ deltachat-rpc-server --version
 
 **Check:**
 ```bash
-# Enable debug logging
-HERMES_LOG_LEVEL=DEBUG hermes gateway start
-
 # Check for specific errors in logs
 grep -i error ~/.hermes/profiles/<name>/logs/gateway.log
 ```
+
+For more detail, set `logging.level: DEBUG` in the profile's `config.yaml` and
+restart the gateway; the DEBUG lines land in `agent.log` (`gateway.log` stays at
+INFO). DEBUG logs every JSON-RPC request and response in full, which includes
+message text, contact addresses, file paths, and the transport password while
+an account is being set up. Switch it back off afterwards, and read the log
+before you share it. At the default INFO level the adapter logs IDs and states,
+not message content.
 
 **Common causes:**
 - Invalid chat_id (must be integer string)
