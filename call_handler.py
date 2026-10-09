@@ -638,8 +638,8 @@ class CallManager:
         # that as "unknown", never as authorization).
         if self._adapter._is_sender_authorized(caller_id, "dm", chat_id) is not True:
             # caller_id "caller": the lookup above failed, so nobody to authorize.
-            logger.info("Declining call %s from unauthorized contact %s", msg_id,
-                        caller_id if caller_id != "caller" else "(caller lookup failed)")
+            logger.info("Declining call %s: contact %s not authorized (or check failed)",
+                        msg_id, caller_id if caller_id != "caller" else "(caller lookup failed)")
             with contextlib.suppress(Exception):
                 await self._adapter.rpc.end_call(self._adapter.account_id, msg_id)
             return
