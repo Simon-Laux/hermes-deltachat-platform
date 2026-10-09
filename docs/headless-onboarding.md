@@ -96,7 +96,8 @@ in support bundles, so the link stays out of it at INFO level.
 
 It is still available when you need it:
 
-- `--log-level DEBUG` logs the full link.
+- `logging.level: DEBUG` in the profile's `config.yaml` logs the full link
+  (to `agent.log`; `gateway.log` stays at INFO).
 - If `invite.txt` can't be written, the link is logged at WARNING instead —
   with no file to point at, that's the only way to pair.
 - In memory as `adapter._invite_link`, for whatever surfaces it later.

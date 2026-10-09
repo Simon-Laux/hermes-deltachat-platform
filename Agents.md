@@ -110,11 +110,14 @@ Hermes log files:
 - `~/.hermes/logs/agent.log` — every logger, at the configured level (INFO unless `logging.level` says otherwise)
 - `~/.hermes/logs/errors.log` — WARNING+ only
 
-What goes in at INFO and above is written to disk by default, so keep it free of message
-text, captions, call transcripts and the names of files people send. IDs (chat, msg,
-contact), view types, sizes, error text and our own paths are fine; they are what makes
-the logs useful. Content belongs at DEBUG, which is opt-in. Hermes's `RedactingFormatter`
-masks credential-shaped strings, not message content.
+Keep the adapter's own INFO+ lines free of message text, captions, call transcripts and
+the names of files people send. IDs (chat, msg, contact), view types, sizes, error text
+and our own paths are fine; they are what makes the logs useful. Content belongs at
+DEBUG, which is opt-in. This only covers our lines: Hermes itself logs an excerpt of
+every inbound message at INFO (`inbound message: ... msg=%r`, the first 80 characters
+of `event.text`, which includes captions and file names), so `gateway.log` is never
+content-free. Hermes's `RedactingFormatter` masks credential-shaped strings, not
+message content.
 
 ## Architecture
 

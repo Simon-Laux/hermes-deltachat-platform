@@ -123,10 +123,15 @@ grep -i error ~/.hermes/profiles/<name>/logs/gateway.log
 For more detail, set `logging.level: DEBUG` in the profile's `config.yaml` and
 restart the gateway; the DEBUG lines land in `agent.log` (`gateway.log` stays at
 INFO). DEBUG logs every JSON-RPC request and response in full, which includes
-message text, contact addresses, file paths, and the transport password while
-an account is being set up. Switch it back off afterwards, and read the log
-before you share it. At the default INFO level the adapter logs IDs and states,
-not message content.
+message text, contact addresses and file paths. Hermes masks values under
+credential-shaped keys such as `password` (unless `security.redact_secrets:
+false` is set), but switch DEBUG back off afterwards all the same.
+
+At the default INFO level the adapter's own lines carry IDs and states, not
+message content. Hermes itself still logs the first 80 characters of every
+inbound message at INFO (`inbound message: ... msg=...`), including captions
+and the names of files people send, so don't share `gateway.log` without
+redacting it first.
 
 **Common causes:**
 - Invalid chat_id (must be integer string)
