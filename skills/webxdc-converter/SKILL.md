@@ -76,6 +76,7 @@ When converting an existing artifact or HTML file:
 2. **Remove any fetch/XHR calls** to external URLs — no internet access.
 3. **Remove localStorage/sessionStorage for anything important** — it works in practice, but can be cleared by OS or messenger updates at any time and doesn't sync across devices. Fine for ephemeral UI preferences (current tab, theme). For anything the user would care about losing, use `sendUpdate` instead (Level 1+).
 4. **Ensure everything is in the ZIP** — fonts, images, all assets.
+5. **If the app uses the webxdc API, add `<script src="webxdc.js"></script>`** before your own scripts — the one reference to a file not in the ZIP. The messenger provides it; see "Rule: always load webxdc.js" below.
 
 ### Choosing the right app structure
 
@@ -204,7 +205,7 @@ Here is your report. MEDIA:<absolute path of your working directory>/report.pdf
 
 ## Rule: always load webxdc.js before using the API
 
-Every app that touches `window.webxdc` (Levels 1, 2 and 3) **must** load `webxdc.js` with a script tag in `index.html` (and in every other HTML page that uses the API), placed **before** any script that uses it:
+Every app that touches `window.webxdc` (Levels 1, 2 and 3) **must** load `webxdc.js` with a script tag in `index.html` (and in every other HTML page that uses the API — from a page in a subdirectory use `../webxdc.js`), placed **before** any script that uses it:
 
 ```html
 <script src="webxdc.js"></script>
