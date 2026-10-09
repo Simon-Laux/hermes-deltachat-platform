@@ -497,3 +497,79 @@ class TestCallModelOverride:
             mgr._install_model_override(session, source=object())
         assert "DELTACHAT_CALL_MODEL" in caplog.text
         assert session.model_override_key is None
+
+
+class TestCallSttModel:
+    """Call STT must use the configured provider's model, never a hardcoded one."""
+
+    def _fake_tt(self, monkeypatch, stt_config, provider="mistral", voxtral_ok=True):
+        import types
+        from unittest.mock import MagicMock
+
+        tt = types.ModuleType("tools.transcription_tools")
+        tt._load_stt_config = lambda: stt_config
+        tt._get_provider = lambda cfg: provider
+        tt.transcribe_audio = MagicMock(return_value={"success": True, "transcript": "hi"})
+        tt._transcribe_mistral = MagicMock(
+            return_value={"success": voxtral_ok, "transcript": "hi", "error": "boom"})
+        tools_pkg = sys.modules.get("tools") or types.ModuleType("tools")
+        monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+        monkeypatch.setattr(tools_pkg, "transcription_tools", tt, raising=False)
+        monkeypatch.setitem(sys.modules, "tools.transcription_tools", tt)
+        return tt
+
+    def test_fallback_cloud_provider_passes_no_model(self, monkeypatch):
+        monkeypatch.setattr(ch, "_CALL_STT_VOXTRAL", False)
+        tt = self._fake_tt(monkeypatch, {"provider": "mistral",
+                                         "mistral": {"model": "voxtral-mini-latest"}})
+        assert ch.IncomingAudioBuffer._transcribe("/x.wav")["success"]
+        tt.transcribe_audio.assert_called_once_with("/x.wav")
+        tt._transcribe_mistral.assert_not_called()
+
+    def test_fallback_local_provider_passes_no_model(self, monkeypatch):
+        monkeypatch.setattr(ch, "_CALL_STT_VOXTRAL", False)
+        tt = self._fake_tt(monkeypatch, {"provider": "local"}, provider="local")
+        assert ch.IncomingAudioBuffer._transcribe("/x.wav")["success"]
+        tt.transcribe_audio.assert_called_once_with("/x.wav")
+
+    def test_voxtral_failure_falls_back_without_model(self, monkeypatch):
+        monkeypatch.setattr(ch, "_CALL_STT_VOXTRAL", True)
+        monkeypatch.setenv("MISTRAL_API_KEY", "k")
+        tt = self._fake_tt(monkeypatch, {}, voxtral_ok=False)
+        ch.IncomingAudioBuffer._transcribe("/x.wav")
+        tt.transcribe_audio.assert_called_once_with("/x.wav")
+
+    def test_voxtral_default_model(self, monkeypatch):
+        monkeypatch.setattr(ch, "_CALL_STT_VOXTRAL", True)
+        monkeypatch.setenv("MISTRAL_API_KEY", "k")
+        tt = self._fake_tt(monkeypatch, {})
+        ch.IncomingAudioBuffer._transcribe("/x.wav")
+        tt._transcribe_mistral.assert_called_once_with("/x.wav", "voxtral-mini-latest")
+        tt.transcribe_audio.assert_not_called()
+
+    def test_voxtral_uses_configured_model(self, monkeypatch):
+        monkeypatch.setattr(ch, "_CALL_STT_VOXTRAL", True)
+        monkeypatch.setenv("MISTRAL_API_KEY", "k")
+        tt = self._fake_tt(monkeypatch, {"mistral": {"model": "voxtral-small-latest"}})
+        ch.IncomingAudioBuffer._transcribe("/x.wav")
+        tt._transcribe_mistral.assert_called_once_with("/x.wav", "voxtral-small-latest")
+
+    @pytest.mark.asyncio
+    async def test_warmup_skipped_for_cloud_provider(self, monkeypatch):
+        from unittest.mock import MagicMock
+        monkeypatch.setattr(ch, "_CALL_STT_VOXTRAL", False)
+        tt = self._fake_tt(monkeypatch, {"provider": "mistral"})
+        await ch.CallManager(adapter=MagicMock())._warmup_stt()
+        tt.transcribe_audio.assert_not_called()
+
+    @pytest.mark.asyncio
+    async def test_warmup_local_provider_passes_no_model(self, monkeypatch, tmp_path):
+        from unittest.mock import MagicMock
+        monkeypatch.setattr(ch, "_CALL_STT_VOXTRAL", False)
+        tt = self._fake_tt(monkeypatch, {"provider": "local"}, provider="local")
+        (tmp_path / "audio_cache").mkdir()
+        mgr = ch.CallManager(adapter=MagicMock())
+        monkeypatch.setattr(mgr, "_get_hermes_home", lambda: str(tmp_path))
+        await mgr._warmup_stt()
+        tt.transcribe_audio.assert_called_once()
+        assert len(tt.transcribe_audio.call_args.args) == 1

@@ -115,9 +115,20 @@ if _env_flag("DELTACHAT_CALL_ICE_DEBUG"):
     logger.info("ICE debug logging enabled (aioice + aiortc at DEBUG)")
 
 # Opt-in: route call audio to Mistral Voxtral cloud STT (fast, ~1-2s, accurate).
-# Default off → use the locally configured STT provider (e.g. faster-whisper),
-# which is much slower on CPU. Requires MISTRAL_API_KEY.
+# Default off → use the configured stt.provider and its model, like voice
+# messages do. Requires MISTRAL_API_KEY.
 _CALL_STT_VOXTRAL = _env_flag("DELTACHAT_CALL_STT_VOXTRAL")
+_DEFAULT_VOXTRAL_MODEL = "voxtral-mini-latest"
+
+
+def _voxtral_model(tt) -> str:
+    """Voxtral model for the fast path: stt.mistral.model from config, else Hermes' default
+    (which honours STT_MISTRAL_MODEL), same resolution as for voice messages."""
+    default = getattr(tt, "DEFAULT_MISTRAL_STT_MODEL", None) or _DEFAULT_VOXTRAL_MODEL
+    try:
+        return (tt._load_stt_config().get("mistral") or {}).get("model") or default
+    except Exception:
+        return _DEFAULT_VOXTRAL_MODEL
 
 # Per-call system prompt — keeps spoken replies short. Applied via the
 # MessageEvent.channel_prompt field (ephemeral, never persisted to history).
@@ -430,23 +441,26 @@ class IncomingAudioBuffer:
         """Transcribe a WAV. Runs in a worker thread.
 
         With DELTACHAT_CALL_STT_VOXTRAL enabled (and MISTRAL_API_KEY set) we use
-        Voxtral cloud Transcribe (~1-2s, accurate) — local Whisper medium on CPU
-        is ~15-30x slower than realtime (30s for a 2s clip), unusable for a live
-        call. On any Voxtral failure we fall back to the configured provider.
-        When the flag is off, the locally configured STT provider is used.
+        Voxtral cloud Transcribe (~1-2s, accurate) — local Whisper on CPU can be
+        far slower than realtime, unusable for a live call. On any Voxtral
+        failure we fall back to the configured provider.
+        When the flag is off, Hermes picks provider *and* model from the ``stt``
+        section of config.yaml — same as for voice messages. Never pass a model
+        here: a name like "medium" is only valid for local faster-whisper and
+        breaks cloud providers ("Invalid model: medium").
         """
         from tools import transcription_tools as tt
 
         if _CALL_STT_VOXTRAL and os.getenv("MISTRAL_API_KEY") and hasattr(tt, "_transcribe_mistral"):
             try:
-                result = tt._transcribe_mistral(wav_path, "voxtral-mini-latest")
+                result = tt._transcribe_mistral(wav_path, _voxtral_model(tt))
                 if result.get("success"):
                     return result
                 logger.warning("Voxtral STT failed (%s) — falling back", result.get("error"))
             except Exception as e:
                 logger.warning("Voxtral STT error (%s) — falling back", e)
 
-        return tt.transcribe_audio(wav_path, "medium")
+        return tt.transcribe_audio(wav_path)
 
     def _pcm_to_wav(self, pcm: bytes) -> Optional[str]:
         """Write 16 kHz mono s16le PCM buffer to a WAV file for STT."""
@@ -1232,15 +1246,18 @@ class CallManager:
         transcription even starts. Running a silent dummy clip now means the
         model is hot in memory by the time the caller finishes their first sentence.
 
-        Skipped entirely when cloud STT (Voxtral) is enabled — there's no local
-        model to warm, and loading whisper would waste CPU and time.
+        Only runs when the configured provider is local faster-whisper — with
+        Voxtral or any other cloud provider there's no model to warm, and a
+        silent clip would just be a wasted API request.
         """
         if _CALL_STT_VOXTRAL:
             return
         try:
             import io
             import wave as _wave
-            from tools.transcription_tools import transcribe_audio
+            from tools import transcription_tools as tt
+            if tt._get_provider(tt._load_stt_config()) != "local":
+                return
             # Create a 0.5 s silence WAV in memory and write to a temp file
             buf = io.BytesIO()
             with _wave.open(buf, "wb") as wf:
@@ -1252,8 +1269,8 @@ class CallManager:
             tmp_path = os.path.join(tmp, "audio_cache", "_warmup.wav")
             with open(tmp_path, "wb") as f:
                 f.write(buf.getvalue())
-            logger.info("Pre-warming Whisper medium model...")
-            await asyncio.to_thread(transcribe_audio, tmp_path, "medium")
+            logger.info("Pre-warming local Whisper model...")
+            await asyncio.to_thread(tt.transcribe_audio, tmp_path)
             logger.info("Whisper model ready")
         except Exception as e:
             logger.debug("STT warmup failed (non-fatal): %s", e)

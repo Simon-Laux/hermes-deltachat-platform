@@ -7,6 +7,15 @@ repairs and doc typo fixes are left out; see the git log for those.
 
 ### Fixed
 
+- **Calls failed with "Invalid model: medium" on cloud STT providers.** With
+  `DELTACHAT_CALL_STT_VOXTRAL` off, or after a Voxtral error, call audio was
+  sent with the local Whisper size `medium` to whatever `stt.provider` is
+  set. With `mistral` (or any other cloud provider) every utterance failed,
+  and the bot never answered in calls. Calls now use the configured provider
+  and model, the same as voice messages. The Voxtral shortcut honours
+  `stt.mistral.model`. If you use `stt.provider: local`, calls now use
+  `stt.local.model` instead of a forced `medium`. Set it explicitly if you
+  relied on that.
 - **Webxdc apps from the skill could ship without `webxdc.js`.** The skill
   now says plainly that any app using the webxdc API must load
   `<script src="webxdc.js"></script>` before its own scripts. The messenger
