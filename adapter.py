@@ -2369,9 +2369,23 @@ body {{
             elif file_mime.startswith("video/"):
                 view_type = MessageViewtype.VIDEO.value
 
+        # why: Hermes' gateway.max_inbound_media_bytes is only checked by its
+        # image/audio cache helpers, and when they refused a file we fell back
+        # to the blob path, which passed it on anyway. Checked here, before any
+        # copy, so the cap holds for every kind and nothing oversized is read.
+        from gateway.platforms.base import get_inbound_media_max_bytes
+        resolved = self._resolve_blob_path(filename) if filename else None
+        limit = get_inbound_media_max_bytes()
+        size = os.path.getsize(resolved) if resolved else 0
+        too_large = ""
+        if limit and size > limit:
+            logger.warning("Not passing on media of msg %s: %d bytes is over the %d-byte "
+                           "inbound media limit", msg_id, size, limit)
+            too_large = " [attachment not passed on: over the inbound media size limit]"
+            resolved = None
+
         # Voice / Audio — let Hermes handle STT via media_urls
         if view_type in (MessageViewtype.VOICE.value, MessageViewtype.AUDIO.value) and filename:
-            resolved = self._resolve_blob_path(filename)
             if resolved:
                 resolved = self._copy_to_hermes_cache(resolved, "audio")
             is_voice = view_type == MessageViewtype.VOICE.value
@@ -2380,8 +2394,8 @@ body {{
             text = f"[{'Voice' if is_voice else 'Audio'} message from {user_name}]"
             if caption:
                 text = f"{text}: {caption}"
-            text = f"{text}\n[dc:chat={token}]"
-            if not resolved:
+            text = f"{text}{too_large}\n[dc:chat={token}]"
+            if not resolved and not too_large:
                 logger.warning(f"Voice/audio file not found, forwarding without media: {filename}")
             message_event = MessageEvent(
                 text=text,
@@ -2395,14 +2409,13 @@ body {{
 
         # Image
         elif view_type in (MessageViewtype.IMAGE.value, MessageViewtype.GIF.value, MessageViewtype.STICKER.value) and filename:
-            resolved = self._resolve_blob_path(filename)
             if resolved:
                 resolved = self._copy_to_hermes_cache(resolved, "image")
             caption = msg.get("text", "") or ""
             text = f"[Image from {user_name}]"
             if caption:
                 text = f"{text}: {caption}"
-            text = f"{text}\n[dc:chat={token}]"
+            text = f"{text}{too_large}\n[dc:chat={token}]"
             message_event = MessageEvent(
                 text=text,
                 message_type=MessageType.PHOTO,
@@ -2415,7 +2428,7 @@ body {{
 
         # File / document (including .xdc webxdc apps)
         elif view_type in (MessageViewtype.FILE.value, MessageViewtype.VIDEO.value) and filename:
-            resolved = self._resolve_blob_path(filename)
+            is_video = view_type == MessageViewtype.VIDEO.value
             if resolved:
                 try:
                     from gateway.platforms.base import cache_document_from_bytes
@@ -2427,13 +2440,13 @@ body {{
                     logger.warning("Could not copy document to Hermes cache: %s", e)
             caption = msg.get("text", "") or ""
             file_name = msg.get("file_name") or os.path.basename(filename)
-            text = f"[File from {user_name}: {file_name}]"
+            text = f"[{'Video' if is_video else 'File'} from {user_name}: {file_name}]"
             if caption:
                 text = f"{text}: {caption}"
-            text = f"{text}\n[dc:chat={token}]"
+            text = f"{text}{too_large}\n[dc:chat={token}]"
             message_event = MessageEvent(
                 text=text,
-                message_type=MessageType.DOCUMENT,
+                message_type=MessageType.VIDEO if is_video else MessageType.DOCUMENT,
                 source=source,
                 message_id=str(msg_id),
                 media_urls=[resolved] if resolved else [],

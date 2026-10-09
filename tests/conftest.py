@@ -26,6 +26,9 @@ class MockMessageType(Enum):
     VOICE = "voice"
     STICKER = "sticker"
     GIF = "gif"
+    PHOTO = "photo"
+    VIDEO = "video"
+    DOCUMENT = "document"
 
 
 @dataclass
@@ -59,6 +62,8 @@ class MockMessageEvent:
     source: MockSource
     message_id: str
     metadata: Dict[str, Any] = field(default_factory=dict)
+    media_urls: list = field(default_factory=list)
+    media_types: list = field(default_factory=list)
 
 
 class MockPlatform(Enum):
@@ -250,6 +255,13 @@ class MockGatewayBase:
     SendResult = MockSendResult
     MessageEvent = MockMessageEvent
     MessageType = MockMessageType
+
+    # Real default is 128 MiB; 0 (no cap) keeps unrelated tests independent of it.
+    inbound_media_max_bytes = 0
+
+    @classmethod
+    def get_inbound_media_max_bytes(cls) -> int:
+        return cls.inbound_media_max_bytes
 
 
 # ---------------------------------------------------------------------------
