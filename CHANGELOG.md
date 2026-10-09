@@ -3,6 +3,20 @@
 Notable changes for people running the adapter. Internal refactors, test
 repairs and doc typo fixes are left out; see the git log for those.
 
+## Unreleased
+
+### Fixed
+
+- **Calls failed with "Invalid model: medium" on cloud STT providers.** With
+  `DELTACHAT_CALL_STT_VOXTRAL` off, or after a Voxtral error, call audio was
+  sent with the local Whisper size `medium` to whatever `stt.provider` is
+  set. With `mistral` (or any other cloud provider) every utterance failed,
+  and the bot never answered in calls. Calls now use the configured provider
+  and model, the same as voice messages. The Voxtral shortcut honours
+  `stt.mistral.model`. If you use `stt.provider: local`, calls now use
+  `stt.local.model` instead of a forced `medium`. Set it explicitly if you
+  relied on that.
+
 ## 2.0.0 (2026-10-05)
 
 ### Breaking / requires action

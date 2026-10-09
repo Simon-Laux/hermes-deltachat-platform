@@ -122,9 +122,11 @@ _DEFAULT_VOXTRAL_MODEL = "voxtral-mini-latest"
 
 
 def _voxtral_model(tt) -> str:
-    """Voxtral model for the fast path: stt.mistral.model from config, else the default."""
+    """Voxtral model for the fast path: stt.mistral.model from config, else Hermes' default
+    (which honours STT_MISTRAL_MODEL), same resolution as for voice messages."""
+    default = getattr(tt, "DEFAULT_MISTRAL_STT_MODEL", None) or _DEFAULT_VOXTRAL_MODEL
     try:
-        return (tt._load_stt_config().get("mistral") or {}).get("model") or _DEFAULT_VOXTRAL_MODEL
+        return (tt._load_stt_config().get("mistral") or {}).get("model") or default
     except Exception:
         return _DEFAULT_VOXTRAL_MODEL
 
