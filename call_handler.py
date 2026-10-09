@@ -420,7 +420,7 @@ class IncomingAudioBuffer:
                 return
         stt_s = time.monotonic() - t0
         if transcript:
-            # The transcript itself is logged at DEBUG when it is injected.
+            # Its first 80 chars are logged at DEBUG when it is injected.
             logger.info("perf STT=%.1fs (%s) → %d chars", stt_s, result.get("provider", "?"),
                         len(transcript))
             self._on_utterance(transcript, wav_path)
