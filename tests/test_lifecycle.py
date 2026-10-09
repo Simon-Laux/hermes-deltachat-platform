@@ -7,6 +7,8 @@ pin that contract, and the teardown paths that used to skip it.
 """
 
 import asyncio
+import threading
+
 import pytest
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
 
@@ -79,7 +81,7 @@ class TestListenerDeathEscalates:
     async def test_deliberate_disconnect_does_not_escalate(self, adapter):
         """Tearing down on purpose must not look like a crash to the gateway."""
         adapter._mark_connected()
-        adapter._cleanup()  # clears is_connected, as a real disconnect would
+        await adapter._cleanup()  # clears is_connected, as a real disconnect would
 
         await adapter._event_listener()
 
@@ -117,33 +119,82 @@ class TestListenerDeathEscalates:
 
 
 class TestCleanupReportsStatus:
-    def test_cleanup_marks_disconnected(self, adapter):
+    @pytest.mark.asyncio
+    async def test_cleanup_marks_disconnected(self, adapter):
         """A failed connect() used to leave a stale 'connected' status behind."""
         adapter._mark_connected()
-        adapter._cleanup()
+        await adapter._cleanup()
 
         assert adapter.is_connected is False
         assert adapter._disconnected is True
 
-    def test_cleanup_does_not_downgrade_a_fatal_error(self, adapter):
+    @pytest.mark.asyncio
+    async def test_cleanup_does_not_downgrade_a_fatal_error(self, adapter):
         """'fatal'/'retrying' must survive the cleanup that follows it."""
         adapter._mark_connected()
         adapter._set_fatal_error("event_listener_stopped", "x", retryable=True)
 
-        adapter._cleanup()
+        await adapter._cleanup()
 
         assert adapter.has_fatal_error is True
         assert adapter._disconnected is False
 
-    def test_cleanup_closes_the_transport(self, adapter):
+    @pytest.mark.asyncio
+    async def test_cleanup_closes_the_transport(self, adapter):
         transport = MagicMock()
         adapter._transport = transport
 
-        adapter._cleanup()
+        await adapter._cleanup()
 
         transport.close.assert_called_once()
         assert adapter._transport is None
         assert adapter.rpc is None
+
+
+class TestTransportCloseIsOffTheLoop:
+    """IOTransport.close() can block for up to a minute (core's stop_io alone
+    may take 30 s). Run on the gateway loop it froze every platform."""
+
+    @pytest.mark.asyncio
+    async def test_close_runs_in_a_worker_thread(self, adapter):
+        closed_on = []
+        adapter._transport = MagicMock()
+        adapter._transport.close.side_effect = lambda: closed_on.append(threading.get_ident())
+
+        await adapter._cleanup()
+
+        assert closed_on and closed_on[0] != threading.get_ident()
+
+    @pytest.mark.asyncio
+    async def test_cancelled_disconnect_keeps_closing_and_reconnect_waits(self, adapter, platform_config):
+        """The gateway gives disconnect() 5 s and then cancels it. The close
+        must still finish, and a fresh adapter must not start a server on the
+        same accounts dir (accounts.lock) until it has."""
+        release = threading.Event()
+        adapter._transport = MagicMock()
+        adapter._transport.close.side_effect = lambda: release.wait(5)
+
+        task = asyncio.create_task(adapter.disconnect())
+        await asyncio.sleep(0.05)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert adapter._transport is None and adapter.is_connected is False
+
+        fresh = DeltaChatAdapter(platform_config)
+        started = threading.Event()
+        with patch("adapter._check_dc2_available", return_value=True), \
+                patch.object(fresh, "_get_dc_config_dir", return_value="/nonexistent"), \
+                patch.object(fresh, "_get_rpc_server_path", return_value="x"), \
+                patch("deltachat2.transport.IOTransport.start", side_effect=lambda: started.set()), \
+                patch("adapter._check_dc_version", AsyncMock(return_value=False)), \
+                patch.dict("os.environ"):
+            connecting = asyncio.create_task(fresh.connect())
+            await asyncio.sleep(0.1)
+            assert not started.is_set(), "new server started while the old one still held the lock"
+            release.set()
+            assert await asyncio.wait_for(connecting, 5) is False
+        assert started.is_set()
 
 
 class TestDisconnectIsResilient:

@@ -13,6 +13,7 @@ import secrets
 import sys
 import uuid
 import asyncio
+import concurrent.futures
 import logging
 from typing import Optional, Dict, Any, List
 
@@ -281,6 +282,22 @@ class _AsyncRpc:
 
 # Tracks the currently connected adapter instance; used by RPC tools.
 _active_adapter = None
+
+# IOTransport.close() blocks for up to a minute (see its docstring), so it runs
+# here instead of on the gateway loop. One worker: closes finish in order, so
+# waiting on the latest one covers every earlier one too.
+_transport_closer = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="dc-transport-close")
+_last_transport_close: Optional[concurrent.futures.Future] = None
+
+
+async def _await_transport_close(future: concurrent.futures.Future) -> None:
+    # why: shield. The gateway cancels disconnect() after its own budget (5 s
+    # by default) and detaches it. Without the shield that cancel would also
+    # cancel a close still queued behind another, leaking a live server.
+    try:
+        await asyncio.shield(asyncio.wrap_future(future))
+    except Exception as e:
+        logger.warning(f"Error closing transport: {e}")
 
 # Per-session opaque token ↔ real chat_id mapping.
 # Tokens are generated once per unique chat_id using secrets.token_hex so they
@@ -1128,24 +1145,32 @@ class DeltaChatAdapter(BasePlatformAdapter):
             # Initialize RPC client with deltachat2, passing accounts_dir to transport
             from deltachat2.transport import IOTransport
 
+            # why: a server from a disconnect the gateway stopped waiting for
+            # may still be shutting down. It holds accounts.lock until it
+            # exits, so a new one on the same dir would fail to start.
+            pending_close = _last_transport_close
+            if pending_close is not None and not pending_close.done():
+                logger.info("Waiting for the previous deltachat-rpc-server to shut down")
+                await _await_transport_close(pending_close)
+
             os.environ["DC_ACCOUNTS_PATH"] = dc_accounts_path
             self._transport = IOTransport(accounts_dir=dc_accounts_path, rpc_server=rpc_server_path)
             self._transport.start()
             self.rpc = _AsyncRpc(deltachat2.Rpc(self._transport))
 
-            # Wait for RPC server to be ready
-            await asyncio.sleep(1)
-
+            # No startup sleep: requests queue in the stdin pipe until the
+            # server reads them, so this first call doubles as the readiness
+            # check, and a server that dies on startup fails it fast.
             # Check version - REJECT if too old
             if not await _check_dc_version(self.rpc):
-                self._cleanup()
+                await self._cleanup()
                 return False
 
             # Get or create account - use first available
             accounts = await self.rpc.get_all_accounts()
             # A lost database must be refused before onboarding creates a new one.
             if not accounts and not await self._check_db_id():
-                self._cleanup()
+                await self._cleanup()
                 return False
             onboarding = _headless_onboarding()
             if accounts:
@@ -1161,13 +1186,13 @@ class DeltaChatAdapter(BasePlatformAdapter):
                     "— or set DELTACHAT_EMAIL to onboard without a terminal "
                     "(see docs/headless-onboarding.md)"
                 )
-                self._cleanup()
+                await self._cleanup()
                 return False
 
             # Before start_io (no message may be handled on a mismatched DB) and
             # before onboarding configures a transport on an empty account.
             if not await self._check_db_id():
-                self._cleanup()
+                await self._cleanup()
                 return False
 
             # add_account() persists an account row before any transport is
@@ -1181,10 +1206,10 @@ class DeltaChatAdapter(BasePlatformAdapter):
                         "transport. Run setup.py, or set DELTACHAT_EMAIL to "
                         "configure one without a terminal."
                     )
-                    self._cleanup()
+                    await self._cleanup()
                     return False
                 if not await self._configure_transports(onboarding):
-                    self._cleanup()
+                    await self._cleanup()
                     return False
 
             # Enable bot mode: auto-accept contact requests
@@ -1225,10 +1250,10 @@ class DeltaChatAdapter(BasePlatformAdapter):
 
         except Exception as e:
             logger.error(f"Delta Chat connection failed: {e}")
-            self._cleanup()
+            await self._cleanup()
             return False
 
-    def _cleanup(self) -> None:
+    async def _cleanup(self) -> None:
         """Clean up resources and report the adapter as no longer connected.
 
         Also reached from connect()'s failure paths, which is why it marks
@@ -1240,27 +1265,31 @@ class DeltaChatAdapter(BasePlatformAdapter):
         reconnect watcher disposes of an adapter whose connect() failed (no
         fatal error recorded), this overwrites it with "disconnected" — as the
         old disconnect() already did.
+
+        The transport is closed last, in a worker thread, after all state is
+        reset: if the gateway cancels us mid-close, the adapter is already
+        consistent and the close finishes on its own.
         """
-        global _active_adapter
+        global _active_adapter, _last_transport_close
         if _active_adapter is self:
             _active_adapter = None
         self._running = False
         if self._event_loop_task:
-            # Not awaited: _cleanup is sync, and it can be reached *from* the
-            # listener task itself via the fatal-error path. _on_listener_done
-            # observes the outcome instead.
+            # Not awaited: the listener's fatal-error path reaches disconnect()
+            # through a separate notify task, but awaiting our own listener
+            # would deadlock if that ever changed. _on_listener_done observes
+            # the outcome instead.
             self._event_loop_task.cancel()
             self._event_loop_task = None
-        if self._transport:
-            try:
-                self._transport.close()
-            except Exception as e:
-                logger.warning(f"Error closing transport: {e}")
-            self._transport = None
+        transport, self._transport = self._transport, None
         self.rpc = None
         self.account_id = None
         self._invite_link = None
         self._mark_disconnected()
+        if transport:
+            # Cleared above first, so a second _cleanup() can't close it twice.
+            _last_transport_close = _transport_closer.submit(transport.close)
+            await _await_transport_close(_last_transport_close)
 
     @staticmethod
     def _on_listener_done(task: asyncio.Task) -> None:
@@ -1288,7 +1317,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
             # replacement adapter the gateway builds on reconnect.
             logger.warning("Error tearing down call manager: %s", e)
         finally:
-            self._cleanup()
+            await self._cleanup()
         logger.info("Delta Chat disconnected")
 
     async def get_my_address(self) -> Optional[str]:

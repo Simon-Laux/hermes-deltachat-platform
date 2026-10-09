@@ -334,6 +334,7 @@ The `deltachat2` Python package is vendored in `vendor/` to avoid a manual insta
 
 - `transport.py`: dead-RPC-server handling — `_fail_all_pending()` from both reader and writer loops, `_server_dead()` probe, and a polled `_Result.wait()` so a `deltachat-rpc-server` that dies mid-call raises instead of hanging the caller forever. Upstream has none of this.
 - `transport.py`: `to_attrdict()` on RPC results (camelCase → snake_case, which `adapter.py` depends on) and `close()` guards for the never-started / already-dead cases.
+- `transport.py`: bounded teardown — `close(timeout=5, stop_io_timeout=35)` caps the `stop_io_for_all_accounts` call (via `_call(..., timeout=)`; 35 s is above core's own 30 s IMAP/SMTP shutdown budget) and every later wait, and SIGKILLs a server that hasn't exited after stdin EOF (no SIGTERM step: rpc-server treats EOF and SIGTERM alike). Worst case 60 s, about 40 s for a wedged server. `close()` blocks, so `adapter.py` runs it in a worker thread and a reconnect waits for it to release `accounts.lock`. A reader that dies on a malformed line kills the server so the dead-server handling takes over.
 - `IOTransport.__init__` takes `rpc_server=`; upstream renamed this kwarg to `rpc_executable=`. `adapter.py` passes `rpc_server=`.
 
 To update it:
