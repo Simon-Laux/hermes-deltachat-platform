@@ -10,11 +10,13 @@ Load the API with `<script src="webxdc.js"></script>` before your own scripts. T
 
 - `window.webxdc.selfAddr` (string) - Unique ID of the current user within this app. Same for the same user on every device and every launch; different for every other user. Use it to distinguish peers and as a key in `notify`. It has no meaning outside the app; do not show it in the UI (use `selfName`).
 - `window.webxdc.selfName` (string) - Display name of the current user, for showing in the UI.
+- `window.webxdc.sendUpdateInterval` (number) - Minimum milliseconds between `sendUpdate` calls. May be missing; assume `10000` then.
+- `window.webxdc.sendUpdateMaxSize` (number) - Maximum size of one serialized update in bytes. May be missing; assume `128000` then.
 
 ### Methods
 
 #### `sendUpdate(update, descr)`
-Send an update to all instances of the app in the chat, including your own (it comes back through the update listener).
+Send an update to all instances of the app in the chat, including your own (it comes back through the update listener). Exception: if the app is in a contact request or a group the user has left, the update is neither sent nor passed to the listener.
 
 - `update`: Object with properties:
   - `payload`: Any JSON-serializable data (required)
@@ -41,10 +43,13 @@ Register a callback that is called for each update, including your own.
   - `payload`: The payload data
   - `serial`: Serial of this update (> 0, higher is newer)
   - `max_serial`: Highest serial known at the time of the call. When `serial === max_serial`, the replay is caught up
-  - `info`, `summary`, `document`, `href`, `notify`: As passed to `sendUpdate` (if set)
+  - `info`, `summary`, `document`, `href`: As passed to `sendUpdate` (if set)
+  - `notify`: List of addresses that were notified (if set)
 - `serial`: The last serial the app already knows (default `0`). All updates after it are replayed, then new ones arrive live. Pass `0` to rebuild state from the full history.
 
-**Returns:** Promise that resolves once all updates up to the current `max_serial` have been passed to the callback.
+Call `setUpdateListener` only once; calling it again is undefined behavior (currently only the last listener works).
+
+**Returns:** Promise that resolves once all updates known at the time of the call have been passed to the callback.
 
 **Example:**
 ```javascript
@@ -116,13 +121,13 @@ channel.send(new TextEncoder().encode("Hello!"));
 
 ## Rate Limits
 
-- `sendUpdate()`: The messenger sets a minimum interval between updates (default 10 seconds) and a maximum serialized size (default 128000 bytes). Sending faster than the interval does not make updates arrive sooner; the messenger may delay them for much longer than the interval.
+- `sendUpdate()`: Read `sendUpdateInterval` and `sendUpdateMaxSize` (defaults 10000 ms and 128000 bytes if missing). Split larger data across several updates. Sending faster than the interval does not make updates arrive sooner; the messenger may delay them for much longer than the interval.
 
 ## Best Practices
 
 1. **Use `sendUpdate` for state**: Store all important state in updates so it persists and syncs across devices.
-2. **Keep payloads small**: Updates are sent to all chat members, so keep them under ~1KB if possible.
-3. **Use summaries wisely**: The summary is shown in the chat list, so make it informative.
+2. **Keep payloads small**: Updates are sent to all chat members and stay in the chat history; send only what changed, not the whole state.
+3. **Use summaries wisely**: The summary is shown beside the app icon in the chat, so make it informative.
 4. **Handle initialization**: Use `setUpdateListener(..., 0)` to replay the full history when your app starts.
 5. **Debounce updates**: For things like text editing, debounce your updates to avoid hitting rate limits.
 6. **Use realtime for ephemeral data**: cursor positions, typing indicators, etc.

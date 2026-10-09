@@ -123,6 +123,7 @@ try:
     img.save("myapp/icon.png")
 except Exception:
     # No (usable) Pillow: plain-colour PNG with the standard library only
+    print("Pillow unavailable, writing a plain-colour icon")
     def chunk(tag, data):
         return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
     rows = b"".join(b"\0" + bytes(color) * size for _ in range(size))
@@ -160,6 +161,7 @@ with zipfile.ZipFile('myapp.xdc', 'w', zipfile.ZIP_DEFLATED) as zf:
 "
 
 # React/bundled app — build first, then zip the dist output
+# Put icon.png and manifest.toml in public/ (vite copies it into dist/) or copy them into dist/ after the build
 npm run build   # produces dist/index.html, dist/assets/, etc.
 python3 -c "
 import zipfile, os
@@ -190,6 +192,8 @@ with zipfile.ZipFile(path) as zf:
     if 'index.html' not in names:
         print('ERROR: index.html missing from archive root!')
         sys.exit(1)
+    if not {"icon.png", "icon.jpg"} & set(names):
+        print("WARNING: no icon.png or icon.jpg at the archive root (icon.svg is ignored)")
     print('OK — index.html present, size:', zf.getinfo('index.html').file_size, 'bytes')
 "
 ```
@@ -320,6 +324,7 @@ For low-latency communication. Data is ephemeral — NOT persisted, NOT replayed
 const channel = window.webxdc.joinRealtimeChannel();
 channel.setListener((data) => { /* Uint8Array */ });
 channel.send(new TextEncoder().encode("cursor:120,340"));
+channel.leave();  // when done; only one channel can be open at a time
 ```
 
 You can check for support and warn the user:
