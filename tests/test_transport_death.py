@@ -121,3 +121,15 @@ def test_reader_tolerates_reply_for_abandoned_call():
     t.process.stdout = io.BytesIO(b'{"id": 1, "result": 1}\n{"id": 2, "result": 2}\n')
     t._reader_loop()
     assert survivor._value == {"id": 2, "result": 2}
+
+
+def test_reader_survives_json_that_is_not_an_object():
+    import io
+
+    t = _bare_transport(returncode=None)
+    survivor = _Result()
+    t.pending_results = {1: survivor}
+    # Valid JSON, but not an object: must be logged and skipped, not fatal.
+    t.process.stdout = io.BytesIO(b'42\n[1, 2]\n"x"\nnull\n{"id": 1, "result": 1}\n')
+    t._reader_loop()
+    assert survivor._value == {"id": 1, "result": 1}
