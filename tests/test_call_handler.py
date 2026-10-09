@@ -148,7 +148,7 @@ class TestHermesAudioTrack:
         t.enqueue_tts_frames(_make_frames(2))
         f1 = await t.recv()
         f2 = await t.recv()
-        assert f1.samples == ch.HermesAudioTrack._FRAME_SAMPLES
+        assert f1.samples == f2.samples == ch.HermesAudioTrack._FRAME_SAMPLES
         assert t.played_count == 2          # both queued frames counted
         # queue now empty → silence frame, played_count unchanged
         f3 = await t.recv()

@@ -16,6 +16,11 @@ repairs and doc typo fixes are left out; see the git log for those.
   `stt.mistral.model`. If you use `stt.provider: local`, calls now use
   `stt.local.model` instead of a forced `medium`. Set it explicitly if you
   relied on that.
+- **Webxdc apps from the skill could ship without `webxdc.js`.** The skill
+  now says plainly that any app using the webxdc API must load
+  `<script src="webxdc.js"></script>` before its own scripts. The messenger
+  provides the file, so it is still not packaged, but without the tag
+  `window.webxdc` is undefined.
 
 ## 2.0.0 (2026-10-05)
 
