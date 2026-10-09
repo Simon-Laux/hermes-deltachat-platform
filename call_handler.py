@@ -647,11 +647,13 @@ class CallManager:
                     msg_id, chat_id, caller_id, event.get("has_video"))
 
         # Hermes drops everything an unauthorized caller says anyway, so don't
-        # answer and load STT for them. None (no check wired) is not a verdict.
-        if self._adapter._is_sender_authorized(caller_id, "dm", chat_id) is False:
+        # answer and load STT for them. Fail closed: the gateway always wires a
+        # check, so None only means it raised or returned junk (base.py treats
+        # that as "unknown", never as authorization).
+        if self._adapter._is_sender_authorized(caller_id, "dm", chat_id) is not True:
             # caller_id "caller": the lookup above failed, so nobody to authorize.
-            logger.info("Declining call %s from unauthorized contact %s", msg_id,
-                        caller_id if caller_id != "caller" else "(caller lookup failed)")
+            logger.info("Declining call %s: contact %s not authorized (or check failed)",
+                        msg_id, caller_id if caller_id != "caller" else "(caller lookup failed)")
             with contextlib.suppress(Exception):
                 await self._adapter.rpc.end_call(self._adapter.account_id, msg_id)
             return
@@ -897,7 +899,32 @@ class CallManager:
         )
         self._sessions[msg_id] = session
         self._chat_to_msg[chat_id] = msg_id
+
+        # why: a peer that vanishes (network lost, app killed) never sends
+        # CallEnded. aioice's consent checks expire after ~30 s and aiortc closes
+        # the pc itself, so a once-connected call reports "closed", not "failed"
+        # ("failed" only if ICE never connected). Without this the session
+        # lingered forever, still holding the chat's call routing, the model
+        # override and dc_end_call. Our own teardown pops _sessions before
+        # pc.close(), so _end_dead_call ignores the "closed" that causes.
+        @pc.on("connectionstatechange")
+        def _on_dead():
+            if pc.connectionState in ("failed", "closed"):
+                asyncio.ensure_future(self._end_dead_call(msg_id))
+        # why: the hook is attached only after accept/place, so a pc that died
+        # in between already fired its last state change; check it once now.
+        _on_dead()
         return session
+
+    async def _end_dead_call(self, msg_id: int) -> None:
+        if msg_id not in self._sessions:
+            return
+        logger.info("Call %s: connection %s, hanging up", msg_id,
+                    self._sessions[msg_id].pc.connectionState)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(
+                self._adapter.rpc.end_call(self._adapter.account_id, msg_id), timeout=5.0)
+        await self._teardown_session(msg_id)
 
     # ------------------------------------------------------------------ #
     # Internal — incoming call setup                                       #
@@ -1087,6 +1114,14 @@ class CallManager:
                 break
             await asyncio.sleep(0.1)
         logger.info("Outgoing call %s connection state after ICE wait: %s", msg_id, pc.connectionState)
+        # why: if the pc died during the wait, _end_dead_call has torn the call
+        # down; the greeting fallback below would then go out as a text message
+        # (adapter.send sees no active call).
+        if pc.connectionState in ("failed", "closed") or msg_id not in self._sessions:
+            logger.info("Outgoing call %s ended before the opening, skipping it", msg_id)
+            if opening_task:
+                opening_task.cancel()
+            return
 
         # Fallback: if on_track didn't fire, attach the remote audio track
         # from the negotiated transceiver.
@@ -1575,7 +1610,19 @@ class CallManager:
         if session is None:
             return
         chat_id, caller_id, caller_name = session.chat_id, session.caller_id, session.caller_name
-        self._chat_to_msg.pop(chat_id, None)
+        # why: a redial can register a new call in this chat before the old one
+        # is torn down; don't take the new call's routing with us
+        if self._chat_to_msg.get(chat_id) == msg_id:
+            self._chat_to_msg.pop(chat_id)
+        newer = self._sessions.get(self._chat_to_msg.get(chat_id))
+        if newer is not None and _call_thread_id(newer.msg_id) == _call_thread_id(msg_id):
+            # why: shared-history mode gives both calls the same gateway session,
+            # so clearing "our" override and noting "call ended" would hit the
+            # live redialled call. Hand the override to it so its teardown clears it.
+            if newer.model_override_key is None:
+                newer.model_override_key = session.model_override_key
+            session.model_override_key = None
+            notify_ai = False
         self._clear_model_override(session)
         session.audio_buffer.stop()
         # pc.close() can hang if ICE is in a bad state — don't let it block shutdown

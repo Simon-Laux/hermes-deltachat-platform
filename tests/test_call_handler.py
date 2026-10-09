@@ -289,17 +289,18 @@ class TestIncomingCallAuthorization:
         return mgr, adapter
 
     @pytest.mark.asyncio
-    async def test_unauthorized_caller_is_declined(self):
-        mgr, adapter = self._manager(False)
+    @pytest.mark.parametrize("verdict", [False, None])
+    async def test_unauthorized_or_unknown_caller_is_declined(self, verdict):
+        # None: the gateway's check raised or returned a non-bool -- fail closed
+        mgr, adapter = self._manager(verdict)
         await mgr._handle_incoming_call({"msg_id": 5, "chat_id": 12, "place_call_info": "sdp"})
         adapter._is_sender_authorized.assert_called_once_with("10", "dm", "12")
         adapter.rpc.end_call.assert_awaited_once()
         mgr._answer_call.assert_not_awaited()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("verdict", [True, None])
-    async def test_authorized_or_unchecked_caller_is_answered(self, verdict):
-        mgr, adapter = self._manager(verdict)
+    async def test_authorized_caller_is_answered(self):
+        mgr, adapter = self._manager(True)
         await mgr._handle_incoming_call({"msg_id": 5, "chat_id": 12, "place_call_info": "sdp"})
         mgr._answer_call.assert_awaited_once()
         adapter.rpc.end_call.assert_not_awaited()
@@ -357,6 +358,155 @@ class TestOutgoingCall:
         assert ch.CallManager.is_call_end_reply("1756") is False
         assert ch.CallManager.is_call_end_reply(None) is False
         assert ch.CallManager.is_call_end_reply("") is False
+
+
+class TestDeadCall:
+    """A peer that vanishes never sends CallEnded; the failed pc ends the call."""
+
+    class _FakePc:
+        def __init__(self):
+            self.connectionState = "connected"
+            self._handlers = {}
+
+        def on(self, event):
+            def deco(fn):
+                self._handlers.setdefault(event, []).append(fn)
+                return fn
+            return deco
+
+        def set_state(self, state):
+            self.connectionState = state
+            for fn in self._handlers.get("connectionstatechange", []):
+                fn()
+
+        async def close(self):
+            pass
+
+    def _manager(self):
+        from unittest.mock import AsyncMock, MagicMock
+        adapter = MagicMock()
+        adapter.rpc.end_call = AsyncMock()
+        mgr = ch.CallManager(adapter=adapter)
+        mgr._note_call_ended = AsyncMock()
+        return mgr, adapter
+
+    def _register(self, mgr, msg_id, chat_id="12"):
+        from unittest.mock import MagicMock
+        pc = self._FakePc()
+        mgr._register_session(pc, None, ch.HermesAudioTrack(), MagicMock(),
+                              msg_id, chat_id, "10", "Bob")
+        return pc
+
+    @pytest.mark.asyncio
+    async def test_failed_connection_hangs_up_and_tears_down(self):
+        mgr, adapter = self._manager()
+        pc = self._register(mgr, 5)
+        pc.set_state("failed")
+        for _ in range(5):
+            await asyncio.sleep(0)
+        adapter.rpc.end_call.assert_awaited_once_with(adapter.account_id, 5)
+        assert 5 not in mgr._sessions
+        assert not mgr.has_active_call("12")
+
+    @pytest.mark.asyncio
+    async def test_other_states_keep_the_call(self):
+        mgr, adapter = self._manager()
+        pc = self._register(mgr, 5)
+        pc.set_state("connecting")
+        await asyncio.sleep(0)
+        adapter.rpc.end_call.assert_not_awaited()
+        assert mgr.has_active_call("12")
+
+    @pytest.mark.asyncio
+    async def test_old_call_teardown_keeps_redialled_call(self):
+        mgr, _ = self._manager()
+        self._register(mgr, 5)
+        self._register(mgr, 6)   # same chat, redial before 5 was noticed dead
+        await mgr._teardown_session(5)
+        assert mgr._chat_to_msg["12"] == 6
+
+    @pytest.mark.asyncio
+    async def test_closed_connection_hangs_up(self):
+        # real aiortc: consent expiry closes a connected pc, it never says "failed"
+        mgr, adapter = self._manager()
+        pc = self._register(mgr, 5)
+        pc.set_state("closed")
+        for _ in range(5):
+            await asyncio.sleep(0)
+        adapter.rpc.end_call.assert_awaited_once_with(adapter.account_id, 5)
+        assert 5 not in mgr._sessions
+
+    @pytest.mark.asyncio
+    async def test_own_teardown_close_does_not_end_call_again(self):
+        mgr, adapter = self._manager()
+        pc = self._register(mgr, 5)
+
+        async def close():
+            pc.set_state("closed")
+        pc.close = close
+        await mgr._teardown_session(5)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        adapter.rpc.end_call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pc_dead_before_registration_is_torn_down(self):
+        from unittest.mock import MagicMock
+        mgr, adapter = self._manager()
+        pc = self._FakePc()
+        pc.connectionState = "failed"   # no state change left to fire
+        mgr._register_session(pc, None, ch.HermesAudioTrack(), MagicMock(),
+                              5, "12", "10", "Bob")
+        for _ in range(5):
+            await asyncio.sleep(0)
+        adapter.rpc.end_call.assert_awaited_once_with(adapter.account_id, 5)
+        assert 5 not in mgr._sessions
+
+    @pytest.mark.asyncio
+    async def test_outgoing_call_dead_before_opening_sends_no_greeting(self):
+        from unittest.mock import AsyncMock, MagicMock
+        mgr, _ = self._manager()
+        mgr._play_greeting = AsyncMock()
+        mgr._log_media_stats = AsyncMock()
+        pc = self._register(mgr, 5)
+        pc.set_state("closed")   # died while _finalize_outgoing_call waited
+        for _ in range(5):
+            await asyncio.sleep(0)
+        await mgr._finalize_outgoing_call(pc, 5, "12", "10", "Bob",
+                                          ch.HermesAudioTrack(), MagicMock(), "", None)
+        await asyncio.sleep(0)
+        mgr._play_greeting.assert_not_called()
+
+    def _redial(self, mgr, monkeypatch, thread_id):
+        from unittest.mock import MagicMock
+        monkeypatch.setattr(ch, "_CALL_THREAD_ID", thread_id)
+        gw = MagicMock()
+        gw._session_model_overrides = {"k5": {"model": "m"}}
+        mgr._gateway = lambda: gw
+        self._register(mgr, 5)
+        mgr._sessions[5].model_override_key = "k5"
+        self._register(mgr, 6)   # redial in the same chat
+        return gw
+
+    @pytest.mark.asyncio
+    async def test_shared_history_old_call_teardown_spares_redialled_call(self, monkeypatch):
+        mgr, _ = self._manager()
+        gw = self._redial(mgr, monkeypatch, None)
+        await mgr._teardown_session(5)
+        assert "k5" in gw._session_model_overrides   # same session key: still in use
+        mgr._note_call_ended.assert_not_called()
+        # the redialled call now owns the override and clears it when it ends
+        await mgr._teardown_session(6)
+        assert gw._session_model_overrides == {}
+        mgr._note_call_ended.assert_called_once()
+
+    @pytest.mark.asyncio
+    async def test_separate_threads_old_call_teardown_unchanged(self, monkeypatch):
+        mgr, _ = self._manager()
+        gw = self._redial(mgr, monkeypatch, "call")
+        await mgr._teardown_session(5)
+        assert gw._session_model_overrides == {}
+        mgr._note_call_ended.assert_called_once()
 
 
 class TestDecodeTts:
