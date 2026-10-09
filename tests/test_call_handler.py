@@ -425,6 +425,43 @@ class TestDeadCall:
         await mgr._teardown_session(5)
         assert mgr._chat_to_msg["12"] == 6
 
+    @pytest.mark.asyncio
+    async def test_closed_connection_hangs_up(self):
+        # real aiortc: consent expiry closes a connected pc, it never says "failed"
+        mgr, adapter = self._manager()
+        pc = self._register(mgr, 5)
+        pc.set_state("closed")
+        for _ in range(5):
+            await asyncio.sleep(0)
+        adapter.rpc.end_call.assert_awaited_once_with(adapter.account_id, 5)
+        assert 5 not in mgr._sessions
+
+    @pytest.mark.asyncio
+    async def test_own_teardown_close_does_not_end_call_again(self):
+        mgr, adapter = self._manager()
+        pc = self._register(mgr, 5)
+
+        async def close():
+            pc.set_state("closed")
+        pc.close = close
+        await mgr._teardown_session(5)
+        for _ in range(5):
+            await asyncio.sleep(0)
+        adapter.rpc.end_call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_pc_dead_before_registration_is_torn_down(self):
+        from unittest.mock import MagicMock
+        mgr, adapter = self._manager()
+        pc = self._FakePc()
+        pc.connectionState = "failed"   # no state change left to fire
+        mgr._register_session(pc, None, ch.HermesAudioTrack(), MagicMock(),
+                              5, "12", "10", "Bob")
+        for _ in range(5):
+            await asyncio.sleep(0)
+        adapter.rpc.end_call.assert_awaited_once_with(adapter.account_id, 5)
+        assert 5 not in mgr._sessions
+
 
 class TestDecodeTts:
     def _write_wav(self, path, seconds=0.4, rate=22050):

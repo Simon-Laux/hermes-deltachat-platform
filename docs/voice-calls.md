@@ -10,8 +10,10 @@ NixOS setup). Incoming calls are auto-answered; hang up from your Delta Chat
 client, or the bot hangs up after its goodbye — it ends the reply with `[[hangup]]`,
 which the adapter strips before TTS. `dc_end_call` does the same as a tool.
 If the other side drops off without hanging up (lost network, killed app), the
-bot hangs up by itself once the connection fails, about 30 s later. Calls from
-contacts Hermes doesn't authorize are declined without being answered.
+bot hangs up by itself once the WebRTC connection reports `closed` (or `failed`
+if ICE never connected), about 30-35 s later. Calls from contacts Hermes
+doesn't authorize, or whose authorization check fails, are declined without
+being answered.
 
 ## Outgoing calls (the bot calls you)
 

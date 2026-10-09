@@ -887,19 +887,26 @@ class CallManager:
         self._chat_to_msg[chat_id] = msg_id
 
         # why: a peer that vanishes (network lost, app killed) never sends
-        # CallEnded. aioice notices after ~30 s of failed consent checks and the
-        # pc goes "failed"; without this the session lingered forever, still
-        # holding the chat's call routing, the model override and dc_end_call.
+        # CallEnded. aioice's consent checks expire after ~30 s and aiortc closes
+        # the pc itself, so a once-connected call reports "closed", not "failed"
+        # ("failed" only if ICE never connected). Without this the session
+        # lingered forever, still holding the chat's call routing, the model
+        # override and dc_end_call. Our own teardown pops _sessions before
+        # pc.close(), so _end_dead_call ignores the "closed" that causes.
         @pc.on("connectionstatechange")
-        def _on_failed():
-            if pc.connectionState == "failed":
+        def _on_dead():
+            if pc.connectionState in ("failed", "closed"):
                 asyncio.ensure_future(self._end_dead_call(msg_id))
+        # why: the hook is attached only after accept/place, so a pc that died
+        # in between already fired its last state change; check it once now.
+        _on_dead()
         return session
 
     async def _end_dead_call(self, msg_id: int) -> None:
         if msg_id not in self._sessions:
             return
-        logger.info("Call %s: connection failed, hanging up", msg_id)
+        logger.info("Call %s: connection %s, hanging up", msg_id,
+                    self._sessions[msg_id].pc.connectionState)
         with contextlib.suppress(Exception):
             await asyncio.wait_for(
                 self._adapter.rpc.end_call(self._adapter.account_id, msg_id), timeout=5.0)
