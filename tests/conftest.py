@@ -250,6 +250,28 @@ class MockBasePlatformAdapter:
         return "".join(chars)
 
 
+class MockMessageDeduplicator:
+    """Mock of gateway.platforms.helpers.MessageDeduplicator, without the TTL."""
+
+    def __init__(self, max_size: int = 2000, ttl_seconds: float = 300):
+        self._seen = set()
+
+    def is_duplicate(self, msg_id: str) -> bool:
+        if msg_id in self._seen:
+            return True
+        self._seen.add(msg_id)
+        return False
+
+    def contains(self, msg_id: str) -> bool:
+        return msg_id in self._seen
+
+
+class MockGatewayHelpers:
+    """Mock of gateway.platforms.helpers module."""
+
+    MessageDeduplicator = MockMessageDeduplicator
+
+
 class MockGatewayBase:
     """Mock of gateway.platforms.base module."""
 
@@ -274,16 +296,19 @@ class MockGatewayBase:
 gateway_module = MagicMock()
 gateway_platforms = MagicMock()
 gateway_platforms_base = MockGatewayBase()
+gateway_platforms_helpers = MockGatewayHelpers()
 gateway_config_module = MockHermesConfig()
 
 sys.modules["gateway"] = gateway_module
 sys.modules["gateway.platforms"] = gateway_platforms
 sys.modules["gateway.platforms.base"] = gateway_platforms_base
+sys.modules["gateway.platforms.helpers"] = gateway_platforms_helpers
 sys.modules["gateway.config"] = gateway_config_module
 
 # Set up the actual module references
 gateway_module.platforms = gateway_platforms
 gateway_module.platforms.base = gateway_platforms_base
+gateway_module.platforms.helpers = gateway_platforms_helpers
 gateway_module.config = gateway_config_module
 
 
