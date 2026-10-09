@@ -105,19 +105,35 @@ Optionally add `source_code_url = "https://..."` if the user provides one.
 
 ### Generate icon
 
-If the user supplies an icon, use it. Otherwise create a small SVG inline — icons are optional but improve the app's appearance in chat:
+If the user supplies an icon, use it (convert it to PNG or JPEG if needed). Otherwise generate one — icons are optional but improve the app's appearance in chat. Messengers only use `icon.png` or `icon.jpg`; an `icon.svg` is ignored.
 
 ```bash
 mkdir -p myapp
-cat > myapp/icon.svg << 'EOF'
-<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128">
-  <rect width="128" height="128" rx="20" fill="#4ECDC4"/>
-  <text x="64" y="84" font-size="64" font-family="sans-serif" text-anchor="middle" fill="white">AB</text>
-</svg>
+python3 - << 'EOF'
+import struct, zlib
+initials, color, size = "AB", (0x4E, 0xCD, 0xC4), 128  # app initials, background RGB
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    img = Image.new("RGB", (size, size), color)
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 64)
+    except OSError:
+        font = ImageFont.load_default(size=64)
+    ImageDraw.Draw(img).text((size / 2, size / 2), initials, fill="white", font=font, anchor="mm")
+    img.save("myapp/icon.png")
+except Exception:
+    # No (usable) Pillow: plain-colour PNG with the standard library only
+    print("Pillow unavailable, writing a plain-colour icon")
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+    rows = b"".join(b"\0" + bytes(color) * size for _ in range(size))
+    with open("myapp/icon.png", "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
 EOF
 ```
 
-Replace `AB` with the app's initials and choose a fitting background color.
+Replace `AB` with the app's initials and choose a fitting background color. Without Pillow the icon is a plain colored square.
 
 ### Create the .xdc file
 
@@ -130,7 +146,7 @@ import zipfile
 with zipfile.ZipFile('myapp.xdc', 'w', zipfile.ZIP_DEFLATED) as zf:
     zf.write('myapp/index.html', 'index.html')
     zf.write('myapp/manifest.toml', 'manifest.toml')
-    zf.write('myapp/icon.svg', 'icon.svg')
+    zf.write('myapp/icon.png', 'icon.png')
 "
 
 # Multi-file app — walk the entire app directory
@@ -145,6 +161,7 @@ with zipfile.ZipFile('myapp.xdc', 'w', zipfile.ZIP_DEFLATED) as zf:
 "
 
 # React/bundled app — build first, then zip the dist output
+# Put icon.png and manifest.toml in public/ (vite copies it into dist/) or copy them into dist/ after the build
 npm run build   # produces dist/index.html, dist/assets/, etc.
 python3 -c "
 import zipfile, os
@@ -175,6 +192,8 @@ with zipfile.ZipFile(path) as zf:
     if 'index.html' not in names:
         print('ERROR: index.html missing from archive root!')
         sys.exit(1)
+    if not {"icon.png", "icon.jpg"} & set(names):
+        print("WARNING: no icon.png or icon.jpg at the archive root (icon.svg is ignored)")
     print('OK — index.html present, size:', zf.getinfo('index.html').file_size, 'bytes')
 "
 ```
@@ -305,6 +324,7 @@ For low-latency communication. Data is ephemeral — NOT persisted, NOT replayed
 const channel = window.webxdc.joinRealtimeChannel();
 channel.setListener((data) => { /* Uint8Array */ });
 channel.send(new TextEncoder().encode("cursor:120,340"));
+channel.leave();  // when done; only one channel can be open at a time
 ```
 
 You can check for support and warn the user:
