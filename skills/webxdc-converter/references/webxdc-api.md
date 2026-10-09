@@ -135,7 +135,6 @@ Behaviour of Delta Chat's implementation that the spec does not make obvious (ch
 
 - **Oversized realtime data is dropped silently.** No client checks the size; data above about 128 KiB fails inside core and the app gets no error. Keep each `send()` at or below 128000 bytes.
 - **Serials are bookmarks, not counters.** They have gaps and differ between peers and even between a user's devices. Updates already arrive in order, so don't sort by them. Use them to resume: if you compact state, store it with the last serial it includes and pass that serial to `setUpdateListener` on the next start to get only newer updates.
-- **iOS ignores the `serial` argument** of `setUpdateListener` and always replays every update from the start. Skip updates with `update.serial <= lastKnownSerial` yourself so the app works on all clients.
 - **A new `info` can replace the previous one.** If the last message in the chat is an `info` message from the same sender and app, a new `info` overwrites its text instead of adding a line.
 - **`selfAddr` belongs to one app instance.** It is derived from the user's key and the app message, so forwarding or re-sending the app gives a new `selfAddr` and starts with empty state. Don't rely on `selfAddr` values to match up data from an exported backup imported into another instance.
 - **Never ship a file named `webxdc.js`.** The messenger replaces it with its own API script when loaded (on iOS even in subdirectories, e.g. `lib/webxdc.js`).
