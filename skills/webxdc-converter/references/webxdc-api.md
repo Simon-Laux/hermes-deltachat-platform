@@ -102,7 +102,7 @@ const files = await window.webxdc.importFiles({
 Join the realtime channel of this app instance. Experimental and not available in every messenger (Delta Chat since 1.48).
 
 **Returns:** Channel object with methods:
-- `channel.send(data)` - Send a `Uint8Array` (max 128000 bytes) to currently connected peers. Delivery is not guaranteed
+- `channel.send(data)` - Send a `Uint8Array` (max 128000 bytes) to currently connected peers. Delivery is not guaranteed. Unlike `sendUpdate`, your own data is not passed back to your own listener, so apply local changes directly
 - `channel.setListener(callback)` - Set the listener for incoming `Uint8Array` data. A second call replaces the first listener
 - `channel.leave()` - Leave the channel. The object is unusable afterwards; call `joinRealtimeChannel()` again to rejoin
 
@@ -133,7 +133,6 @@ Actual values in Delta Chat (chatmail core, last checked 2026-10-10 against `mai
 
 Behaviour of Delta Chat's implementation that the spec does not make obvious (checked 2026-10-10 in chatmail core and the Desktop, Android and iOS sources).
 
-- **Own data: updates echo, realtime does not.** Your own `sendUpdate` calls always come back through the update listener. Your own realtime `send()` data never reaches your own `setListener` callback. Apply local realtime changes directly.
 - **Oversized realtime data is dropped silently.** No client checks the size; data above about 128 KiB fails inside core and the app gets no error. Keep each `send()` at or below 128000 bytes.
 - **Serials are bookmarks, not counters.** They have gaps and differ between peers and even between a user's devices. Updates already arrive in order, so don't sort by them. Use them to resume: if you compact state, store it with the last serial it includes and pass that serial to `setUpdateListener` on the next start to get only newer updates.
 - **iOS ignores the `serial` argument** of `setUpdateListener` and always replays every update from the start. Skip updates with `update.serial <= lastKnownSerial` yourself so the app works on all clients.
