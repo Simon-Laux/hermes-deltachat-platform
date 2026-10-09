@@ -95,7 +95,8 @@ stops talking and listens. To avoid a click or background noise cutting the bot
 off, an interrupt is only triggered after ~0.25s of sustained voiced audio
 (RMS-gated). On the next turn the model is told what you did vs didn't hear
 (estimated from how much of the reply had played), so it won't assume you heard
-the part it was cut off on.
+the part it was cut off on. The same note is sent when a newer reply replaces
+one that was still being synthesized.
 
 ## Configuration (environment variables)
 

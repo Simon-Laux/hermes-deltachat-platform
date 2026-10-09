@@ -362,6 +362,43 @@ class TestStaleResponse:
         await new
         mgr._hangup_session.assert_awaited_once()  # the marker still ends the call after it
 
+    @pytest.mark.asyncio
+    async def test_superseded_reply_tells_the_model_what_was_unheard(self, monkeypatch):
+        mgr, session, gate = self._manager(monkeypatch)
+        gate("Old first sentence, long enough to stand alone.")[0].set()
+        old_go, old_started = gate("Old second sentence, also long enough on its own.")
+        new_go, new_started = gate("New reply.")
+
+        old = asyncio.ensure_future(mgr._play_response(
+            "12", "Old first sentence, long enough to stand alone. Old second sentence, also long enough on its own."))
+        await self._until(old_started)    # first sentence enqueued, second in TTS
+        new = asyncio.ensure_future(mgr._play_response("12", "New reply."))
+        await self._until(new_started)
+        old_go.set()
+        new_go.set()
+        await old
+        await new
+        note = session.pending_interrupt_note
+        assert note and "Old second sentence, also long enough on its own." in note
+        assert "Old first sentence" not in note   # that part was already queued to play
+
+    @pytest.mark.asyncio
+    async def test_barged_in_reply_keeps_the_barge_in_note(self, monkeypatch):
+        mgr, session, gate = self._manager(monkeypatch)
+        old_go, old_started = gate("Old reply.")
+        new_go, new_started = gate("New reply.")
+        old = asyncio.ensure_future(mgr._play_response("12", "Old reply."))
+        await self._until(old_started)
+        mgr._handle_barge_in(1)
+        session.pending_interrupt_note = "barge-in note"
+        new = asyncio.ensure_future(mgr._play_response("12", "New reply."))
+        await self._until(new_started)
+        old_go.set()
+        new_go.set()
+        await old
+        await new
+        assert session.pending_interrupt_note == "barge-in note"
+
 
 class TestUtteranceCap:
     """Speech that never pauses is cut into capped pieces, sent as one turn at the pause."""

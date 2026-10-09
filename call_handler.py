@@ -1522,8 +1522,20 @@ class CallManager:
         # AI latency: time from injecting the transcript to receiving this response
         ai_s = (time.monotonic() - session.inject_ts) if session.inject_ts else 0.0
 
-        # Reset per-response barge-in accounting.
+        # A reply still synthesizing that wasn't barged in on is about to be
+        # superseded: what it hasn't enqueued yet is never spoken. Tell the model
+        # next turn, like a barge-in does (that one already left its own note).
         track = session.outgoing_track
+        old_text = session.last_response_text
+        if session.is_responding and not session.interrupted and old_text:
+            done = session.tts_checkpoints[-1][0] if session.tts_checkpoints else 0
+            if unheard := old_text[done:].strip():
+                session.pending_interrupt_note = (
+                    "[A newer reply replaced your previous one before it was fully spoken. "
+                    f"The user did NOT hear: \"{unheard}\".]"
+                )
+
+        # Reset per-response barge-in accounting.
         session.last_response_text = text
         session.interrupted = False
         # why: the reset above would un-interrupt a reply that's still inside
