@@ -135,7 +135,7 @@ class DeltaChatAccountSetup:
                     # Strip https:// for display
                     display_servers = [s.replace("https://", "") for s in servers]
 
-                    print(f"\nSelect relay server:")
+                    print("\nSelect relay server:")
                     print("-" * 40)
                     print(f"  1. {display_servers[0]} (default)")
                     for i, server in enumerate(display_servers[1:], 2):
@@ -152,7 +152,7 @@ class DeltaChatAccountSetup:
                             if 0 <= idx < len(servers):
                                 relay = servers[idx]
                             elif idx == len(servers):
-                                relay = input(f"Enter relay server: ").strip()
+                                relay = input("Enter relay server: ").strip()
                                 # Add https:// if user didn't include it
                                 if not relay.startswith("https://"):
                                     relay = f"https://{relay}"
@@ -373,6 +373,6 @@ if __name__ == "__main__":
         addr = get_account_address(rpc, account_id)
         if addr:
             print(f"\nSecureJoin link: {addr}")
-            print(f"Share this link to chat with the bot via Delta Chat")
+            print("Share this link to chat with the bot via Delta Chat")
 
     transport.close()
