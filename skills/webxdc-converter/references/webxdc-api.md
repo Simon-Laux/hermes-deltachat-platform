@@ -136,3 +136,13 @@ if (window.webxdc.joinRealtimeChannel !== undefined) {
   // realtime is supported
 }
 ```
+
+## Upstream Docs
+
+- [API overview](https://webxdc.org/docs/spec/api.html)
+- [`sendUpdate`](https://webxdc.org/docs/spec/sendUpdate.html)
+- [`setUpdateListener`](https://webxdc.org/docs/spec/setUpdateListener.html)
+- [`sendToChat`](https://webxdc.org/docs/spec/sendToChat.html)
+- [`importFiles`](https://webxdc.org/docs/spec/importFiles.html)
+- [`selfAddr` and `selfName`](https://webxdc.org/docs/spec/selfAddr_and_selfName.html)
+- [`joinRealtimeChannel`](https://webxdc.org/docs/spec/joinRealtimeChannel.html)
