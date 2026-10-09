@@ -60,6 +60,12 @@ _BYTES_PER_SEC = _SAMPLE_RATE * _CHANNELS * _BYTES_PER_SAMPLE  # 192000
 _STT_RATE = 16000
 _STT_BYTES_PER_SEC = _STT_RATE * 1 * _BYTES_PER_SAMPLE  # 32000
 
+# why: background noise above the RMS gate (TV, music, a fan) never yields the
+# 1 s pause that ends an utterance, so the buffer would grow for the whole call
+# and reach STT as one huge clip. Cut it into STT-sized pieces instead.
+_MAX_UTTERANCE_S = 30
+_MAX_UTTERANCE_PCM_BYTES = _STT_BYTES_PER_SEC * _MAX_UTTERANCE_S
+
 # ICE gathering timeout before accepting the call anyway
 _ICE_GATHER_TIMEOUT_S = 10.0
 
@@ -396,6 +402,11 @@ class IncomingAudioBuffer:
                 # Buffer every frame while capturing — clean samples via to_ndarray
                 for out_frame in resampler.resample(frame):
                     _SPEECH_BUF.extend(out_frame.to_ndarray().tobytes())
+                if len(_SPEECH_BUF) >= _MAX_UTTERANCE_PCM_BYTES:
+                    # Hand the full piece to STT and keep capturing; barge-in
+                    # stays signalled so one long stretch doesn't re-trigger it.
+                    _emit()
+                    _SPEECH_BUF, _voiced_s = bytearray(), 0.0
                 if is_speech:
                     _last_speech_time = now
                     _voiced_s += frame_dur
@@ -500,6 +511,7 @@ class CallSession:
     pending_interrupt_note: Optional[str] = None  # note to prepend next turn after an interruption
     is_responding: bool = False               # True while play_response is speaking (incl. TTS gaps)
     interrupted: bool = False                 # set by barge-in to stop TTS of remaining sentences
+    response_generation: int = 0              # bumped per play_response; older ones stop speaking
     resp_start_frames: int = 0                # track.played_count at start of current response
     tts_checkpoints: list = field(default_factory=list)  # [(cum_chars, cum_frames)] per spoken sentence
     hangup_pending: bool = False              # dc_end_call was requested — hang up after TTS drain
@@ -1457,6 +1469,15 @@ class CallManager:
         track = session.outgoing_track
         session.last_response_text = text
         session.interrupted = False
+        # why: the reset above would un-interrupt a reply that's still inside
+        # TTS (a sentence takes seconds), which then enqueued its stale audio
+        # after this one. The generation tells the old reply it was superseded.
+        session.response_generation += 1
+        generation = session.response_generation
+
+        def superseded() -> bool:
+            return session.interrupted or session.response_generation != generation
+
         session.hangup_cancelled = False
         session.is_responding = True
         session.resp_start_frames = track.played_count
@@ -1479,7 +1500,7 @@ class CallManager:
         cum_frames = 0
         try:
             for i, sentence in enumerate(sentences):
-                if session.interrupted:
+                if superseded():
                     logger.info("play_response: stopped TTS after interrupt (%d/%d sentences)",
                                 i, len(sentences))
                     break
@@ -1491,7 +1512,7 @@ class CallManager:
                 frames = await asyncio.to_thread(
                     HermesAudioTrack.decode_tts, tts_data["file_path"]
                 )
-                if session.interrupted:
+                if superseded():
                     break
                 track.enqueue_tts_frames(frames)
                 if first_audio_s is None:
@@ -1515,13 +1536,15 @@ class CallManager:
         except Exception as e:
             logger.error("play_response failed: %s", e)
         finally:
-            session.is_responding = False
-            if session.hangup_pending:
-                try:
-                    await self._hangup_session(session)
-                except Exception as e:
-                    logger.error("hangup after play_response failed: %s", e)
-                    await self._teardown_session(session.msg_id)
+            # A superseded reply leaves both to the one that replaced it.
+            if session.response_generation == generation:
+                session.is_responding = False
+                if session.hangup_pending:
+                    try:
+                        await self._hangup_session(session)
+                    except Exception as e:
+                        logger.error("hangup after play_response failed: %s", e)
+                        await self._teardown_session(session.msg_id)
 
     # ------------------------------------------------------------------ #
     # Cleanup                                                             #

@@ -273,6 +273,134 @@ class TestHangupMarker:
         mgr._hangup_session.assert_not_awaited()
 
 
+class TestStaleResponse:
+    """A reply that a newer one replaced mid-TTS must not play or end the turn."""
+
+    def _manager(self, monkeypatch):
+        import json
+        import threading
+        import types
+        from unittest.mock import MagicMock
+
+        gates = {}   # sentence -> threading.Event that releases its TTS call
+        started = {}  # sentence -> threading.Event set once its TTS call began
+
+        def fake_tts(sentence):
+            started[sentence].set()
+            gates[sentence].wait(5)
+            return json.dumps({"success": True, "file_path": sentence})
+
+        fake_mod = types.ModuleType("tools.tts_tool")
+        fake_mod.text_to_speech_tool = fake_tts
+        monkeypatch.setitem(sys.modules, "tools.tts_tool", fake_mod)
+        # "Decode" to a frame count keyed by the sentence, so the queue shows whose audio it is.
+        monkeypatch.setattr(ch.HermesAudioTrack, "decode_tts",
+                            staticmethod(lambda path: _make_frames(3 if path.startswith("Old") else 7)))
+
+        session = ch.CallSession(
+            pc=MagicMock(), chat_id="12", msg_id=1, caller_id="11", caller_name="X",
+            outgoing_track=ch.HermesAudioTrack(), audio_buffer=MagicMock(),
+            ice_channel=MagicMock(),
+        )
+        mgr = ch.CallManager(adapter=MagicMock())
+        mgr._sessions[1] = session
+        mgr._chat_to_msg["12"] = 1
+
+        def gate(sentence):
+            gates[sentence], started[sentence] = threading.Event(), threading.Event()
+            return gates[sentence], started[sentence]
+        return mgr, session, gate
+
+    @staticmethod
+    async def _until(event):
+        for _ in range(500):
+            if event.is_set():
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("TTS call never started")
+
+    @pytest.mark.asyncio
+    async def test_superseded_reply_drops_its_audio(self, monkeypatch):
+        mgr, session, gate = self._manager(monkeypatch)
+        old_go, old_started = gate("Old reply.")
+        new_go, new_started = gate("New reply.")
+
+        old = asyncio.ensure_future(mgr._play_response("12", "Old reply."))
+        await self._until(old_started)
+        mgr._handle_barge_in(1)           # user interrupts the old reply...
+        new = asyncio.ensure_future(mgr._play_response("12", "New reply."))
+        await self._until(new_started)    # ...and the next reply resets `interrupted`
+
+        old_go.set()
+        await old
+        assert session.outgoing_track._queue.qsize() == 0   # stale audio dropped
+        assert session.is_responding is True                # still the new reply's turn
+
+        new_go.set()
+        await new
+        assert session.outgoing_track._queue.qsize() == 7
+        assert session.is_responding is False
+
+    @pytest.mark.asyncio
+    async def test_superseded_reply_does_not_hang_up(self, monkeypatch):
+        from unittest.mock import AsyncMock
+        mgr, session, gate = self._manager(monkeypatch)
+        mgr._hangup_session = AsyncMock()
+        old_go, old_started = gate("Old goodbye.")
+        new_go, new_started = gate("New reply.")
+
+        old = asyncio.ensure_future(mgr._play_response("12", "Old goodbye. [[hangup]]"))
+        await self._until(old_started)
+        new = asyncio.ensure_future(mgr._play_response("12", "New reply."))
+        await self._until(new_started)
+        old_go.set()
+        await old
+        mgr._hangup_session.assert_not_awaited()   # the new reply owns the hangup now
+        new_go.set()
+        await new
+        mgr._hangup_session.assert_awaited_once()  # the marker still ends the call after it
+
+
+class TestUtteranceCap:
+    """Speech that never pauses is cut into capped pieces, not buffered forever."""
+
+    @pytest.mark.asyncio
+    async def test_long_speech_is_split_at_the_cap(self, monkeypatch, tmp_path):
+        import av
+        import numpy as np
+        from unittest.mock import MagicMock
+
+        monkeypatch.setattr(ch, "_MAX_UTTERANCE_PCM_BYTES", ch._STT_BYTES_PER_SEC)   # 1 s cap
+
+        def loud_frame():
+            arr = np.full((1, 960), 5000, dtype=np.int16)
+            f = av.AudioFrame.from_ndarray(arr, format="s16", layout="mono")
+            f.sample_rate = ch._SAMPLE_RATE
+            return f
+
+        class Track:
+            n = 0
+            async def recv(self):
+                self.n += 1
+                if self.n > 175:   # 3.5 s of uninterrupted speech
+                    raise RuntimeError("track ended")
+                return loud_frame()
+
+        buf = ch.IncomingAudioBuffer(str(tmp_path), on_utterance=MagicMock())
+        pieces = []
+
+        async def record(pcm):
+            pieces.append(len(pcm))
+        buf._process_utterance = record
+        buf._running = True
+        await buf._receive_loop(Track())
+        await asyncio.sleep(0)
+
+        assert len(pieces) == 4
+        assert all(n <= ch._STT_BYTES_PER_SEC + 1024 for n in pieces)
+        assert sum(pieces) >= ch._STT_BYTES_PER_SEC * 3   # nothing dropped
+
+
 class TestIncomingCallAuthorization:
     """Calls from contacts Hermes wouldn't talk to are declined, not answered."""
 
