@@ -2612,11 +2612,10 @@ class DeltaChatEditingAdapter(DeltaChatAdapter):
     """
 
     SUPPORTS_MESSAGE_EDITING = True
-    _MAX_PENDING_EDITS = 64
 
-    def __init__(self, config: PlatformConfig):
+    def __init__(self, config: PlatformConfig, interval: float = _DEFAULT_EDIT_INTERVAL):
         super().__init__(config)
-        self._edit_interval = _edit_interval(config) or _DEFAULT_EDIT_INTERVAL
+        self._edit_interval = interval
         # msg id -> newest text not yet sent, oldest first
         self._edit_pending: Dict[int, str] = {}
         self._edit_last_at = float("-inf")
@@ -2632,35 +2631,41 @@ class DeltaChatEditingAdapter(DeltaChatAdapter):
         why: every edit is a whole email ("✏️" + full text) to every chat
         member through chatmail relays run by volunteers, and Hermes asks for
         one per streamed chunk. Interim edits share one budget per account;
-        a deferred one returns "skipped" and its newest text is flushed when
-        the budget allows. finalize=True (end of turn or segment) goes out at
-        once — it replaces the fresh message Hermes would otherwise send.
-        Error strings are fixed: Hermes reads "rate"/"flood" in them as flood
-        control.
+        a deferred one is queued (newest text wins) and reported as done, so
+        Hermes' idea of what's on screen matches what will be, and it stops
+        re-sending unchanged text. finalize=True (end of turn or segment)
+        goes out at once — it replaces the fresh message Hermes would
+        otherwise send. Error strings are fixed: Hermes reads "rate"/"flood"
+        in them as flood control.
         """
         msg_id = str(message_id or "")
-        if not self.rpc or not self.account_id or not msg_id.isdigit():
+        if not self.rpc or not self.account_id or not (msg_id.isascii() and msg_id.isdigit()):
             return SendResult(success=False, error="edit unavailable")
+        msg = int(msg_id)
+        if finalize:
+            # a finalize, even a refused one, supersedes queued interim text
+            self._edit_pending.pop(msg, None)
+        if not content.strip():
+            return SendResult(success=False, error="empty edit")
         if self._format_html_message(content)[1] is not None:
             # core can't edit or create HTML messages; Hermes falls back to
-            # send() for the rest, which adds the HTML part
-            return SendResult(success=False, error="too long to edit")
-        msg = int(msg_id)
+            # send() for the rest, which adds the HTML part. retryable keeps a
+            # long tool-progress bubble frozen instead of one message per tool.
+            return SendResult(success=False, error="too long to edit", retryable=not finalize)
         loop = asyncio.get_running_loop()
         if finalize or (not self._edit_pending and not self._edit_lock.locked()
                         and loop.time() >= self._edit_last_at + self._edit_interval):
             async with self._edit_lock:
-                self._edit_pending.pop(msg, None)
-                ok = await self._send_edit(msg, content)
-            if not ok:
-                return SendResult(success=False, error="edit failed")
-            return SendResult(success=True, message_id=msg_id)
-        if msg not in self._edit_pending and len(self._edit_pending) >= self._MAX_PENDING_EDITS:
-            return SendResult(success=False, error="too many pending edits")
+                # re-check: we may have queued behind finalizes that used the slot
+                if finalize or loop.time() >= self._edit_last_at + self._edit_interval:
+                    self._edit_pending.pop(msg, None)
+                    if not await self._send_edit(msg, content):
+                        return SendResult(success=False, error="edit failed")
+                    return SendResult(success=True, message_id=msg_id)
         self._edit_pending[msg] = content
         if self._edit_flusher is None or self._edit_flusher.done():
             self._edit_flusher = asyncio.create_task(self._flush_edits())
-        return SendResult(success=True, message_id=msg_id, raw_response={"skipped": True})
+        return SendResult(success=True, message_id=msg_id)
 
     async def _send_edit(self, msg: int, text: str) -> bool:
         """Send one edit; caller holds _edit_lock."""
@@ -2748,13 +2753,17 @@ def _env_enablement() -> Optional[Dict[str, Any]]:
     return result
 
 
+def _adapter_factory(cfg):
+    interval = _edit_interval(cfg)
+    return DeltaChatEditingAdapter(cfg, interval) if interval else DeltaChatAdapter(cfg)
+
+
 def register_platform(ctx):
     """Register Delta Chat platform adapter with Hermes."""
     ctx.register_platform(
         name="deltachat-platform",
         label="Delta Chat",
-        adapter_factory=lambda cfg: (
-            DeltaChatEditingAdapter if _edit_interval(cfg) else DeltaChatAdapter)(cfg),
+        adapter_factory=_adapter_factory,
         check_fn=check_requirements,
         validate_config=validate_config,
         required_env=["DELTACHAT_RPC_SERVER"],

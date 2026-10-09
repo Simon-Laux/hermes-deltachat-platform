@@ -321,7 +321,8 @@ starting with ✏️. So the adapter throttles edits:
 - The final text of a reply always goes out right away (it replaces the new message Hermes
   would otherwise send).
 - Replies longer than 40 lines stop being edited and continue as a new message, because the
-  adapter sends those with an HTML part and Delta Chat can't edit HTML messages.
+  adapter sends those with an HTML part and Delta Chat can't edit HTML messages. A tool-progress
+  message that grows past 40 lines just stops updating.
 
 Turning editing on also makes Hermes show tool progress, which it skips for platforms that
 can't edit. To cut the number of edits further, turn tool progress and/or streaming off for

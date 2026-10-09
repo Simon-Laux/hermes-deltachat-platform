@@ -40,6 +40,7 @@ class MockSendResult:
     message_id: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
     raw_response: Any = None
+    retryable: bool = False
 
 
 @dataclass
