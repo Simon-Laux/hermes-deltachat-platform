@@ -35,6 +35,11 @@ env -u LD_LIBRARY_PATH -u PYTHONPATH HOME=/nonexistent ./.calltest-py/bin/python
 
 `HOME=/nonexistent` keeps `call_handler.py` from loading the live `~/.hermes/aiortc-env`.
 
+**The Hermes contract tests** (`tests/test_hermes_contract.py`) run
+`tests/hermes_contract/scenarios.py` under the *installed* Hermes' Python, against its real
+gateway code instead of the mocks in `conftest.py`. They find Hermes via `hermes` on PATH, or
+`HERMES_PYTHON`, and skip when neither is there (as in CI).
+
 ## Finding Hermes Source
 
 ### Locating your installed Hermes
