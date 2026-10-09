@@ -94,14 +94,26 @@ All optional. Set in `~/.hermes/.env`.
 
 | Variable | Default | Description |
 |---|---|---|
-| `DELTACHAT_CALL_STT_VOXTRAL` | off | When `true`, route call audio to **Mistral Voxtral** cloud STT (~1-2s, accurate). Requires `MISTRAL_API_KEY`. **Strongly recommended** — local Whisper `medium` on CPU is ~15-30x slower than realtime (≈30s for a 2s clip), unusable for live calls. When off, the locally configured STT provider is used. |
+| `DELTACHAT_CALL_STT_VOXTRAL` | off | When `true`, send call audio straight to **Mistral Voxtral** cloud STT (~1-2s, accurate). Requires `MISTRAL_API_KEY`. Uses `stt.mistral.model` from `config.yaml` if set, else `voxtral-mini-latest`. If Voxtral fails, the call falls back to the configured provider. |
 
 ```bash
 DELTACHAT_CALL_STT_VOXTRAL=true
 ```
 
-> Note: enabling this sends call audio to Mistral's API. Leave it off if you
-> require fully local speech processing (and expect high latency).
+> Note: enabling this sends call audio to Mistral's API. For fully local
+> speech processing, leave it off and use `stt.provider: local` (expect high
+> latency).
+
+With the flag off, calls transcribe exactly like voice messages: Hermes picks
+the provider from `stt.provider` and the model from that provider's section
+(`stt.local.model`, `stt.mistral.model`, ...). The flag is only a shortcut
+to Voxtral. It is not needed when `stt.provider: mistral` is already set.
+
+For `stt.provider: local`, the local Whisper model is pre-loaded when a call
+is accepted, so the first utterance doesn't wait for the model to load. Pick
+the size with `stt.local.model`. Larger sizes such as `medium` are far slower
+than realtime on CPU (≈30s for a 2s clip) and are unusable for live calls. Use
+a cloud provider or a small model.
 
 ### Spoken-reply style
 
