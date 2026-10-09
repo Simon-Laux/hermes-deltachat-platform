@@ -124,7 +124,7 @@ channel.send(new TextEncoder().encode("Hello!"));
 - `sendUpdate()`: Read `sendUpdateInterval` and `sendUpdateMaxSize` (defaults 10000 ms and 128000 bytes if missing). Split larger data across several updates. Sending faster than the interval does not make updates arrive sooner; the messenger may delay them for much longer than the interval.
 - `joinRealtimeChannel()`: Max 128000 bytes per `send()`.
 
-Actual values in Delta Chat (chatmail core); other messengers may differ:
+Actual values in Delta Chat (chatmail core, last checked 2026-10-10 against `main` at `694ef8ba7`, latest release v2.63.0); other messengers may differ:
 - `sendUpdateInterval` is 1000 ms (burst of 3 messages, then about 1 per second).
 - `sendUpdateMaxSize` is the recommended attachment size, about 22 MB.
 - Updates still waiting to be sent are packed together into outgoing messages of up to about 100 KiB of JSON each.
