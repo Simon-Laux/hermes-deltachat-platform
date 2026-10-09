@@ -2624,6 +2624,14 @@ class DeltaChatEditingAdapter(DeltaChatAdapter):
         # edit already on its way; serialising sends keeps the final text last.
         self._edit_lock = asyncio.Lock()
 
+    async def send(self, chat_id: str, content: str, reply_to=None, metadata=None) -> SendResult:
+        result = await super().send(chat_id, content, reply_to=reply_to, metadata=metadata)
+        if result.success and result.message_id:
+            # a new message is an email too: without this a streamed reply's
+            # first edit followed its first chunk ~50 ms later
+            self._edit_last_at = asyncio.get_running_loop().time()
+        return result
+
     async def edit_message(self, chat_id: str, message_id: str, content: str, *,
                            finalize: bool = False, metadata=None) -> SendResult:
         """Edit one of our messages, at most one interim edit per interval.

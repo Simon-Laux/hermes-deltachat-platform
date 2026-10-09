@@ -285,3 +285,13 @@ async def test_interim_queued_behind_a_finalize_respects_the_budget(ed):
     await asyncio.gather(first, ed.edit_message("5", "2", "2F", finalize=True), late_interim())
     await asyncio.sleep(INTERVAL * 3)
     assert log == [(0.0, "1"), (6.0, "2F"), (11.0, "3")], log
+
+
+@virtual_time
+async def test_send_counts_against_the_budget(ed):
+    ed.rpc.send_msg.return_value = 123
+    assert (await ed.send("5", "first chunk ▉")).success
+    await ed.edit_message("5", "123", "first chunk and more ▉")
+    assert _sent(ed) == []  # queued: a new message is an email too
+    await asyncio.sleep(INTERVAL * 1.5)
+    assert _sent(ed) == [(1, 123, "first chunk and more ▉")]
