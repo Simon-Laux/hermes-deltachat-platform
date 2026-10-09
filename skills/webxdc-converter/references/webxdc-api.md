@@ -2,6 +2,8 @@
 
 This document describes the JavaScript API available to webxdc apps.
 
+Load the API with `<script src="webxdc.js"></script>` before your own scripts. The messenger provides `webxdc.js`, so do not put it in the `.xdc`.
+
 ## Core API
 
 ### Properties
