@@ -102,7 +102,7 @@ const files = await window.webxdc.importFiles({
 Join the realtime channel of this app instance. Experimental and not available in every messenger (Delta Chat since 1.48).
 
 **Returns:** Channel object with methods:
-- `channel.send(data)` - Send a `Uint8Array` (max 128000 bytes) to currently connected peers. Delivery is not guaranteed
+- `channel.send(data)` - Send a `Uint8Array` (max 128000 bytes) to currently connected peers. Delivery is not guaranteed. Unlike `sendUpdate`, your own data is not passed back to your own listener, so apply local changes directly
 - `channel.setListener(callback)` - Set the listener for incoming `Uint8Array` data. A second call replaces the first listener
 - `channel.leave()` - Leave the channel. The object is unusable afterwards; call `joinRealtimeChannel()` again to rejoin
 
@@ -122,6 +122,22 @@ channel.send(new TextEncoder().encode("Hello!"));
 ## Rate Limits
 
 - `sendUpdate()`: Read `sendUpdateInterval` and `sendUpdateMaxSize` (defaults 10000 ms and 128000 bytes if missing). Split larger data across several updates. Sending faster than the interval does not make updates arrive sooner; the messenger may delay them for much longer than the interval.
+- `joinRealtimeChannel()`: Max 128000 bytes per `send()`.
+
+Actual values in Delta Chat (chatmail core, last checked 2026-10-10 against `main` at `694ef8ba7`, latest release v2.63.0); other messengers may differ:
+- `sendUpdateInterval` is 1000 ms (burst of 3 messages, then about 1 per second).
+- `sendUpdateMaxSize` is the recommended attachment size, about 22 MB.
+- Updates still waiting to be sent are packed together into outgoing messages of up to about 100 KiB of JSON each.
+
+## Delta Chat Quirks
+
+Behaviour of Delta Chat's implementation that the spec does not make obvious (checked 2026-10-10 in chatmail core and the Desktop, Android and iOS sources).
+
+- **Oversized realtime data is dropped silently.** No client checks the size; data above about 128 KiB fails inside core and the app gets no error. Keep each `send()` at or below 128000 bytes.
+- **Serials are bookmarks, not counters.** They have gaps and differ between peers and even between a user's devices. Updates already arrive in order, so don't sort by them. Use them to resume: if you compact state, store it with the last serial it includes and pass that serial to `setUpdateListener` on the next start to get only newer updates.
+- **A new `info` can replace the previous one.** If the last message in the chat is an `info` message from the same sender and app, a new `info` overwrites its text instead of adding a line.
+- **`selfAddr` belongs to one app instance.** It is derived from the user's key and the app message, so forwarding or re-sending the app gives a new `selfAddr` and starts with empty state. Don't rely on `selfAddr` values to match up data from an exported backup imported into another instance.
+- **Never ship a file named `webxdc.js`.** The messenger replaces it with its own API script when loaded (on iOS even in subdirectories, e.g. `lib/webxdc.js`).
 
 ## Best Practices
 

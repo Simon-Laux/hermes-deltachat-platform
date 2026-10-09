@@ -350,3 +350,9 @@ Inform the user if their app would benefit from a hybrid approach (realtime for 
 - **Directory paths do not auto-resolve** — always use explicit paths like `href="subdir/index.html"`, not `href="subdir/"`.
 - **Always load `webxdc.js` before using the API** — `<script src="webxdc.js"></script>` before your own scripts. The messenger provides the file, so never include it in the ZIP, but without the tag `window.webxdc` is undefined.
 - **Keep it small** — aim for under 1 MB; hard limits vary by messenger, ~10 MB is the practical ceiling.
+- **Never name a file `webxdc.js`** — the messenger replaces any file with that name with its own API script.
+- **No `alert()`, `confirm()` or `prompt()`** — the host webview may not implement them (they return immediately without showing anything). Build dialogs in the page.
+- **`window.open()` is blocked** — open pages in the same window or show content in the page.
+- **Don't rely on browser permissions** — camera, microphone, clipboard, geolocation and similar requests may be denied. Feature-detect and keep the app usable without them. WebRTC is blocked as part of the no-internet rule.
+- **External links: offer to copy them** — some clients ask the user before opening an outbound link, others do nothing when it is clicked. Show the URL as selectable text so the user can copy it (a copy button is a bonus, but fall back to selectable text if `navigator.clipboard` fails).
+- **Never leave a white page** — if something essential fails (a script error during startup, a WebAssembly module that fails to load, missing data), show an error message in the page. Add a `window.addEventListener("error", …)` and `"unhandledrejection"` handler that displays the error.
