@@ -3,6 +3,16 @@
 Notable changes for people running the adapter. Internal refactors, test
 repairs and doc typo fixes are left out; see the git log for those.
 
+## Unreleased
+
+### Fixed
+
+- **Webxdc apps from the skill could ship without `webxdc.js`.** The skill
+  now says plainly that any app using the webxdc API must load
+  `<script src="webxdc.js"></script>` before its own scripts. The messenger
+  provides the file, so it is still not packaged, but without the tag
+  `window.webxdc` is undefined.
+
 ## 2.0.0 (2026-10-05)
 
 ### Breaking / requires action

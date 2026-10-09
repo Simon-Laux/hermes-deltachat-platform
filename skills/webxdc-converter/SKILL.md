@@ -202,14 +202,22 @@ Here is your report. MEDIA:<absolute path of your working directory>/report.pdf
 
 ---
 
-## Level 1: Simple sendUpdate for persistence and sharing
+## Rule: always load webxdc.js before using the API
 
-Add to the HTML (do NOT include a `webxdc.js` file in the ZIP — the messenger injects it):
+Every app that touches `window.webxdc` (Levels 1, 2 and 3) **must** load `webxdc.js` with a script tag in `index.html` (and in every other HTML page that uses the API), placed **before** any script that uses it:
+
 ```html
 <script src="webxdc.js"></script>
+<script src="app.js"></script>  <!-- or your inline <script> / bundle -->
 ```
 
-Core API:
+`webxdc.js` is provided by the host messenger at runtime, so it is **not** packaged — never put a `webxdc.js` file in the ZIP. But the messenger does not inject it on its own: without the script tag, `window.webxdc` is `undefined` and every API call fails. This applies to bundled apps too — a bundler does not provide it; keep the plain `<script src="webxdc.js">` tag in the HTML ahead of the bundle.
+
+---
+
+## Level 1: Simple sendUpdate for persistence and sharing
+
+Load `webxdc.js` first (see the rule above), then use the core API:
 ```javascript
 // Send a state update to all peers (including yourself)
 window.webxdc.sendUpdate({
@@ -319,5 +327,5 @@ Inform the user if their app would benefit from a hybrid approach (realtime for 
 - `index.html` is the entry point — the messenger opens this file.
 - `index.html` must be at the **root** of the .xdc file — the messenger will not look in subdirectories.
 - **Directory paths do not auto-resolve** — always use explicit paths like `href="subdir/index.html"`, not `href="subdir/"`.
-- `webxdc.js` is provided by the messenger — never include it in the ZIP, just reference it with a script tag.
+- **Always load `webxdc.js` before using the API** — `<script src="webxdc.js"></script>` before your own scripts. The messenger provides the file, so never include it in the ZIP, but without the tag `window.webxdc` is undefined.
 - **Keep it small** — aim for under 1 MB; hard limits vary by messenger, ~10 MB is the practical ceiling.
