@@ -45,6 +45,7 @@ async def test_media_over_the_cap_is_not_passed_on(make, view_type, mime):
     a, msg = make(view_type, size=101, mime=mime, limit=100)
     event = await _event(a, msg)
     assert event.media_urls == []
+    assert event.media_types == []
     assert "over the inbound media size limit" in event.text
 
 
@@ -57,9 +58,33 @@ async def test_media_within_the_cap_is_passed_on(make):
 
 
 @pytest.mark.asyncio
-async def test_zero_cap_means_no_cap(make):
-    a, msg = make("Image", size=10_000, mime="image/jpeg", limit=0)
+@pytest.mark.parametrize("limit", [0, -1])
+async def test_zero_or_negative_cap_means_no_cap(make, limit):
+    a, msg = make("Image", size=10_000, mime="image/jpeg", limit=limit)
     assert (await _event(a, msg)).media_urls
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("view_type,mime", [
+    ("Image", "image/jpeg"), ("Voice", "audio/ogg"), ("File", "application/pdf"),
+])
+async def test_missing_file_sends_no_media_type(make, view_type, mime):
+    a, msg = make(view_type, size=10, mime=mime)
+    msg["file"] = "/nonexistent/blob.bin"
+    event = await _event(a, msg)
+    assert event.media_urls == [] and event.media_types == []
+
+
+@pytest.mark.asyncio
+async def test_unreadable_size_is_treated_as_missing(make, monkeypatch):
+    a, msg = make("File", size=10, mime="application/pdf", limit=100)
+
+    def _raise(path):
+        raise OSError("gone")
+    monkeypatch.setattr(adapter_mod.os.path, "getsize", _raise)
+    event = await _event(a, msg)
+    assert event.media_urls == [] and event.media_types == []
+    assert event.text.startswith("[File from u: clip.bin]")
 
 
 @pytest.mark.asyncio

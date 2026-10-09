@@ -2376,13 +2376,25 @@ body {{
         from gateway.platforms.base import get_inbound_media_max_bytes
         resolved = self._resolve_blob_path(filename) if filename else None
         limit = get_inbound_media_max_bytes()
-        size = os.path.getsize(resolved) if resolved else 0
+        size = 0
+        if resolved:
+            # why: the file can vanish or turn unreadable between exists() and
+            # here; treat that as "not found" rather than dropping the message.
+            try:
+                size = os.path.getsize(resolved)
+            except OSError as e:
+                logger.warning("Could not stat media of msg %s: %s", msg_id, e)
+                resolved = None
         too_large = ""
-        if limit and size > limit:
+        # why: Hermes documents 0 *and* negative as "no cap".
+        if limit > 0 and size > limit:
             logger.warning("Not passing on media of msg %s: %d bytes is over the %d-byte "
                            "inbound media limit", msg_id, size, limit)
             too_large = " [attachment not passed on: over the inbound media size limit]"
             resolved = None
+        # why: media_types must stay in step with media_urls. Hermes merges a
+        # photo burst by extending both lists, so a type with no file shifts
+        # every later attachment onto the wrong type.
 
         # Voice / Audio — let Hermes handle STT via media_urls
         if view_type in (MessageViewtype.VOICE.value, MessageViewtype.AUDIO.value) and filename:
@@ -2403,7 +2415,7 @@ body {{
                 source=source,
                 message_id=str(msg_id),
                 media_urls=[resolved] if resolved else [],
-                media_types=[file_mime or ("audio/ogg" if is_voice else "audio/mpeg")],
+                media_types=[file_mime or ("audio/ogg" if is_voice else "audio/mpeg")] if resolved else [],
             )
             await self.handle_message(message_event)
 
@@ -2422,11 +2434,12 @@ body {{
                 source=source,
                 message_id=str(msg_id),
                 media_urls=[resolved] if resolved else [],
-                media_types=[file_mime or "image/jpeg"],
+                media_types=[file_mime or "image/jpeg"] if resolved else [],
             )
             await self.handle_message(message_event)
 
-        # File / document (including .xdc webxdc apps)
+        # File / document / video. Incoming .xdc apps have viewtype Webxdc and
+        # are not handled here.
         elif view_type in (MessageViewtype.FILE.value, MessageViewtype.VIDEO.value) and filename:
             is_video = view_type == MessageViewtype.VIDEO.value
             if resolved:
@@ -2450,7 +2463,7 @@ body {{
                 source=source,
                 message_id=str(msg_id),
                 media_urls=[resolved] if resolved else [],
-                media_types=[file_mime or "application/octet-stream"],
+                media_types=[file_mime or "application/octet-stream"] if resolved else [],
             )
             await self.handle_message(message_event)
 
