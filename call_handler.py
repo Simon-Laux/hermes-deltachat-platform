@@ -1586,6 +1586,15 @@ class CallManager:
         if notify_ai:
             asyncio.ensure_future(self._note_call_ended(chat_id, caller_id, caller_name, msg_id))
 
+    def _call_session_id(self, source) -> Optional[str]:
+        """Hermes session_id behind a call's session source, or None."""
+        gw = self._gateway()
+        try:
+            return gw.session_store.peek_session_id(gw._session_key_for_source(source)) or None
+        except Exception as e:
+            logger.debug("Could not resolve call session id: %s", e)
+            return None
+
     async def _note_call_ended(self, chat_id: str, caller_id: str, caller_name: str,
                                msg_id: int) -> None:
         """Inject a 'call ended' turn into the call session so the AI knows the
@@ -1622,13 +1631,23 @@ class CallManager:
                 user_id=caller_id or "user", user_name=caller_name or "User",
                 thread_id=None,
             )
+            # Point at the call session so the text-chat AI can read what was
+            # said instead of telling the user it has no record of the call.
+            call_sid = self._call_session_id(source)
+            if call_sid:
+                text = ("[A voice call with the user has just ended (transcript: session "
+                        f"{call_sid}; read it with session_search(session_id=\"{call_sid}\") "
+                        "if the user asks about the call). Do not call back right now.]")
+            else:
+                text = "[A voice call with the user has just ended. Do not call back right now.]"
             main_event = MessageEvent(
-                text="[A voice call with the user has just ended. Do not call back right now.]",
+                text=text,
                 message_type=MessageType.TEXT,
                 source=main_source,
                 message_id=f"{CALL_END_NOTE_PREFIX}main-{int(time.monotonic() * 1000)}",
             )
-            logger.info("Notifying main thread that call ended (chat=%s)", chat_id)
+            logger.info("Notifying main thread that call ended (chat=%s, call session=%s)",
+                        chat_id, call_sid)
             with contextlib.suppress(Exception):
                 await self._to_hermes(main_event)
 
