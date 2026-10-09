@@ -1116,9 +1116,9 @@ class DeltaChatAdapter(BasePlatformAdapter):
             self._transport.start()
             self.rpc = _AsyncRpc(deltachat2.Rpc(self._transport))
 
-            # Wait for RPC server to be ready
-            await asyncio.sleep(1)
-
+            # No startup sleep: requests queue in the stdin pipe until the
+            # server reads them, so this first call doubles as the readiness
+            # check, and a server that dies on startup fails it fast.
             # Check version - REJECT if too old
             if not await _check_dc_version(self.rpc):
                 self._cleanup()

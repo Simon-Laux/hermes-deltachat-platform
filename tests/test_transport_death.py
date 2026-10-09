@@ -121,3 +121,72 @@ def test_reader_tolerates_reply_for_abandoned_call():
     t.process.stdout = io.BytesIO(b'{"id": 1, "result": 1}\n{"id": 2, "result": 2}\n')
     t._reader_loop()
     assert survivor._value == {"id": 2, "result": 2}
+
+
+def test_reader_failure_retires_a_live_server():
+    """A malformed line kills the reader; the process must not stay 'alive'."""
+    import io
+    from unittest.mock import MagicMock
+
+    t = _bare_transport(returncode=None)
+    t.closing = False
+    t.process = MagicMock()
+    t.process.stdout = io.BytesIO(b"not json\n")
+    pending = _Result()
+    t.pending_results = {1: pending}
+    t._reader_loop()
+    t.process.kill.assert_called_once()
+    assert pending._value["error"]["message"] == "RPC server disconnected"
+
+
+def test_bounded_call_times_out_and_forgets_the_request():
+    t = _bare_transport(returncode=None)  # alive, but nothing ever answers
+    start = time.monotonic()
+    try:
+        t._call("stop_io_for_all_accounts", (), timeout=0.3)
+        assert False, "expected JsonRpcError"
+    except JsonRpcError as e:
+        assert "timed out" in str(e)
+    assert time.monotonic() - start < 2
+    assert t.pending_results == {}
+
+
+# Real subprocesses standing in for deltachat-rpc-server in the close() tests.
+_ANSWERS_THEN_EXITS_ON_EOF = (
+    "import json, sys\n"
+    "for line in sys.stdin:\n"
+    "    req = json.loads(line)\n"
+    "    print(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': None}), flush=True)\n"
+)
+_WEDGED = "import time\nwhile True: time.sleep(1)\n"
+_WEDGED_IGNORES_SIGTERM = "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nwhile True: time.sleep(1)\n"
+
+
+def _closed_within(code, timeout):
+    import sys
+
+    t = IOTransport(rpc_server=[sys.executable, "-c", code])
+    t.start()
+    start = time.monotonic()
+    t.close(timeout=timeout)
+    return t, time.monotonic() - start
+
+
+def test_close_lets_a_healthy_server_exit_on_eof():
+    t, elapsed = _closed_within(_ANSWERS_THEN_EXITS_ON_EOF, timeout=5)
+    assert t.process.returncode == 0
+    assert elapsed < 4
+    assert not t.reader_thread.is_alive() and not t.writer_thread.is_alive()
+
+
+def test_close_terminates_a_wedged_server():
+    t, elapsed = _closed_within(_WEDGED, timeout=0.5)
+    assert t.process.returncode is not None
+    assert elapsed < 5
+    assert not t.reader_thread.is_alive() and not t.writer_thread.is_alive()
+
+
+def test_close_kills_a_server_that_ignores_sigterm():
+    t, elapsed = _closed_within(_WEDGED_IGNORES_SIGTERM, timeout=0.5)
+    assert t.process.returncode == -9
+    assert elapsed < 5
