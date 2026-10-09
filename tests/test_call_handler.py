@@ -359,6 +359,72 @@ class TestOutgoingCall:
         assert ch.CallManager.is_call_end_reply("") is False
 
 
+class TestDeadCall:
+    """A peer that vanishes never sends CallEnded; the failed pc ends the call."""
+
+    class _FakePc:
+        def __init__(self):
+            self.connectionState = "connected"
+            self._handlers = {}
+
+        def on(self, event):
+            def deco(fn):
+                self._handlers.setdefault(event, []).append(fn)
+                return fn
+            return deco
+
+        def set_state(self, state):
+            self.connectionState = state
+            for fn in self._handlers.get("connectionstatechange", []):
+                fn()
+
+        async def close(self):
+            pass
+
+    def _manager(self):
+        from unittest.mock import AsyncMock, MagicMock
+        adapter = MagicMock()
+        adapter.rpc.end_call = AsyncMock()
+        mgr = ch.CallManager(adapter=adapter)
+        mgr._note_call_ended = AsyncMock()
+        return mgr, adapter
+
+    def _register(self, mgr, msg_id, chat_id="12"):
+        from unittest.mock import MagicMock
+        pc = self._FakePc()
+        mgr._register_session(pc, None, ch.HermesAudioTrack(), MagicMock(),
+                              msg_id, chat_id, "10", "Bob")
+        return pc
+
+    @pytest.mark.asyncio
+    async def test_failed_connection_hangs_up_and_tears_down(self):
+        mgr, adapter = self._manager()
+        pc = self._register(mgr, 5)
+        pc.set_state("failed")
+        for _ in range(5):
+            await asyncio.sleep(0)
+        adapter.rpc.end_call.assert_awaited_once_with(adapter.account_id, 5)
+        assert 5 not in mgr._sessions
+        assert not mgr.has_active_call("12")
+
+    @pytest.mark.asyncio
+    async def test_other_states_keep_the_call(self):
+        mgr, adapter = self._manager()
+        pc = self._register(mgr, 5)
+        pc.set_state("connecting")
+        await asyncio.sleep(0)
+        adapter.rpc.end_call.assert_not_awaited()
+        assert mgr.has_active_call("12")
+
+    @pytest.mark.asyncio
+    async def test_old_call_teardown_keeps_redialled_call(self):
+        mgr, _ = self._manager()
+        self._register(mgr, 5)
+        self._register(mgr, 6)   # same chat, redial before 5 was noticed dead
+        await mgr._teardown_session(5)
+        assert mgr._chat_to_msg["12"] == 6
+
+
 class TestDecodeTts:
     def _write_wav(self, path, seconds=0.4, rate=22050):
         # mono s16 sine-ish (just nonzero) to mimic a TTS mp3's mono low rate

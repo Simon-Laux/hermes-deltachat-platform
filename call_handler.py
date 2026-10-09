@@ -883,7 +883,25 @@ class CallManager:
         )
         self._sessions[msg_id] = session
         self._chat_to_msg[chat_id] = msg_id
+
+        # why: a peer that vanishes (network lost, app killed) never sends
+        # CallEnded. aioice notices after ~30 s of failed consent checks and the
+        # pc goes "failed"; without this the session lingered forever, still
+        # holding the chat's call routing, the model override and dc_end_call.
+        @pc.on("connectionstatechange")
+        def _on_failed():
+            if pc.connectionState == "failed":
+                asyncio.ensure_future(self._end_dead_call(msg_id))
         return session
+
+    async def _end_dead_call(self, msg_id: int) -> None:
+        if msg_id not in self._sessions:
+            return
+        logger.info("Call %s: connection failed, hanging up", msg_id)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(
+                self._adapter.rpc.end_call(self._adapter.account_id, msg_id), timeout=5.0)
+        await self._teardown_session(msg_id)
 
     # ------------------------------------------------------------------ #
     # Internal — incoming call setup                                       #
@@ -1558,7 +1576,10 @@ class CallManager:
         if session is None:
             return
         chat_id, caller_id, caller_name = session.chat_id, session.caller_id, session.caller_name
-        self._chat_to_msg.pop(chat_id, None)
+        # why: a redial can register a new call in this chat before the old one
+        # is torn down; don't take the new call's routing with us
+        if self._chat_to_msg.get(chat_id) == msg_id:
+            self._chat_to_msg.pop(chat_id)
         self._clear_model_override(session)
         session.audio_buffer.stop()
         # pc.close() can hang if ICE is in a bad state — don't let it block shutdown
