@@ -3,6 +3,13 @@
 Notable changes for people running the adapter. Internal refactors, test
 repairs and doc typo fixes are left out; see the git log for those.
 
+## Unreleased
+
+### Fixed
+
+- Files over Hermes' `gateway.max_inbound_media_bytes` (default 128 MiB) now
+  reach the agent as text only.
+
 ## 2.0.0 (2026-10-05)
 
 ### Breaking / requires action
