@@ -24,6 +24,12 @@ repairs and doc typo fixes are left out; see the git log for those.
   `node_modules` and notes archives over 1 MB and 10 MB. Generated icons are 256 px instead of 128. When the bot sends
   a new version of a shared-state app it now tells you the old data stays
   in the previous message.
+- **Optional message editing** (`DELTACHAT_MESSAGE_EDITING`, off by default).
+  Hermes can then edit streamed replies, tool progress, heartbeats and
+  approval prompts in place. Every edit is an email through the chatmail
+  relay, so in-progress edits are limited to one per
+  `DELTACHAT_EDIT_MIN_INTERVAL` seconds (default 5) for the whole account;
+  the final text always goes out. See the README. (#54)
 
 ### Fixed
 
@@ -58,6 +64,13 @@ repairs and doc typo fixes are left out; see the git log for those.
   skill tells the bot not to use `alert`/`confirm`/`prompt` or
   `window.open`, and to show an error instead of a blank page when the app
   fails to start.
+
+### Changed
+
+- **Hermes no longer streams replies on Delta Chat while editing is off.**
+  Before, streaming (if enabled in Hermes) sent the first chunk with a `▉`
+  cursor that could never be removed, then the rest as a second message.
+  Now the reply arrives as one message.
 
 ## 2.0.0 (2026-10-05)
 

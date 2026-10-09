@@ -6,6 +6,7 @@ Integrates Delta Chat as a messaging platform using deltachat2 (direct JSON-RPC)
 import functools
 import html
 import json
+import math
 import os
 import random
 import re
@@ -321,6 +322,35 @@ def _env_flag(name: str) -> bool:
 def _is_on(value) -> bool:
     """Shared on/off rule for env vars and config.yaml values (see _env_flag)."""
     return str(value).strip().lower() not in ("", "0", "false", "no", "off")
+
+
+_DEFAULT_EDIT_INTERVAL = 5.0
+_MIN_EDIT_INTERVAL = 1.0
+
+
+def _edit_interval(config) -> Optional[float]:
+    """Seconds between interim edits when message editing is on, else None.
+
+    Opt-in via platforms.deltachat-platform.message_editing / edit_min_interval
+    or DELTACHAT_MESSAGE_EDITING / DELTACHAT_EDIT_MIN_INTERVAL.
+    """
+    extra = config.extra or {}
+    raw = extra.get("message_editing")
+    if not (_env_flag("DELTACHAT_MESSAGE_EDITING") if raw is None else _is_on(raw)):
+        return None
+    raw = extra.get("edit_min_interval")
+    if raw is None:
+        # `or`: a blank answer to the plugin.yaml prompt means the default
+        raw = os.getenv("DELTACHAT_EDIT_MIN_INTERVAL") or _DEFAULT_EDIT_INTERVAL
+    try:
+        interval = float(raw)
+    except (TypeError, ValueError):
+        interval = float("nan")
+    if not math.isfinite(interval):
+        logger.warning("Invalid edit_min_interval %r, using %ss", raw, _DEFAULT_EDIT_INTERVAL)
+        interval = _DEFAULT_EDIT_INTERVAL
+    # why: a typo like 0.1 must not turn into an email per streamed token
+    return max(interval, _MIN_EDIT_INTERVAL)
 
 
 # why: /start only acknowledges Telegram's start ping and /topic refuses everything but
@@ -657,6 +687,10 @@ class DeltaChatAdapter(BasePlatformAdapter):
     Uses deltachat2 for direct JSON-RPC access (not abstracted away).
     Each Hermes profile runs its own instance with its own DC_ACCOUNTS_PATH.
     """
+
+    # why: Hermes treats a missing attribute as True and then streams with a
+    # " ▉" cursor it can never remove. Editing lives in DeltaChatEditingAdapter.
+    SUPPORTS_MESSAGE_EDITING = False
 
     def __init__(self, config: PlatformConfig):
         """Initialize the adapter.
@@ -2568,6 +2602,102 @@ body {{
         return False
 
 
+class DeltaChatEditingAdapter(DeltaChatAdapter):
+    """DeltaChatAdapter that edits sent messages in place (message_editing on).
+
+    why a subclass: Hermes only shows tool progress when type(adapter) overrides
+    edit_message (gateway/run_turn_runner.py). Overriding it on the base class,
+    even with a "not supported" body, would send one new message per tool call
+    to everyone who never opted in.
+    """
+
+    SUPPORTS_MESSAGE_EDITING = True
+    _MAX_PENDING_EDITS = 64
+
+    def __init__(self, config: PlatformConfig):
+        super().__init__(config)
+        self._edit_interval = _edit_interval(config) or _DEFAULT_EDIT_INTERVAL
+        # msg id -> newest text not yet sent, oldest first
+        self._edit_pending: Dict[int, str] = {}
+        self._edit_last_at = float("-inf")
+        self._edit_flusher: Optional[asyncio.Task] = None
+        # why: _AsyncRpc runs in an executor, so cancelling a task can't stop an
+        # edit already on its way; serialising sends keeps the final text last.
+        self._edit_lock = asyncio.Lock()
+
+    async def edit_message(self, chat_id: str, message_id: str, content: str, *,
+                           finalize: bool = False, metadata=None) -> SendResult:
+        """Edit one of our messages, at most one interim edit per interval.
+
+        why: every edit is a whole email ("✏️" + full text) to every chat
+        member through chatmail relays run by volunteers, and Hermes asks for
+        one per streamed chunk. Interim edits share one budget per account;
+        a deferred one returns "skipped" and its newest text is flushed when
+        the budget allows. finalize=True (end of turn or segment) goes out at
+        once — it replaces the fresh message Hermes would otherwise send.
+        Error strings are fixed: Hermes reads "rate"/"flood" in them as flood
+        control.
+        """
+        msg_id = str(message_id or "")
+        if not self.rpc or not self.account_id or not msg_id.isdigit():
+            return SendResult(success=False, error="edit unavailable")
+        if self._format_html_message(content)[1] is not None:
+            # core can't edit or create HTML messages; Hermes falls back to
+            # send() for the rest, which adds the HTML part
+            return SendResult(success=False, error="too long to edit")
+        msg = int(msg_id)
+        loop = asyncio.get_running_loop()
+        if finalize or (not self._edit_pending and not self._edit_lock.locked()
+                        and loop.time() >= self._edit_last_at + self._edit_interval):
+            async with self._edit_lock:
+                self._edit_pending.pop(msg, None)
+                ok = await self._send_edit(msg, content)
+            if not ok:
+                return SendResult(success=False, error="edit failed")
+            return SendResult(success=True, message_id=msg_id)
+        if msg not in self._edit_pending and len(self._edit_pending) >= self._MAX_PENDING_EDITS:
+            return SendResult(success=False, error="too many pending edits")
+        self._edit_pending[msg] = content
+        if self._edit_flusher is None or self._edit_flusher.done():
+            self._edit_flusher = asyncio.create_task(self._flush_edits())
+        return SendResult(success=True, message_id=msg_id, raw_response={"skipped": True})
+
+    async def _send_edit(self, msg: int, text: str) -> bool:
+        """Send one edit; caller holds _edit_lock."""
+        self._edit_last_at = asyncio.get_running_loop().time()
+        rpc, account_id = self.rpc, self.account_id
+        if not rpc or not account_id:
+            return False
+        try:
+            await rpc.send_edit_request(account_id, msg, text)
+            return True
+        except Exception as e:
+            logger.warning("Delta Chat: editing message %s failed: %s", msg, e)
+            return False
+
+    async def _flush_edits(self) -> None:
+        """Send deferred edits, oldest message first, one per interval."""
+        loop = asyncio.get_running_loop()
+        while True:
+            delay = self._edit_last_at + self._edit_interval - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            async with self._edit_lock:
+                if not self._edit_pending:
+                    return
+                if loop.time() < self._edit_last_at + self._edit_interval:
+                    continue  # a finalize used the slot meanwhile
+                msg = next(iter(self._edit_pending))
+                await self._send_edit(msg, self._edit_pending.pop(msg))
+
+    def _cleanup(self) -> None:
+        if self._edit_flusher:
+            self._edit_flusher.cancel()
+            self._edit_flusher = None
+        self._edit_pending.clear()
+        super()._cleanup()
+
+
 def check_requirements() -> bool:
     """Check if deltachat2 and deltachat-rpc-server are available."""
     import shutil
@@ -2623,7 +2753,8 @@ def register_platform(ctx):
     ctx.register_platform(
         name="deltachat-platform",
         label="Delta Chat",
-        adapter_factory=lambda cfg: DeltaChatAdapter(cfg),
+        adapter_factory=lambda cfg: (
+            DeltaChatEditingAdapter if _edit_interval(cfg) else DeltaChatAdapter)(cfg),
         check_fn=check_requirements,
         validate_config=validate_config,
         required_env=["DELTACHAT_RPC_SERVER"],

@@ -118,6 +118,9 @@ Hermes log files:
   - `_utils.py` – `AttrDict` (camelCase → snake_case on receive), `_snake2camel` (snake_case → camelCase on send)
   - `types.py` – `MsgData`, `MessageViewtype`, `EventType`, `MessageState`, etc.
 - `deltachat-rpc-openrpc.json` – OpenRPC spec; inspect for available methods and their params
+- Hermes decides some behaviour from the adapter *class*, not from return values: tool progress
+  is only shown if `type(adapter).edit_message` is overridden. That is why `edit_message` lives
+  on `DeltaChatEditingAdapter`, which `register_platform` only picks when editing is enabled.
 
 ## DC JSON-RPC — Always Check the Spec First
 
