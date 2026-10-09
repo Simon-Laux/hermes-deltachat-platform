@@ -462,6 +462,21 @@ class TestDeadCall:
         adapter.rpc.end_call.assert_awaited_once_with(adapter.account_id, 5)
         assert 5 not in mgr._sessions
 
+    @pytest.mark.asyncio
+    async def test_outgoing_call_dead_before_opening_sends_no_greeting(self):
+        from unittest.mock import AsyncMock, MagicMock
+        mgr, _ = self._manager()
+        mgr._play_greeting = AsyncMock()
+        mgr._log_media_stats = AsyncMock()
+        pc = self._register(mgr, 5)
+        pc.set_state("closed")   # died while _finalize_outgoing_call waited
+        for _ in range(5):
+            await asyncio.sleep(0)
+        await mgr._finalize_outgoing_call(pc, 5, "12", "10", "Bob",
+                                          ch.HermesAudioTrack(), MagicMock(), "", None)
+        await asyncio.sleep(0)
+        mgr._play_greeting.assert_not_called()
+
 
 class TestDecodeTts:
     def _write_wav(self, path, seconds=0.4, rate=22050):

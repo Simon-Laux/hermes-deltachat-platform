@@ -1100,6 +1100,14 @@ class CallManager:
                 break
             await asyncio.sleep(0.1)
         logger.info("Outgoing call %s connection state after ICE wait: %s", msg_id, pc.connectionState)
+        # why: if the pc died during the wait, _end_dead_call has torn the call
+        # down; the greeting fallback below would then go out as a text message
+        # (adapter.send sees no active call).
+        if pc.connectionState in ("failed", "closed") or msg_id not in self._sessions:
+            logger.info("Outgoing call %s ended before the opening, skipping it", msg_id)
+            if opening_task:
+                opening_task.cancel()
+            return
 
         # Fallback: if on_track didn't fire, attach the remote audio track
         # from the negotiated transceiver.
