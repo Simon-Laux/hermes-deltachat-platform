@@ -134,6 +134,9 @@ A Delta Chat call happens inside the contact's chat, so by default it would
 share the **same Hermes session/history as your text DM** with the bot. To keep
 spoken turns (and their rough transcripts) out of the text conversation, calls
 run in a **separate session** by default (a distinct `thread_id`).
+When a call ends, the text-chat session gets a short note naming the call's
+session id, so the bot can read the transcript with Hermes' `session_search`
+tool when you ask about the call later.
 
 | Variable | Default | Description |
 |---|---|---|

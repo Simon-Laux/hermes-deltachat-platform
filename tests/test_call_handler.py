@@ -573,3 +573,48 @@ class TestCallSttModel:
         await mgr._warmup_stt()
         tt.transcribe_audio.assert_called_once()
         assert len(tt.transcribe_audio.call_args.args) == 1
+
+
+class TestCallEndedTranscriptLink:
+    """The text-chat note names the call's Hermes session so the AI can read
+    the transcript with session_search instead of claiming it has no record."""
+
+    def _setup(self, monkeypatch, runner):
+        import types
+        from unittest.mock import AsyncMock, MagicMock
+        monkeypatch.setattr(ch, "_CALL_THREAD_ID", "call")
+        fake_run = types.ModuleType("gateway.run")
+        fake_run._gateway_runner_ref = lambda: runner
+        monkeypatch.setitem(sys.modules, "gateway.run", fake_run)
+        monkeypatch.setattr(sys.modules["gateway.platforms.base"], "MessageEvent",
+                            lambda **kw: types.SimpleNamespace(**kw))
+
+        async def closure(*args):
+            return None
+
+        adapter = MagicMock()
+        adapter._message_handler = closure
+        mgr = ch.CallManager(adapter=adapter)
+        mgr._to_hermes = AsyncMock()
+        return mgr
+
+    async def _main_note(self, mgr):
+        await mgr._note_call_ended("12", "11", "X", 1797)
+        return mgr._to_hermes.await_args_list[-1].args[0].text
+
+    @pytest.mark.asyncio
+    async def test_note_links_the_call_session(self, monkeypatch):
+        import types
+        runner = types.SimpleNamespace(
+            _session_key_for_source=lambda source: "agent:main:deltachat-platform:dm:12:call-1797",
+            session_store=types.SimpleNamespace(
+                peek_session_id=lambda key: "20261005_021232_580a8fcc"
+                if key.endswith("call-1797") else None),
+        )
+        text = await self._main_note(self._setup(monkeypatch, runner))
+        assert 'session_search(session_id="20261005_021232_580a8fcc")' in text
+
+    @pytest.mark.asyncio
+    async def test_lookup_failure_keeps_the_plain_note(self, monkeypatch):
+        text = await self._main_note(self._setup(monkeypatch, runner=None))
+        assert text == "[A voice call with the user has just ended. Do not call back right now.]"

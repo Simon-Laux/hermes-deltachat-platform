@@ -5,6 +5,13 @@ repairs and doc typo fixes are left out; see the git log for those.
 
 ## Unreleased
 
+### New
+
+- **The text chat can look up what was said on a call.** The "call ended"
+  note sent to the text-chat session now names the call's Hermes session,
+  so the bot reads the transcript with `session_search` instead of saying it
+  has no record of the call. Shared-history mode is unchanged.
+
 ### Fixed
 
 - **Calls failed with "Invalid model: medium" on cloud STT providers.** With
