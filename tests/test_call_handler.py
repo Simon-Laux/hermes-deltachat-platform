@@ -11,6 +11,8 @@ Run via:  nix develop --command bash -c "cd tests && python3 -m pytest test_call
 import asyncio
 import os
 import sys
+import time
+import types
 import wave
 
 import pytest
@@ -362,43 +364,87 @@ class TestStaleResponse:
 
 
 class TestUtteranceCap:
-    """Speech that never pauses is cut into capped pieces, not buffered forever."""
+    """Speech that never pauses is cut into capped pieces, sent as one turn at the pause."""
 
-    @pytest.mark.asyncio
-    async def test_long_speech_is_split_at_the_cap(self, monkeypatch, tmp_path):
+    S = ch._STT_BYTES_PER_SEC   # one second of buffered PCM
+
+    @pytest.fixture(autouse=True)
+    def _scaled_down(self, monkeypatch):
+        # 3 s hard cap, soft cut after 2 s (still above the 1 s pause), 12 s noise
+        # ceiling; 20 ms frames on a fake clock.
+        monkeypatch.setattr(ch, "_MAX_UTTERANCE_PCM_BYTES", self.S * 3)
+        monkeypatch.setattr(ch, "_SOFT_CUT_PCM_BYTES", self.S * 2)
+        monkeypatch.setattr(ch, "_NOISE_CEILING_PCM_BYTES", self.S * 12)
+        clock = [0.0]
+        monkeypatch.setattr(ch, "time", types.SimpleNamespace(
+            monotonic=lambda: clock[0], time=time.time))
+        self.clock = clock
+
+    def _run(self, tmp_path, script):
+        """script: [(seconds, loud)], played as 20 ms frames → (stt pieces, turns)."""
         import av
         import numpy as np
-        from unittest.mock import MagicMock
-
-        monkeypatch.setattr(ch, "_MAX_UTTERANCE_PCM_BYTES", ch._STT_BYTES_PER_SEC)   # 1 s cap
-
-        def loud_frame():
-            arr = np.full((1, 960), 5000, dtype=np.int16)
-            f = av.AudioFrame.from_ndarray(arr, format="s16", layout="mono")
-            f.sample_rate = ch._SAMPLE_RATE
-            return f
+        frames = [loud for secs, loud in script for _ in range(round(secs / 0.02))]
+        clock = self.clock
 
         class Track:
-            n = 0
             async def recv(self):
-                self.n += 1
-                if self.n > 175:   # 3.5 s of uninterrupted speech
+                if not frames:
                     raise RuntimeError("track ended")
-                return loud_frame()
+                clock[0] += 0.02
+                arr = np.full((1, 960), 5000 if frames.pop(0) else 0, dtype=np.int16)
+                f = av.AudioFrame.from_ndarray(arr, format="s16", layout="mono")
+                f.sample_rate = ch._SAMPLE_RATE
+                return f
 
-        buf = ch.IncomingAudioBuffer(str(tmp_path), on_utterance=MagicMock())
-        pieces = []
+        turns, pieces = [], []
+        buf = ch.IncomingAudioBuffer(str(tmp_path), on_utterance=lambda t, w: turns.append(t))
 
-        async def record(pcm):
+        async def fake_stt(pcm):
             pieces.append(len(pcm))
-        buf._process_utterance = record
+            return f"p{len(pieces)}", "x.wav"
+        buf._transcribe_pcm = fake_stt
         buf._running = True
-        await buf._receive_loop(Track())
-        await asyncio.sleep(0)
 
-        assert len(pieces) == 4
-        assert all(n <= ch._STT_BYTES_PER_SEC + 1024 for n in pieces)
-        assert sum(pieces) >= ch._STT_BYTES_PER_SEC * 3   # nothing dropped
+        async def go():
+            await buf._receive_loop(Track())
+            for _ in range(20):
+                await asyncio.sleep(0)
+        return go, pieces, turns
+
+    @pytest.mark.asyncio
+    async def test_long_utterance_is_one_turn_at_the_pause(self, tmp_path):
+        # 10.5 s of speech (a 45 s monologue, scaled) then a real pause: no turn mid-speech.
+        go, pieces, turns = self._run(tmp_path, [(10.5, True), (1.2, False)])
+        await go()
+        assert len(pieces) == 4                       # 3 + 3 + 3 + 1.5 s (+ the pause)
+        assert all(n <= self.S * 3 + 1024 for n in pieces)
+        assert sum(pieces) >= self.S * 10.5 - 1024    # nothing dropped
+        assert turns == ["p1 p2 p3 p4"]
+
+    @pytest.mark.asyncio
+    async def test_cut_prefers_a_quiet_frame_after_the_soft_limit(self, tmp_path):
+        go, pieces, turns = self._run(
+            tmp_path, [(2.5, True), (0.04, False), (1.5, True), (1.2, False)])
+        await go()
+        assert abs(pieces[0] - self.S * 2.52) < 0.05 * self.S   # cut in the gap, not at 3 s
+        assert len(turns) == 1
+
+    @pytest.mark.asyncio
+    async def test_short_tail_after_a_split_is_kept(self, tmp_path):
+        # 0.2 s after the cut is under the 0.3 s voiced minimum but must not be lost.
+        go, pieces, turns = self._run(tmp_path, [(3.2, True), (1.2, False)])
+        await go()
+        assert len(pieces) == 2
+        assert turns == ["p1 p2"]
+
+    @pytest.mark.asyncio
+    async def test_stretch_past_noise_ceiling_is_dropped(self, tmp_path):
+        go, pieces, turns = self._run(
+            tmp_path, [(20, True), (1.2, False), (0.6, True), (1.2, False)])
+        await go()
+        assert len(pieces) == 3 + 1        # noise pieces before the ceiling, then the real one
+        assert turns == ["p4"]             # the noise never became a turn; speech after it does
 
 
 class TestIncomingCallAuthorization:

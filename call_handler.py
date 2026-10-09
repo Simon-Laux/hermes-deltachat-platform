@@ -62,9 +62,18 @@ _STT_BYTES_PER_SEC = _STT_RATE * 1 * _BYTES_PER_SAMPLE  # 32000
 
 # why: background noise above the RMS gate (TV, music, a fan) never yields the
 # 1 s pause that ends an utterance, so the buffer would grow for the whole call
-# and reach STT as one huge clip. Cut it into STT-sized pieces instead.
+# and reach STT as one huge clip. It is cut into STT-sized pieces that are
+# transcribed as they come but sent to Hermes as ONE turn once the pause comes —
+# a reply mid-monologue would talk over the caller.
 _MAX_UTTERANCE_S = 30
 _MAX_UTTERANCE_PCM_BYTES = _STT_BYTES_PER_SEC * _MAX_UTTERANCE_S
+# Past this, cut at the first frame below the RMS gate rather than mid-word.
+_SOFT_CUT_S = 25
+_SOFT_CUT_PCM_BYTES = _STT_BYTES_PER_SEC * _SOFT_CUT_S
+# A stretch this long without a real pause is a TV/music/fan, not a caller —
+# drop it instead of feeding the agent minutes of noise transcript.
+_NOISE_CEILING_S = 180
+_NOISE_CEILING_PCM_BYTES = _STT_BYTES_PER_SEC * _NOISE_CEILING_S
 
 # ICE gathering timeout before accepting the call anyway
 _ICE_GATHER_TIMEOUT_S = 10.0
@@ -358,12 +367,38 @@ class IncomingAudioBuffer:
         _voiced_s = 0.0                 # accumulated voiced time (excludes silence)
         _capturing = False
         _barge_signaled = False         # barge-in already confirmed for this utterance
+        _pieces: list = []              # STT tasks for the cap-split pieces of this utterance
+        _after_split = False            # _SPEECH_BUF directly follows a cap split
+        _stretch_bytes = 0              # PCM already cut off this utterance
+        _discarding = False             # past the noise ceiling — drop until a real pause
         frame_count = 0
 
         def _emit():
-            if _voiced_s >= _MIN_VOICED_S:
-                logger.info("Utterance end: %.1f s voiced, %d KB", _voiced_s, len(_SPEECH_BUF) // 1024)
-                asyncio.ensure_future(self._process_utterance(bytes(_SPEECH_BUF)))
+            if _discarding:
+                return
+            # why: after a cap split the remainder can be a word's last 0.2 s;
+            # the voiced minimum would drop it from the combined transcript.
+            # Any voiced frame keeps it (pure silence would only feed Whisper's
+            # "Thank you." hallucinations into the turn).
+            keep = _voiced_s >= _MIN_VOICED_S or (_after_split and _voiced_s > 0)
+            tail = bytes(_SPEECH_BUF) if keep else None
+            if not _pieces:
+                if tail is not None:
+                    logger.info("Utterance end: %.1f s voiced, %d KB", _voiced_s, len(tail) // 1024)
+                    asyncio.ensure_future(self._process_utterance(tail))
+                return
+            parts = list(_pieces)
+            if tail is not None:
+                parts.append(asyncio.ensure_future(self._transcribe_pcm(tail)))
+            logger.info("Utterance end: %d pieces, %d KB", len(parts),
+                        (_stretch_bytes + len(_SPEECH_BUF)) // 1024)
+            asyncio.ensure_future(self._finish_split_utterance(parts))
+
+        def _reset():
+            nonlocal _SPEECH_BUF, _capturing, _voiced_s, _barge_signaled
+            nonlocal _pieces, _after_split, _stretch_bytes, _discarding
+            _SPEECH_BUF, _capturing, _voiced_s, _barge_signaled = bytearray(), False, 0.0, False
+            _pieces, _after_split, _stretch_bytes, _discarding = [], False, 0, False
 
         logger.info("Audio receive loop started")
         while self._running:
@@ -372,7 +407,7 @@ class IncomingAudioBuffer:
             except asyncio.TimeoutError:
                 if _capturing:
                     _emit()
-                    _SPEECH_BUF, _capturing, _voiced_s, _barge_signaled = bytearray(), False, 0.0, False
+                    _reset()
                 continue
             except Exception as e:
                 logger.warning("Audio receive loop ended: %s", e)
@@ -399,13 +434,22 @@ class IncomingAudioBuffer:
                 logger.debug("Speech started (rms=%d)", rms)
 
             if _capturing:
-                # Buffer every frame while capturing — clean samples via to_ndarray
-                for out_frame in resampler.resample(frame):
-                    _SPEECH_BUF.extend(out_frame.to_ndarray().tobytes())
-                if len(_SPEECH_BUF) >= _MAX_UTTERANCE_PCM_BYTES:
-                    # Hand the full piece to STT and keep capturing; barge-in
-                    # stays signalled so one long stretch doesn't re-trigger it.
-                    _emit()
+                if not _discarding:
+                    # Buffer every frame while capturing — clean samples via to_ndarray
+                    for out_frame in resampler.resample(frame):
+                        _SPEECH_BUF.extend(out_frame.to_ndarray().tobytes())
+                n = len(_SPEECH_BUF)
+                if n >= _MAX_UTTERANCE_PCM_BYTES or (n >= _SOFT_CUT_PCM_BYTES and not is_speech):
+                    # Transcribe the piece now, dispatch it with the rest at the
+                    # pause. Barge-in stays signalled so it doesn't re-trigger.
+                    _stretch_bytes += n
+                    if _stretch_bytes >= _NOISE_CEILING_PCM_BYTES:
+                        logger.info("Dropping %d s of audio without a pause (likely background noise)",
+                                    _stretch_bytes // _STT_BYTES_PER_SEC)
+                        _pieces, _discarding = [], True
+                    else:
+                        _pieces.append(asyncio.ensure_future(self._transcribe_pcm(bytes(_SPEECH_BUF))))
+                        _after_split = True
                     _SPEECH_BUF, _voiced_s = bytearray(), 0.0
                 if is_speech:
                     _last_speech_time = now
@@ -421,17 +465,18 @@ class IncomingAudioBuffer:
                             logger.debug("on_speech_confirmed error: %s", e)
                 elif (now - _last_speech_time) >= _SILENCE_THRESHOLD_S:
                     _emit()
-                    _SPEECH_BUF, _capturing, _voiced_s, _barge_signaled = bytearray(), False, 0.0, False
+                    _reset()
 
         # Flush remaining speech when call ends
         logger.info("Receive loop done: %d frames", frame_count)
         if _capturing:
             _emit()
 
-    async def _process_utterance(self, pcm: bytes) -> None:
+    async def _transcribe_pcm(self, pcm: bytes) -> tuple:
+        """STT one PCM clip → (transcript, wav_path); ("", None) on any failure."""
         wav_path = await asyncio.to_thread(self._pcm_to_wav, pcm)
         if not wav_path:
-            return
+            return "", None
         t0 = time.monotonic()
         async with self._stt_lock:   # one at a time — avoids concurrent CPU contention
             try:
@@ -439,15 +484,27 @@ class IncomingAudioBuffer:
                 transcript = result.get("transcript", "").strip() if result.get("success") else ""
             except Exception as e:
                 logger.error("STT failed: %s", e)
-                return
+                return "", None
         stt_s = time.monotonic() - t0
         if transcript:
             # Its first 80 chars are logged at DEBUG when it is injected.
             logger.info("perf STT=%.1fs (%s) → %d chars", stt_s, result.get("provider", "?"),
                         len(transcript))
-            self._on_utterance(transcript, wav_path)
         else:
             logger.debug("perf STT=%.1fs → (empty)", stt_s)
+        return transcript, wav_path
+
+    async def _process_utterance(self, pcm: bytes) -> None:
+        transcript, wav_path = await self._transcribe_pcm(pcm)
+        if transcript:
+            self._on_utterance(transcript, wav_path)
+
+    async def _finish_split_utterance(self, parts: list) -> None:
+        """Join the transcripts of a cap-split utterance into a single turn."""
+        results = await asyncio.gather(*parts)
+        transcript = " ".join(t for t, _ in results if t)
+        if transcript:
+            self._on_utterance(transcript, next(w for t, w in reversed(results) if t))
 
     @staticmethod
     def _transcribe(wav_path: str) -> dict:

@@ -77,7 +77,12 @@ DC mobile  ──WebRTC audio──▶  aiortc  ──▶  silence detection  �
 ```
 
 - Incoming audio is buffered per utterance; a ~1s pause marks the end of a turn.
-  Speech that runs on for 30s without a pause goes to STT in 30s pieces.
+  Speech that runs on without a pause is cut into pieces of at most 30s (at a
+  quiet frame after 25s where possible) to bound memory. Each piece is
+  transcribed right away, but the agent gets one combined turn only when you
+  pause, so it never replies while you are still talking. A stretch of more
+  than ~3 minutes with no pause is treated as background noise (TV, music)
+  and dropped without a turn.
 - The transcript is injected into the normal Hermes session pipeline, so the
   agent has full context, tools, and memory — same as a text chat.
 - The AI's reply is intercepted before it would be sent as a chat message and
