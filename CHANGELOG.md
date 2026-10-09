@@ -28,6 +28,17 @@ repairs and doc typo fixes are left out; see the git log for those.
   `<script src="webxdc.js"></script>` before its own scripts. The messenger
   provides the file, so it is still not packaged, but without the tag
   `window.webxdc` is undefined.
+- **Webxdc apps from the skill had no icon.** The skill generated an
+  `icon.svg`, but messengers only use `icon.png` or `icon.jpg`. It now
+  generates a PNG.
+- **The skill's webxdc API reference described functions that don't
+  exist.** `desktopApiVersion`, `getAllInstanceIds()` and `sendToInstance()`
+  are gone, and the signatures of `setUpdateListener`, `sendToChat`,
+  `importFiles` and the realtime channel now match the webxdc spec. The
+  reference also lists Delta Chat's actual update limits and quirks. The
+  skill tells the bot not to use `alert`/`confirm`/`prompt` or
+  `window.open`, and to show an error instead of a blank page when the app
+  fails to start.
 
 ## 2.0.0 (2026-10-05)
 
