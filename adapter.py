@@ -561,6 +561,23 @@ async def _get_or_create_chat_token(rpc, account_id: int, chat_id: int) -> str:
     return token
 
 
+def _session_dc_chat_id() -> Optional[str]:
+    """Delta Chat chat id of the turn this tool call runs in, or None.
+
+    Hermes binds each turn's origin as task-local session vars. A cron job, the
+    CLI or another platform's chat has no Delta Chat chat behind it, hence None.
+    why: the platform check is not optional — a Telegram chat id is just a
+    number too, and could name an unrelated Delta Chat chat.
+    """
+    try:
+        from gateway.session_context import get_session_env
+    except ImportError:
+        return None
+    if get_session_env("HERMES_SESSION_PLATFORM", "") != "deltachat-platform":
+        return None
+    return get_session_env("HERMES_SESSION_CHAT_ID", "") or None
+
+
 def _quote_id(reply_to) -> Optional[int]:
     """DC message id to quote, or None when reply_to is not a real DC message.
 
@@ -2818,13 +2835,22 @@ def register_rpc_tools(ctx) -> None:
         if adapter is None or adapter._call_manager is None:
             return json.dumps({"error": "No active call"})
 
-        # The AI is in a call — find the active session.
-        # There is typically only one active call at a time.
-        chat_ids = list(adapter._call_manager._chat_to_msg.keys())
-        if not chat_ids:
-            return json.dumps({"error": "No active call"})
+        # why: hang up the call of the chat asking, not whichever call is
+        # oldest. Calls in different chats can run at once, and "bye" typed in
+        # one chat must not cut off a call in another.
+        active = list(adapter._call_manager._chat_to_msg.keys())
+        chat_id = _session_dc_chat_id()
+        if chat_id is None:
+            # No Delta Chat chat behind this turn (cron, CLI, another
+            # platform): act only when there is no doubt which call is meant.
+            if len(active) != 1:
+                return json.dumps({"error": "No active call" if not active
+                                   else "Several calls are active — cannot tell which to end"})
+            chat_id = active[0]
+        elif chat_id not in active:
+            return json.dumps({"error": "No active call in this chat"})
 
-        success = await adapter._call_manager.request_hangup(chat_ids[0])
+        success = await adapter._call_manager.request_hangup(chat_id)
         if success:
             return json.dumps({"success": True, "message": "Call ended"})
         return json.dumps({"error": "Failed to end call"})
@@ -2984,7 +3010,7 @@ def register_rpc_tools(ctx) -> None:
                 "The goodbye message is spoken first (via normal send), then this "
                 "tool waits until TTS finishes playing before disconnecting. "
                 "Only use this when the user explicitly says goodbye or asks to end the call. "
-                "No parameters needed — there is only one active call at a time."
+                "No parameters needed — it ends the call in the current chat."
             ),
             "parameters": {
                 "type": "object",
