@@ -159,34 +159,74 @@ _ANSWERS_THEN_EXITS_ON_EOF = (
     "    print(json.dumps({'jsonrpc': '2.0', 'id': req['id'], 'result': None}), flush=True)\n"
 )
 _WEDGED = "import time\nwhile True: time.sleep(1)\n"
-_WEDGED_IGNORES_SIGTERM = "import signal, time\nsignal.signal(signal.SIGTERM, signal.SIG_IGN)\nwhile True: time.sleep(1)\n"
+# Stops reading stdin but stays alive, so the writer dies on EPIPE.
+_CLOSES_STDIN_AND_HANGS = "import os, time\nos.close(0)\nwhile True: time.sleep(1)\n"
+
+# Hard cap per close() test, so a regression fails instead of hanging CI
+# (pytest-timeout isn't available in either test environment).
+_CLOSE_DEADLINE = 15
 
 
-def _closed_within(code, timeout):
+def _start(code):
     import sys
 
     t = IOTransport(rpc_server=[sys.executable, "-c", code])
     t.start()
+    return t
+
+
+def _close_within_deadline(t, **close_kwargs):
+    """Run t.close() in a thread; return its duration, failing past the deadline."""
+    errors = []
+
+    def run():
+        try:
+            t.close(**close_kwargs)
+        except BaseException as e:  # noqa: BLE001  (surfaced by the assert below)
+            errors.append(e)
+
+    closer = threading.Thread(target=run, daemon=True)
     start = time.monotonic()
-    t.close(timeout=timeout)
-    return t, time.monotonic() - start
+    closer.start()
+    closer.join(_CLOSE_DEADLINE)
+    elapsed = time.monotonic() - start
+    try:
+        assert not closer.is_alive(), f"close() still running after {_CLOSE_DEADLINE}s"
+        assert not errors, f"close() raised {errors[0]!r}"
+    except AssertionError:
+        # The transport's reader thread isn't a daemon: a child left alive
+        # would keep the whole pytest run from exiting.
+        t.process.kill()
+        raise
+    return elapsed
 
 
 def test_close_lets_a_healthy_server_exit_on_eof():
-    t, elapsed = _closed_within(_ANSWERS_THEN_EXITS_ON_EOF, timeout=5)
+    t = _start(_ANSWERS_THEN_EXITS_ON_EOF)
+    elapsed = _close_within_deadline(t, timeout=5)
     assert t.process.returncode == 0
     assert elapsed < 4
     assert not t.reader_thread.is_alive() and not t.writer_thread.is_alive()
 
 
-def test_close_terminates_a_wedged_server():
-    t, elapsed = _closed_within(_WEDGED, timeout=0.5)
-    assert t.process.returncode is not None
+def test_close_kills_a_wedged_server_without_sigterm():
+    """After stdin EOF, SIGTERM hits the same cancel token in rpc-server, so close() goes straight to SIGKILL."""
+    t = _start(_WEDGED)
+    elapsed = _close_within_deadline(t, timeout=0.5, stop_io_timeout=0.5)
+    assert t.process.returncode == -9
     assert elapsed < 5
     assert not t.reader_thread.is_alive() and not t.writer_thread.is_alive()
 
 
-def test_close_kills_a_server_that_ignores_sigterm():
-    t, elapsed = _closed_within(_WEDGED_IGNORES_SIGTERM, timeout=0.5)
+def test_close_survives_a_broken_stdin_pipe():
+    """A writer that died on EPIPE leaves data buffered; closing stdin then
+    raises BrokenPipeError, which used to escape close() and skip the kill."""
+    t = _start(_CLOSES_STDIN_AND_HANGS)
+    time.sleep(0.5)  # let the child close its stdin
+    t.request_queue.put({"jsonrpc": "2.0", "method": "x", "params": [], "id": 0})
+    t.writer_thread.join(5)
+    assert not t.writer_thread.is_alive(), "writer should have died on EPIPE"
+
+    _close_within_deadline(t, timeout=0.5, stop_io_timeout=0.5)
+
     assert t.process.returncode == -9
-    assert elapsed < 5

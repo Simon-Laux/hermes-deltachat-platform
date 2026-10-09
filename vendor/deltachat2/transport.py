@@ -97,19 +97,23 @@ class IOTransport:
         self.writer_thread = Thread(target=self._writer_loop)
         self.writer_thread.start()
 
-    def close(self, timeout: float = 5.0) -> None:
+    def close(self, timeout: float = 5.0, stop_io_timeout: float = 35.0) -> None:
         """Stop the RPC server process and wait for the transport threads to finish.
 
-        Every wait is bounded by *timeout*: close() runs synchronously on the
-        gateway's event loop (adapter _cleanup), so a wedged server used to
-        freeze the whole gateway in the stop_io call or the reader join. A
-        server that ignores stdin EOF gets SIGTERM, then SIGKILL.
+        Blocking: callers on an event loop must run it in a thread (the adapter
+        does). Every wait is bounded. stop_io gets *stop_io_timeout*, above
+        core's own 30 s IMAP/SMTP shutdown budget (Scheduler::stop), so a slow
+        but healthy server is not killed mid-shutdown. Each later step gets
+        *timeout*: writer join, exit after stdin EOF, exit after SIGKILL, and
+        the two thread joins. Worst case with the defaults is 60 s
+        (35 + 5 x 5), reached only by a server that is wedged and then stuck
+        in uninterruptible sleep; a wedged but killable one takes about 40 s.
         """
         if not hasattr(self, "process"):
             return  # start() was never called or failed before process was created
         self.closing = True
         try:
-            self._call("stop_io_for_all_accounts", (), timeout=timeout)
+            self._call("stop_io_for_all_accounts", (), timeout=stop_io_timeout)
         except Exception:
             pass
         assert self.process.stdin
@@ -118,17 +122,28 @@ class IOTransport:
         # the server stopped reading, and then the kill below breaks the pipe.
         self.writer_thread.join(timeout)
         if not self.writer_thread.is_alive():
-            self.process.stdin.close()  # EOF asks the server to exit
+            try:
+                self.process.stdin.close()  # EOF asks the server to exit
+            except OSError:
+                # why: a writer that died on EPIPE leaves its data buffered, so
+                # close() re-flushes and raises BrokenPipeError. Letting that
+                # escape skipped the kill below and left the server running.
+                pass
         try:
             self.process.wait(timeout)
         except subprocess.TimeoutExpired:
-            self.logger.warning("deltachat-rpc-server did not exit within %ss, terminating it", timeout)
-            self.process.terminate()
+            # why: no SIGTERM step. rpc-server's main.rs cancels the same token
+            # on stdin EOF and on SIGTERM, so after EOF a SIGTERM changes nothing.
+            self.logger.warning("deltachat-rpc-server did not exit within %ss, killing it", timeout)
+            self.process.kill()
             try:
                 self.process.wait(timeout)
             except subprocess.TimeoutExpired:
-                self.process.kill()
-                self.process.wait()
+                # SIGKILL can't take effect while the process is in
+                # uninterruptible sleep (D state); don't wait on it forever.
+                self.logger.error(
+                    "deltachat-rpc-server (pid %s) still alive %ss after SIGKILL", self.process.pid, timeout
+                )
         self.writer_thread.join(timeout)
         self.reader_thread.join(timeout)
         try:
