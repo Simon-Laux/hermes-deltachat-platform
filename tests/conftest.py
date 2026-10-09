@@ -36,6 +36,7 @@ class MockSendResult:
     error: Optional[str] = None
     message_id: Optional[str] = None
     metadata: Optional[Dict[str, Any]] = None
+    raw_response: Any = None
 
 
 @dataclass

@@ -3,6 +3,24 @@
 Notable changes for people running the adapter. Internal refactors, test
 repairs and doc typo fixes are left out; see the git log for those.
 
+## Unreleased
+
+### New
+
+- **Optional message editing** (`DELTACHAT_MESSAGE_EDITING`, off by default).
+  Hermes can then edit streamed replies, tool progress, heartbeats and
+  approval prompts in place. Every edit is an email through the chatmail
+  relay, so in-progress edits are limited to one per
+  `DELTACHAT_EDIT_MIN_INTERVAL` seconds (default 5) for the whole account;
+  the final text always goes out. See the README. (#54)
+
+### Changed
+
+- **Hermes no longer streams replies on Delta Chat while editing is off.**
+  Before, streaming (if enabled in Hermes) sent the first chunk with a `▉`
+  cursor that could never be removed, then the rest as a second message.
+  Now the reply arrives as one message.
+
 ## 2.0.0 (2026-10-05)
 
 ### Breaking / requires action
