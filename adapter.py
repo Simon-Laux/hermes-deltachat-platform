@@ -12,7 +12,6 @@ import random
 import re
 import secrets
 import sys
-import time
 import uuid
 import asyncio
 import concurrent.futures
@@ -1671,7 +1670,11 @@ body {{
         if "/approve" not in message:
             text += "\n\nOr reply `/approve`, `/always`, or `/cancel`."
         result = await self.send(chat_id, text, metadata=metadata)
-        if result.success and result.message_id:
+        if result.success and not result.message_id:
+            # why: send() swallows a call thread's non-final sends; success would make Hermes
+            # skip its text fallback, so the confirm would wait unseen
+            return SendResult(success=False, error="Prompt not delivered as a message")
+        if result.success:
             self._remember_prompt(self._slash_confirm_prompts, result.message_id,
                                   (session_key, confirm_id))
         return result
@@ -1761,7 +1764,8 @@ body {{
             return True
         from gateway.slash_access import policy_from_extra
         # why: Hermes refuses /approve and /deny from non-admins when allow_admin_from is set;
-        # a reaction must not get around that
+        # a reaction must not get around that. (Typed slash-confirm replies skip that check
+        # in Hermes; reactions to those prompts are deliberately stricter.)
         if not policy_from_extra(self.config.extra or {}, chat_type).can_run(str(contact_id), command):
             logger.info("Ignoring reaction from contact %s: /%s is admin-only", contact_id, command)
             return False
@@ -1815,26 +1819,16 @@ body {{
         if self._slash_confirm_prompts.pop(msg_id, None) is None:
             return
         try:
-            from tools import slash_confirm
-            # why: resolve() returns None both for a stale confirm and for a handler whose
-            # reply isn't a str (/reset's EphemeralReply), so check liveness first
-            pending = slash_confirm.get_pending(session_key)
-            live = bool(pending and pending.get("confirm_id") == confirm_id
-                        and time.time() - float(pending.get("created_at") or 0)
-                        <= slash_confirm.DEFAULT_TIMEOUT_SECONDS)
-            reply = await slash_confirm.resolve(session_key, confirm_id, choice)
+            from tools.slash_confirm import resolve
+            # None when stale (timed out, superseded, already answered): nothing to say
+            reply = await resolve(session_key, confirm_id, choice)
         except Exception as e:
             logger.warning("Slash confirm reaction on prompt %s failed: %s", msg_id, e)
             return
-        logger.info("Contact %s reacted to slash confirm prompt %s: %s (live: %s)",
-                    contact_id, msg_id, choice, live)
+        logger.info("Contact %s reacted to slash confirm prompt %s: %s (ran: %s)",
+                    contact_id, msg_id, choice, reply is not None)
         if reply:
             await self.send(str(chat_id), reply, reply_to=str(msg_id))
-        elif live:
-            try:
-                await self.rpc.send_reaction(self.account_id, msg_id, ["✅"])
-            except Exception as e:
-                logger.warning("Can't react to slash confirm prompt %s: %s", msg_id, e)
 
     async def _handle_approval_reaction(self, event: Dict[str, Any]) -> None:
         """Resolve the exec approval a 👍/👎 reaction answers."""
@@ -1849,7 +1843,8 @@ body {{
 
         from tools.approval import resolve_gateway_approval
 
-        del self._approval_prompts[msg_id]
+        if self._approval_prompts.pop(msg_id, None) is None:
+            return
         count = resolve_gateway_approval(session_key, choice, request_id=request_id)
         logger.info("Contact %s reacted to approval prompt %s: %s (%d resolved)",
                     contact_id, msg_id, choice, count)

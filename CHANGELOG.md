@@ -12,8 +12,7 @@ repairs and doc typo fixes are left out; see the git log for those.
   confirmation, react 👍 to approve once or 👎 to cancel. "Always approve"
   turns the prompt off for good in `config.yaml`, so it stays typed-only:
   `/always`. The same contacts as for approval prompts may react, and
-  `allow_admin_from` applies. A command that has no text reply, like
-  `/reset`, gets a ✅ reaction on the prompt.
+  `allow_admin_from` applies. The command's reply quotes the prompt.
 - **Questions with up to 9 choices can be answered with a reaction.** When
   the agent asks you to pick an option, the choices are numbered 1️⃣–9️⃣;
   react with one to answer. Typing the number, the option text or your own

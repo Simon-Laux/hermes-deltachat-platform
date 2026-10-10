@@ -150,19 +150,28 @@ async def test_reaction_resolves_its_confirm(platform_config, confirm, registere
     assert _sent_texts(a)[-1] == "Session reset."
     assert a.rpc.send_msg.await_args_list[-1].args[2].quoted_message_id == 42
     assert a._slash_confirm_prompts == {}
-    a.rpc.send_reaction.assert_not_awaited()
 
 
 @pytest.mark.asyncio
-async def test_live_confirm_without_text_reply_gets_a_checkmark(platform_config, confirm, registered):
-    """/reset answers with an EphemeralReply, so resolve() returns None although it ran."""
-    confirm.handler.return_value = object()
+async def test_str_subclass_reply_is_sent(platform_config, confirm, registered):
+    """/reset answers with an EphemeralReply, which is a str subclass."""
+    class EphemeralReply(str):
+        pass
+    confirm.handler.return_value = EphemeralReply("✨ Session reset!")
     a = _adapter(platform_config)
     await _prompt(a)
     await a._handle_reaction(_reaction())
-    confirm.handler.assert_awaited_once()
-    a.rpc.send_reaction.assert_awaited_once_with(1, 42, ["✅"])
-    assert len(_sent_texts(a)) == 1
+    assert _sent_texts(a)[-1] == "✨ Session reset!"
+
+
+@pytest.mark.asyncio
+async def test_prompt_swallowed_by_a_call_is_a_failure(platform_config, registered):
+    """send() drops a call thread's non-final sends with success and no message id;
+    reporting success would make Hermes skip its text fallback."""
+    a = _adapter(platform_config)
+    a.send = AsyncMock(return_value=SimpleNamespace(success=True, message_id=None))
+    assert not (await _prompt(a)).success
+    assert a._slash_confirm_prompts == {}
 
 
 @pytest.mark.asyncio
@@ -176,7 +185,6 @@ async def test_stale_confirm_gets_nothing(platform_config, confirm, stale):
     await _prompt(a)
     await a._handle_reaction(_reaction())
     confirm.handler.assert_not_awaited()
-    a.rpc.send_reaction.assert_not_awaited()
     assert len(_sent_texts(a)) == 1
     assert a._slash_confirm_prompts == {}
 
@@ -187,7 +195,6 @@ async def test_resolve_error_is_swallowed(platform_config, confirm, registered):
     a = _adapter(platform_config)
     await _prompt(a)
     await a._handle_reaction(_reaction())
-    a.rpc.send_reaction.assert_not_awaited()
     assert len(_sent_texts(a)) == 1
 
 
