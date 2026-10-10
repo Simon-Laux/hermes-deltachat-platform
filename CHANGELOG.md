@@ -16,6 +16,14 @@ repairs and doc typo fixes are left out; see the git log for those.
   last-writer-wins (one key per user, e.g. polls) with event sourcing (send
   actions and replay them, e.g. games), and points to Yjs when several
   people edit the same data at once.
+- **The webxdc skill checks the `.xdc` before sending it.** One script now
+  packages the app and stops with an error if `index.html` isn't at the
+  archive root, if `webxdc.js` was packaged, or if HTML/CSS loads anything
+  from the network (CDN scripts, web fonts — webxdc apps are offline, so
+  these break the app). It leaves out dotfiles and `node_modules` and warns
+  above 1 MB. Generated icons are 256 px instead of 128. When the bot sends
+  a new version of a shared-state app it now tells you the old data stays
+  in the previous message.
 
 ### Fixed
 
