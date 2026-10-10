@@ -27,6 +27,12 @@ repairs and doc typo fixes are left out; see the git log for those.
 
 ### Fixed
 
+- **Attachments over Hermes' size cap still reached the agent.** When
+  Hermes refused to cache a file over `gateway.max_inbound_media_bytes`
+  (default 128 MiB), the adapter passed the raw Delta Chat file instead, and
+  documents and videos were never checked. Oversized attachments now reach
+  the agent as text with a note that the file was too large. Set the option
+  to 0 to turn the cap off.
 - **Calls failed with "Invalid model: medium" on cloud STT providers.** With
   `DELTACHAT_CALL_STT_VOXTRAL` off, or after a Voxtral error, call audio was
   sent with the local Whisper size `medium` to whatever `stt.provider` is
