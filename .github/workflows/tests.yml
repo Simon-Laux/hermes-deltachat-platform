@@ -61,9 +61,11 @@ jobs:
       # From Hermes' lockfile, like its Nix and Docker builds: pyproject.toml alone misses
       # packages (0.21.6 declares ruamel.yaml only for 3.14 but imports it everywhere)
       - run: uv sync --frozen --project hermes-src --python "$(which python)"
+      # read with the runner's Python: Hermes 0.21.6 no longer ships PyYAML
       - run: |
+          pip install pyyaml
           H=hermes-src/.venv/bin/python
-          $H -c 'import yaml; print("\n".join(yaml.safe_load(open("plugin.yaml"))["python_dependencies"]))' > "$RUNNER_TEMP/plugin-requirements.txt"
+          python -c 'import yaml; print("\n".join(yaml.safe_load(open("plugin.yaml"))["python_dependencies"]))' > "$RUNNER_TEMP/plugin-requirements.txt"
           uv pip install --python $H pytest pytest-asyncio -r "$RUNNER_TEMP/plugin-requirements.txt"
       - run: HERMES_PYTHON=$PWD/hermes-src/.venv/bin/python hermes-src/.venv/bin/python -m pytest tests/test_hermes_contract.py
         env:
