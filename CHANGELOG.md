@@ -5,10 +5,59 @@ repairs and doc typo fixes are left out; see the git log for those.
 
 ## Unreleased
 
+### New
+
+- **The text chat can look up what was said on a call.** The "call ended"
+  note sent to the text-chat session now names the call's Hermes session,
+  so the bot reads the transcript with `session_search` instead of saying it
+  has no record of the call. Shared-history mode is unchanged.
+- **The webxdc skill shows two ways to structure shared state.** For
+  multi-user apps built on plain `sendUpdate`, it now compares
+  last-writer-wins (one key per user, e.g. polls) with event sourcing (send
+  actions and replay them, e.g. games), and points to Yjs when several
+  people edit the same data at once.
+- **The webxdc skill checks the `.xdc` before sending it.** One script now
+  packages the app and reports an error if `index.html` isn't at the
+  archive root, if `webxdc.js` was packaged, or if the app loads anything
+  from the network (CDN scripts and modules, web fonts — webxdc apps are
+  offline, so these break the app). It leaves out dotfiles and
+  `node_modules` and notes archives over 1 MB and 10 MB. Generated icons are 256 px instead of 128. When the bot sends
+  a new version of a shared-state app it now tells you the old data stays
+  in the previous message.
+
 ### Fixed
 
-- Files over Hermes' `gateway.max_inbound_media_bytes` (default 128 MiB) now
-  reach the agent as text only.
+- **Attachments over Hermes' size cap still reached the agent.** When
+  Hermes refused to cache a file over `gateway.max_inbound_media_bytes`
+  (default 128 MiB), the adapter passed the raw Delta Chat file instead, and
+  documents and videos were never checked. Oversized attachments now reach
+  the agent as text with a note that the file was too large. Set the option
+  to 0 to turn the cap off.
+- **Calls failed with "Invalid model: medium" on cloud STT providers.** With
+  `DELTACHAT_CALL_STT_VOXTRAL` off, or after a Voxtral error, call audio was
+  sent with the local Whisper size `medium` to whatever `stt.provider` is
+  set. With `mistral` (or any other cloud provider) every utterance failed,
+  and the bot never answered in calls. Calls now use the configured provider
+  and model, the same as voice messages. The Voxtral shortcut honours
+  `stt.mistral.model`. If you use `stt.provider: local`, calls now use
+  `stt.local.model` instead of a forced `medium`. Set it explicitly if you
+  relied on that.
+- **Webxdc apps from the skill could ship without `webxdc.js`.** The skill
+  now says plainly that any app using the webxdc API must load
+  `<script src="webxdc.js"></script>` before its own scripts. The messenger
+  provides the file, so it is still not packaged, but without the tag
+  `window.webxdc` is undefined.
+- **Webxdc apps from the skill had no icon.** The skill generated an
+  `icon.svg`, but messengers only use `icon.png` or `icon.jpg`. It now
+  generates a PNG.
+- **The skill's webxdc API reference described functions that don't
+  exist.** `desktopApiVersion`, `getAllInstanceIds()` and `sendToInstance()`
+  are gone, and the signatures of `setUpdateListener`, `sendToChat`,
+  `importFiles` and the realtime channel now match the webxdc spec. The
+  reference also lists Delta Chat's actual update limits and quirks. The
+  skill tells the bot not to use `alert`/`confirm`/`prompt` or
+  `window.open`, and to show an error instead of a blank page when the app
+  fails to start.
 
 ## 2.0.0 (2026-10-05)
 

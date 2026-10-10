@@ -76,6 +76,7 @@ When converting an existing artifact or HTML file:
 2. **Remove any fetch/XHR calls** to external URLs — no internet access.
 3. **Remove localStorage/sessionStorage for anything important** — it works in practice, but can be cleared by OS or messenger updates at any time and doesn't sync across devices. Fine for ephemeral UI preferences (current tab, theme). For anything the user would care about losing, use `sendUpdate` instead (Level 1+).
 4. **Ensure everything is in the ZIP** — fonts, images, all assets.
+5. **If the app uses the webxdc API, add `<script src="webxdc.js"></script>`** before your own scripts — the one reference to a file not in the ZIP. The messenger provides it; see "Rule: always load webxdc.js" below.
 
 ### Choosing the right app structure
 
@@ -94,6 +95,8 @@ When converting an existing artifact or HTML file:
 
 **Where to write files:** Write all outputs (source files, the `.xdc`, and any build artifacts) to your **current working directory** — run `pwd` to find it. In the Docker sandbox that is `/workspace/`; on other deployments it is wherever the agent runs (`$PWD`). Never write to `/tmp/` — on Docker it is container-local tmpfs the host cannot read. The examples below use paths **relative to the working directory**, so they run unchanged in Docker and elsewhere. Never assume `/workspace/` exists — outside the Docker sandbox you usually cannot create it.
 
+Build the app in a directory of its own (the examples use `myapp/`) so that the directory's contents are exactly what goes into the archive: `index.html`, `manifest.toml`, the icon and any other assets. For a bundled app that directory is the build output (e.g. `myapp/dist/`): put `manifest.toml` and `icon.png` in `public/` so the bundler copies them, or copy them in after the build.
+
 ### Create manifest.toml
 
 ```toml
@@ -104,85 +107,100 @@ Optionally add `source_code_url = "https://..."` if the user provides one.
 
 ### Generate icon
 
-If the user supplies an icon, use it. Otherwise create a small SVG inline — icons are optional but improve the app's appearance in chat:
+If the user supplies an icon, use it (convert it to PNG or JPEG if needed). Otherwise generate one — icons are optional but improve the app's appearance in chat. Messengers only use `icon.png` or `icon.jpg`; an `icon.svg` is ignored.
 
 ```bash
 mkdir -p myapp
-cat > myapp/icon.svg << 'EOF'
-<svg xmlns="http://www.w3.org/2000/svg" width="128" height="128">
-  <rect width="128" height="128" rx="20" fill="#4ECDC4"/>
-  <text x="64" y="84" font-size="64" font-family="sans-serif" text-anchor="middle" fill="white">AB</text>
-</svg>
+python3 - << 'EOF'
+import struct, zlib
+initials, color, size = "AB", (0x4E, 0xCD, 0xC4), 256  # app initials, background RGB
+try:
+    from PIL import Image, ImageDraw, ImageFont
+    img = Image.new("RGB", (size, size), color)
+    try:
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", size // 2)
+    except OSError:
+        font = ImageFont.load_default(size=size // 2)
+    ImageDraw.Draw(img).text((size / 2, size / 2), initials, fill="white", font=font, anchor="mm")
+    img.save("myapp/icon.png")
+except Exception:
+    # No (usable) Pillow: plain-colour PNG with the standard library only
+    print("Pillow unavailable, writing a plain-colour icon")
+    def chunk(tag, data):
+        return struct.pack(">I", len(data)) + tag + data + struct.pack(">I", zlib.crc32(tag + data))
+    rows = b"".join(b"\0" + bytes(color) * size for _ in range(size))
+    with open("myapp/icon.png", "wb") as f:
+        f.write(b"\x89PNG\r\n\x1a\n" + chunk(b"IHDR", struct.pack(">IIBBBBB", size, size, 8, 2, 0, 0, 0))
+                + chunk(b"IDAT", zlib.compress(rows)) + chunk(b"IEND", b""))
 EOF
 ```
 
-Replace `AB` with the app's initials and choose a fitting background color.
+Replace `AB` with the app's initials (one or two letters, more don't fit) and choose a fitting background color. Without Pillow the icon is a plain colored square.
 
-### Create the .xdc file
+### Create and check the .xdc file
 
-A `.xdc` file is a ZIP archive. Use Python's `zipfile` — it is always available, unlike `zip` which may not be installed:
-
-```bash
-# Single-file app
-python3 -c "
-import zipfile
-with zipfile.ZipFile('myapp.xdc', 'w', zipfile.ZIP_DEFLATED) as zf:
-    zf.write('myapp/index.html', 'index.html')
-    zf.write('myapp/manifest.toml', 'manifest.toml')
-    zf.write('myapp/icon.svg', 'icon.svg')
-"
-
-# Multi-file app — walk the entire app directory
-python3 -c "
-import zipfile, os
-base = 'myapp'
-with zipfile.ZipFile('myapp.xdc', 'w', zipfile.ZIP_DEFLATED) as zf:
-    for root, dirs, files in os.walk(base):
-        for f in files:
-            path = os.path.join(root, f)
-            zf.write(path, os.path.relpath(path, base))
-"
-
-# React/bundled app — build first, then zip the dist output
-npm run build   # produces dist/index.html, dist/assets/, etc.
-python3 -c "
-import zipfile, os
-base = 'myapp/dist'
-with zipfile.ZipFile('myapp.xdc', 'w', zipfile.ZIP_DEFLATED) as zf:
-    for root, dirs, files in os.walk(base):
-        for f in files:
-            path = os.path.join(root, f)
-            zf.write(path, os.path.relpath(path, base))
-"
-```
-
-`index.html` MUST be at the root of the archive (arcname `'index.html'`, not a subdirectory path). All output files must go to your current working directory — **not** `/tmp/`. On Docker the `/tmp/` directory is container-local tmpfs and the host cannot read it.
-
-**Always use ZIP format** — `.xdc` is a ZIP file. Never use tar, tar.gz, or any other archive format; webxdc clients will not open them.
-
-### Validate before sending
-
-Always verify the archive before delivering. This catches wrong arcnames, missing `index.html`, and corrupt zips early:
+A `.xdc` file is a ZIP archive — not tar or tar.gz, webxdc clients will not open those. This zips the app directory and then checks the result, because the usual mistakes (`index.html` ending up in a subfolder, a leftover CDN link) are invisible until someone opens the app in a chat:
 
 ```bash
-python3 -c "
-import zipfile, sys
-path = 'myapp.xdc'
-with zipfile.ZipFile(path) as zf:
+python3 - myapp myapp.xdc << 'EOF'
+import os, re, sys, zipfile
+src, out = sys.argv[1], sys.argv[2]
+if not os.path.isdir(src):
+    sys.exit(f"ERROR: {src} is not a directory")
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+    for root, dirs, files in os.walk(src):
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d != "node_modules")
+        for name in sorted(files):
+            path = os.path.join(root, name)
+            if not name.startswith(".") and not os.path.samefile(path, out):
+                zf.write(path, os.path.relpath(path, src))
+
+errors, notes = [], []
+with zipfile.ZipFile(out) as zf:
     names = zf.namelist()
-    print('Files in archive:', names)
-    if 'index.html' not in names:
-        print('ERROR: index.html missing from archive root!')
-        sys.exit(1)
-    print('OK — index.html present, size:', zf.getinfo('index.html').file_size, 'bytes')
-"
+    if "index.html" not in names:
+        errors.append("index.html is not at the archive root")
+    if any(n.split("/")[-1] == "webxdc.js" for n in names):
+        errors.append("the archive contains webxdc.js; the messenger provides that file")
+    if not {"icon.png", "icon.jpg"} & set(names):
+        notes.append("no icon.png or icon.jpg at the archive root")
+    url = r"""(?:https?:)?//[^"'\s>)]+"""
+    markup = [  # in .html and .css
+        r"""<(?:script|img|iframe|source|video|audio|track|embed|object)\b[^>]*?(?<![\w-])(?:src|srcset|data|poster)\s*=\s*["']?(?:[^"'>]*[\s,])?""" + url,
+        r"""<link\b(?=[^>]*\brel\s*=\s*["']?[^"'>]*\b(?:stylesheet|icon|preload|modulepreload|manifest))[^>]*?\bhref\s*=\s*["']?""" + url,
+        r"""url\(\s*["']?""" + url,
+        r"""@import\s+["']""" + url,
+    ]
+    imports = [r"""\bfrom\s*["']""" + url, r"""\bimport\s*\(?\s*["']""" + url]  # in .html and .js
+    for n in names:
+        patterns = (markup if n.endswith((".html", ".htm", ".css")) else []) + (imports if n.endswith((".html", ".htm", ".js", ".mjs")) else [])
+        text = zf.read(n).decode("utf-8", "replace") if patterns else ""
+        for pattern in patterns:
+            for h in re.findall(pattern, text, re.I):
+                errors.append(f"{n} loads something from the network: {h[:90]}")
+size = os.path.getsize(out)
+if size > 10_000_000:
+    notes.append("over 10 MB, too large for most chats")
+elif size > 1_000_000:
+    notes.append("over 1 MB, consider shrinking the assets")
+print(f"{out}: {len(names)} files, {size / 1024:.0f} KiB")
+for n in sorted(names):
+    print("  " + n)
+for msg in notes:
+    print("NOTE: " + msg)
+for msg in errors:
+    print("ERROR: " + msg)
+sys.exit(1 if errors else 0)
+EOF
 ```
 
-If `index.html` is missing or listed as e.g. `myapp/index.html`, re-package with the correct arcname before sending.
+For a bundled app, run the build first and pass the build output instead: `python3 - myapp/dist myapp.xdc`.
+
+Fix every ERROR and package again. The network check looks for absolute URLs in tags, CSS and ES module imports; `fetch()` calls and URLs built in JavaScript still need your own eyes.
 
 ### Size guidance
 
-Aim for under 1 MB. Under 10 MB is the practical ceiling — beyond that it becomes impractical as a chat attachment. Actual hard limits vary by messenger.
+Aim for under 1 MB; the script notes anything bigger. Under 10 MB is the practical ceiling for a chat attachment. Actual hard limits vary by messenger.
 
 ### Deliver the file
 
@@ -198,18 +216,28 @@ The same works for any other output file type (use its absolute path):
 Here is your report. MEDIA:<absolute path of your working directory>/report.pdf
 ```
 
+For Level 1+ apps, shared state belongs to the one app message it was sent in. Sending the `.xdc` again — including a fixed or improved version — starts a separate, empty instance: earlier scores, votes or entries stay in the old message. Say so when you send a new version, so nobody wonders where their data went.
+
 **For Level 0 apps, you're done here.** The sections below are only for apps that need shared state.
+
+---
+
+## Rule: always load webxdc.js before using the API
+
+Every app that touches `window.webxdc` (Levels 1, 2 and 3) **must** load `webxdc.js` with a script tag in `index.html` (and in every other HTML page that uses the API — from a page in a subdirectory use `../webxdc.js`), placed **before** any script that uses it:
+
+```html
+<script src="webxdc.js"></script>
+<script src="app.js"></script>  <!-- or your inline <script> / bundle -->
+```
+
+`webxdc.js` is provided by the host messenger at runtime, so it is **not** packaged — never put a `webxdc.js` file in the ZIP. But the messenger does not inject it on its own: without the script tag, `window.webxdc` is `undefined` and every API call fails. This applies to bundled apps too — a bundler does not provide it; keep the plain `<script src="webxdc.js">` tag in the HTML ahead of the bundle.
 
 ---
 
 ## Level 1: Simple sendUpdate for persistence and sharing
 
-Add to the HTML (do NOT include a `webxdc.js` file in the ZIP — the messenger injects it):
-```html
-<script src="webxdc.js"></script>
-```
-
-Core API:
+Load `webxdc.js` first (see the rule above), then use the core API:
 ```javascript
 // Send a state update to all peers (including yourself)
 window.webxdc.sendUpdate({
@@ -250,6 +278,51 @@ function reportScore(score) {
       summary: `High score: ${score}`
     }, "");
   }
+}
+```
+
+### Design patterns for shared state
+
+Two ways to structure the payloads when using `sendUpdate` directly. If several users can edit the same piece of data at the same time, neither is enough — go to Level 2.
+
+#### Last-writer-wins
+Simplest approach — each user owns one key and the latest value per key wins. Send only the key that changed, not the whole state. Works for simple apps like polls.
+
+```javascript
+let state = { votes: {} };
+
+window.webxdc.setUpdateListener((update) => {
+  Object.assign(state.votes, update.payload.votes);
+  render();
+}, 0);
+
+function vote(option) {
+  state.votes[window.webxdc.selfAddr] = option;
+  window.webxdc.sendUpdate({
+    payload: { votes: { [window.webxdc.selfAddr]: option } },
+    info: `${window.webxdc.selfName} voted`,
+    summary: `${Object.keys(state.votes).length} votes`
+  }, "");
+}
+```
+
+#### Event sourcing
+Send individual actions and apply them one by one to build up the state. Good for games and collaborative tools. Apply each update as it arrives instead of replaying the whole list every time, and draw only once the history is caught up.
+
+```javascript
+let state = newGame();
+render();  // empty state, until updates arrive
+
+window.webxdc.setUpdateListener((update) => {
+  applyMove(state, update.payload);
+  if (update.serial === update.max_serial) render();  // caught up
+}, 0);
+
+function makeMove(move) {
+  window.webxdc.sendUpdate({
+    payload: { player: window.webxdc.selfAddr, ...move },
+    info: `${window.webxdc.selfName} made a move`
+  }, "");
 }
 ```
 
@@ -296,6 +369,7 @@ For low-latency communication. Data is ephemeral — NOT persisted, NOT replayed
 const channel = window.webxdc.joinRealtimeChannel();
 channel.setListener((data) => { /* Uint8Array */ });
 channel.send(new TextEncoder().encode("cursor:120,340"));
+channel.leave();  // when done; only one channel can be open at a time
 ```
 
 You can check for support and warn the user:
@@ -319,5 +393,11 @@ Inform the user if their app would benefit from a hybrid approach (realtime for 
 - `index.html` is the entry point — the messenger opens this file.
 - `index.html` must be at the **root** of the .xdc file — the messenger will not look in subdirectories.
 - **Directory paths do not auto-resolve** — always use explicit paths like `href="subdir/index.html"`, not `href="subdir/"`.
-- `webxdc.js` is provided by the messenger — never include it in the ZIP, just reference it with a script tag.
+- **Always load `webxdc.js` before using the API** — `<script src="webxdc.js"></script>` before your own scripts. The messenger provides the file, so never include it in the ZIP, but without the tag `window.webxdc` is undefined.
 - **Keep it small** — aim for under 1 MB; hard limits vary by messenger, ~10 MB is the practical ceiling.
+- **Never name a file `webxdc.js`** — the messenger replaces any file with that name with its own API script.
+- **No `alert()`, `confirm()` or `prompt()`** — the host webview may not implement them (they return immediately without showing anything). Build dialogs in the page.
+- **`window.open()` is blocked** — open pages in the same window or show content in the page.
+- **Don't rely on browser permissions** — camera, microphone, clipboard, geolocation and similar requests may be denied. Feature-detect and keep the app usable without them. WebRTC is blocked as part of the no-internet rule.
+- **External links: offer to copy them** — some clients ask the user before opening an outbound link, others do nothing when it is clicked. Show the URL as selectable text so the user can copy it (a copy button is a bonus, but fall back to selectable text if `navigator.clipboard` fails).
+- **Never leave a white page** — if something essential fails (a script error during startup, a WebAssembly module that fails to load, missing data), show an error message in the page. Add a `window.addEventListener("error", …)` and `"unhandledrejection"` handler that displays the error.

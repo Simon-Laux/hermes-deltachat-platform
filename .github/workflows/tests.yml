@@ -19,3 +19,16 @@ jobs:
       - run: python -m pytest tests/
         env:
           PYTHONPATH: .
+
+  pyflakes:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install flake8
+      # Real errors only (undefined names, unused variables, ...), no style: `make lint`
+      # still has ~80 style hits. F401 is off because conftest fixtures and re-exports
+      # look like unused imports.
+      - run: flake8 --select=F --extend-ignore=F401 --exclude=vendor,.git,.worktrees .

@@ -194,3 +194,62 @@ async def test_workaround_matrix_vs_maxbundle_answerer():
     print("=== end matrix ===")
     # at least the control (default-vs-default elsewhere) sanity; here just report
     assert results, "no results"
+
+
+def _drop_all_datagrams(pc):
+    """Make pc's ICE go silent both ways, like a peer whose network vanished."""
+    async def _send_data(data, addr):
+        pass
+
+    for transceiver in pc.getTransceivers():
+        ice = transceiver.receiver.transport.transport
+        for protocol in ice._connection._protocols:
+            protocol.datagram_received = lambda data, addr: None
+            protocol.send_stun = lambda message, addr: None
+            protocol.send_data = _send_data
+
+
+@pytest.mark.asyncio
+async def test_vanished_peer_ends_the_call():
+    """A connected call whose peer goes silent is torn down by the bot.
+
+    aioice's consent checks expire after ~30 s and aiortc closes the pc: the
+    state goes connected -> closed, never "failed". Takes ~35 s.
+    """
+    from unittest.mock import MagicMock, AsyncMock
+    adapter = MagicMock()
+    adapter.rpc.ice_servers = AsyncMock(return_value="[]")
+    adapter.rpc.end_call = AsyncMock()
+    mgr = ch.CallManager(adapter=adapter)
+    mgr._note_call_ended = AsyncMock()
+
+    bot, bot_ice = await mgr._new_peer_connection(with_data_channels=False)
+    out_track = ch.HermesAudioTrack()
+    bot.addTrack(out_track)
+    peer = _make_answerer(bundle=True)
+    states = []
+    bot.on("connectionstatechange", lambda: states.append(bot.connectionState))
+    try:
+        await bot.setLocalDescription(await bot.createOffer())
+        await _gather(bot)
+        await peer.setRemoteDescription(bot.localDescription)
+        await peer.setLocalDescription(await peer.createAnswer())
+        await _gather(peer)
+        await bot.setRemoteDescription(peer.localDescription)
+        ok, st = await _wait_connected([bot, peer])
+        assert ok, f"loopback did not connect (states={st})"
+
+        mgr._register_session(bot, bot_ice, out_track, MagicMock(), 5, "12", "10", "Bob")
+        _drop_all_datagrams(peer)
+
+        loop = asyncio.get_event_loop()
+        deadline = loop.time() + 90
+        while 5 in mgr._sessions and loop.time() < deadline:
+            await asyncio.sleep(0.5)
+        print(f"\n[vanished peer] bot states={states}")
+        assert 5 not in mgr._sessions, f"dead call not torn down (states={states})"
+        adapter.rpc.end_call.assert_awaited_once_with(adapter.account_id, 5)
+        mgr._note_call_ended.assert_called_once()
+    finally:
+        await bot.close()
+        await peer.close()
