@@ -92,6 +92,16 @@ Deep integration with Delta Chat's native features — voice messages, voice cal
   In a group where Hermes approves none of the members, the agent leaves (the group sees it
   leave); someone who wants to add it should message it directly first to get approved
 
+**Answering prompts with reactions.** Delta Chat has no buttons, so some prompts can be
+answered by reacting to that exact message (typed replies still work):
+- Command approvals: 👍 approve once, 👎 deny (`/approve session|always` typed only)
+- Slash-command confirmations (`/reset`, `/new`, `/undo`, `/reload-mcp`, costly `/model`):
+  👍 approve once, 👎 cancel (`/always` typed only, since it turns the confirmation off for good)
+- Questions with up to 9 choices: react 1️⃣–9️⃣ (multi-select questions are typed only)
+
+Only someone who could have typed the answer can react: an approved contact whose session
+the prompt belongs to and, for approvals and confirmations with `allow_admin_from` set, an admin.
+
 ### Group Chats
 By default the agent answers every message in a group. Set `DELTACHAT_REQUIRE_MENTION=1` and it
 only reacts to group messages that mention it (`@<display name>` or an alias from

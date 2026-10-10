@@ -79,9 +79,23 @@ async def stream(chunks, delay):
 
 def contract():
     """Facts about the real Hermes API this adapter relies on."""
+    from tools import clarify_gateway, slash_confirm
+
+    def params(cls, name):
+        return list(inspect.signature(getattr(cls, name)).parameters)
+
     base = inspect.signature(BasePlatformAdapter.edit_message).parameters
     ours = inspect.signature(dc.DeltaChatEditingAdapter.edit_message).parameters
     return {
+        # reaction-answerable prompts override these; Hermes calls them by keyword
+        "prompt_params_match": {
+            name: params(dc.DeltaChatAdapter, name) == params(BasePlatformAdapter, name)
+            for name in ("send_slash_confirm", "send_clarify")},
+        "slash_confirm_api": all(hasattr(slash_confirm, n) for n in (
+            "resolve",)),
+        "clarify_api": all(hasattr(clarify_gateway, n) for n in (
+            "_lock", "_entries", "resolve_gateway_clarify", "mark_awaiting_text"))
+            and "multi_select" in {f.name for f in dataclasses.fields(clarify_gateway._ClarifyEntry)},
         # tool progress stays off unless editing is enabled
         "base_not_overridden":
             dc.DeltaChatAdapter.edit_message is BasePlatformAdapter.edit_message,
