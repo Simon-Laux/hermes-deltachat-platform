@@ -600,6 +600,7 @@ class CallManager:
         self._pending_answers: Dict[int, asyncio.Future] = {}  # msg_id → answer-SDP future (outgoing)
         self._drop_call_ack: Dict[str, int] = {}  # chat_id → suppress the agent's post-dc_start_call line
         self._dialing: set = set()  # chat_ids with an outgoing call still being set up
+        self._speak_locks: Dict[str, asyncio.Lock] = {}  # chat_id → one reply's TTS at a time
 
         # The gateway/agent loop (where we were constructed — connect() is async).
         # handle_message must run here; aiortc must NOT.
@@ -1570,6 +1571,12 @@ class CallManager:
         await self._to_hermes(event)
 
     async def _play_response(self, chat_id: str, text: str) -> None:
+        # why: one turn can speak twice (the "Let me check…" before a tool, then
+        # the answer); queued at once, their sentences would interleave.
+        async with self._speak_locks.setdefault(chat_id, asyncio.Lock()):
+            await self._speak_response(chat_id, text)
+
+    async def _speak_response(self, chat_id: str, text: str) -> None:
         """Called from adapter.send() when an active call intercepts a response.
 
         TTS is done sentence-by-sentence: the first chunk is synthesized and

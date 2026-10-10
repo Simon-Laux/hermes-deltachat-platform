@@ -1555,12 +1555,13 @@ class DeltaChatAdapter(BasePlatformAdapter):
         if self._call_manager and self._call_manager.has_active_call(chat_id):
             thread_id = (metadata or {}).get("thread_id")
             if self._call_manager.is_call_thread(thread_id):
-                # Only the turn's final reply is spoken. Hermes also sends status
+                # Only sends marked final are spoken. Hermes also sends status
                 # traffic through send() — "💾 Memory updated", tool progress,
                 # busy acks, the "⏳ Working" heartbeat, interim commentary,
-                # turn errors — and marks only the final reply with
+                # turn errors — and marks only final replies with
                 # metadata["notify"] (base.py `_mark_notify_metadata`; the A2A
-                # adapter filters on the same flag). Checked before the call-ack
+                # adapter filters on the same flag). When streaming, the text
+                # before a tool call is sealed as final too, so it is spoken. Checked before the call-ack
                 # drop so a status line can't use up that one-shot drop.
                 if not (metadata or {}).get("notify"):
                     logger.debug("Call %s: not speaking non-final send: %r",
