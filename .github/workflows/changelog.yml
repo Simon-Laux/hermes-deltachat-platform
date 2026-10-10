@@ -24,6 +24,6 @@ jobs:
           if [ -n "$shipped" ] && ! echo "$changed" | grep -qx CHANGELOG.md; then
             echo "::error::This PR changes shipped files but not CHANGELOG.md:"
             echo "$shipped"
-            echo "Add an entry under '## Unreleased', or label the PR 'no-changelog' if users won't notice."
+            echo "Add a short entry under '## Unreleased' (or rewrite the one this PR changes), or label the PR 'no-changelog' if users won't notice."
             exit 1
           fi
