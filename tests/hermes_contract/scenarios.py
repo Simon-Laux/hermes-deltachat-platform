@@ -104,6 +104,45 @@ async def call_stream(chunks, delay):
     return {**r, "spoken": spoken, "sends": len(sends)}
 
 
+class ReactionRpc:
+    """A key contact Hermes approves reacting to our message 77 in chat 5."""
+
+    async def get_contact(self, account_id, contact_id):
+        return {"name": "Eve", "is_key_contact": True}
+
+    async def get_basic_chat_info(self, account_id, chat_id):
+        return {"chat_type": "Single", "name": "Eve"}
+
+    async def get_message(self, account_id, msg_id):
+        return {"text": "The answer is 42.", "from_id": 1}
+
+    def __getattr__(self, name):
+        async def noop(*args):
+            return None
+        return noop
+
+
+async def reaction_turn():
+    """What the agent reads for a reaction passed on as a turn (DELTACHAT_REACTIONS_TO_AGENT)."""
+    from gateway.run_inbound import GatewayInboundMixin
+    a = dc.DeltaChatAdapter(PlatformConfig(enabled=True, extra={"reactions_to_agent": True}))
+    a.rpc, a.account_id = ReactionRpc(), 1
+    a._is_sender_authorized = lambda *args, **kwargs: True
+    events = []
+
+    async def capture(event):
+        events.append(event)
+    a.handle_message = capture
+    reaction = {"msg_id": 77, "chat_id": 5, "contact_id": 10, "reaction": "👎"}
+    await a._handle_reaction(reaction)
+    event = events[0]
+    # a turn running in that session: the reaction must not reach Hermes
+    a._active_sessions[a._event_session_key(event)] = asyncio.Event()
+    await a._handle_reaction(reaction)
+    return {"text": GatewayInboundMixin._prepend_inbound_reply_context(event, event.source, event.text),
+            "gateway_control": event.allow_gateway_control, "turns": len(events)}
+
+
 def contract():
     """Facts about the real Hermes API this adapter relies on."""
     from tools import clarify_gateway, slash_confirm
@@ -174,6 +213,7 @@ async def main():
         "fence": await stream(["```\n" + "\n".join(f"c{i}" for i in range(35)) + "\n",
                                "y" * 99] + [f"\nm{i}" for i in range(5)], 0.4),
         "media": await media(),
+        "reaction_turn": await reaction_turn(),
         "call": await call_stream(words[:20], 0.02),
         # over the 36-line limit: Hermes would split it into heads
         "call_long": await call_stream([f"Item {i}.\n" for i in range(50)], 0.02),

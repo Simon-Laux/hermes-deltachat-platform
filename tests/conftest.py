@@ -72,6 +72,7 @@ class MockMessageEvent:
     reply_to_author_id: Optional[str] = None
     reply_to_author_name: Optional[str] = None
     reply_to_is_own_message: bool = False
+    allow_gateway_control: bool = True
 
 
 class MockPlatform(Enum):
@@ -129,6 +130,8 @@ class MockBasePlatformAdapter:
         self._fatal_error_message = None
         self._fatal_error_retryable = True
         self._fatal_error_handler = None
+        # Session key -> interrupt event of the running turn, like the real base.
+        self._active_sessions = {}
 
     @property
     def is_connected(self) -> bool:
@@ -183,6 +186,14 @@ class MockBasePlatformAdapter:
         if self.has_fatal_error:
             return
         self._disconnected = True
+
+    def _heal_stale_session_lock(self, session_key) -> None:
+        pass
+
+    def _event_session_key(self, event) -> str:
+        # Stand-in for Hermes' build_session_key (per-user in groups by default).
+        s = event.source
+        return f"agent:main:{s.chat_type}:{s.chat_id}" + (f":{s.user_id}" if s.chat_type == "group" else "")
 
     def _is_sender_authorized(self, user_id, chat_type=None, chat_id=None, **kwargs):
         # The real base without a runner-registered check: "unknown".

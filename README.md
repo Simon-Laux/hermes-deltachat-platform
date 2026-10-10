@@ -93,6 +93,19 @@ Deep integration with Delta Chat's native features — voice messages, voice cal
   In a group where Hermes approves none of the members, the agent leaves (the group sees it
   leave); someone who wants to add it should message it directly first to get approved
 
+**Reactions to the agent's messages (experimental, opt-in).** With
+`DELTACHAT_REACTIONS_TO_AGENT=1`, a ❤️, 👎 or other reaction to one of the agent's messages is
+passed on to the agent, shown to it as a reply to that message ("[Reacted with 👎]"), so it can
+pick up on praise or "that's wrong". Each one is a model call, and the agent answers each with a
+message: Hermes doesn't let a turn from a person end silently. Changing a reaction counts as a new
+one; removing one isn't passed on (Delta Chat doesn't report that). In a group, every approved
+member's reaction counts, `DELTACHAT_REQUIRE_MENTION` or not, and the whole group sees the answer.
+Reactions while the agent is still working in that session (per person in groups, unless
+`group_sessions_per_user` is off) are dropped, so they never interrupt it, and only contacts
+Hermes approves are passed on. This is only about these generic reactions: answering prompts
+with reactions (below) works with or without it, and reactions on those prompts are kept from
+the agent.
+
 **Answering prompts with reactions.** Delta Chat has no buttons, so some prompts can be
 answered by reacting to that exact message (typed replies still work):
 - Command approvals: 👍 approve once, 👎 deny (`/approve session|always` typed only)
@@ -313,6 +326,7 @@ hermes gateway start
 | `DELTACHAT_REQUIRE_MENTION` | No | — | In **group** chats, only answer messages that say `@<display name>` (or an alias), or quote-reply to the bot; commands must be addressed as `/cmd@<name>`. DMs are never gated. Also `platforms.deltachat-platform.require_mention: true` in `config.yaml` |
 | `DELTACHAT_MENTION_ALIASES` | No | — | Comma-separated extra names that count as a mention (`@<alias>`); also `platforms.deltachat-platform.mention_aliases` |
 | `DELTACHAT_COMMANDS_BIO` | No | on | Append the slash commands that work in Delta Chat to the bot's profile bio, below a `Hermes commands:` line, one `/cmd args – what` per line so people can look them up in its profile. Your own text above that line is kept. Commands that only admins may run (`allow_admin_from`) are left out. `0` turns it off and takes the list out again, which saves ~4.9 KB per message: Delta Chat isn't optimized for long bios and sends the whole bio with every message, not only now and then like the avatar. Also `platforms.deltachat-platform.commands_bio` |
+| `DELTACHAT_REACTIONS_TO_AGENT` | No | — | *Experimental.* Pass generic reactions to the agent's messages on to the agent, which answers each one — see [Reactions to the agent's messages](#messaging). Reactions answering prompts work regardless. Also `platforms.deltachat-platform.reactions_to_agent` |
 | `DELTACHAT_MESSAGE_EDITING` | No | — | *Experimental.* Let Hermes edit sent messages in place — see [Message editing](#message-editing-opt-in). Also `platforms.deltachat-platform.message_editing` |
 | `DELTACHAT_EDIT_MIN_INTERVAL` | No | `3` | Seconds between in-progress edits for the whole account (minimum 1). Also `platforms.deltachat-platform.edit_min_interval` |
 

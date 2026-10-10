@@ -126,3 +126,11 @@ def test_streamed_reply_in_a_call_is_spoken_once_in_full(run, case):
     assert c["log"] == []  # nothing leaks into the chat as text
     assert c["final_sent"]
     assert c["sends"] < 20, c["sends"]
+
+
+def test_reaction_turn_reads_as_a_reply_and_waits_for_idle(run):
+    r = run["reaction_turn"]
+    assert r["gateway_control"] is False and r["turns"] == 1, r  # none while busy
+    text = r["text"]
+    assert text.startswith('[Replying to your previous message: "The answer is 42."]\n\n'
+                           "[Reacted with 👎]"), text

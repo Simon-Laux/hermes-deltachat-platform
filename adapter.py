@@ -59,6 +59,9 @@ MIN_DC_VERSION = "2.51.0"
 # plugin.yaml's `python_dependencies` in step — it is the same claim.
 MAX_TESTED_DC_VERSION = "2.60.0"
 
+# Every prompt answerable by reaction says this; see _reaction_turn.
+_REACT_PROMPT = "React to this exact message"
+
 # Contact id core uses for this account itself (DC_CONTACT_ID_SELF).
 DC_CONTACT_ID_SELF = 1
 
@@ -800,6 +803,9 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._slash_confirm_prompts: Dict[int, tuple] = {}
         # Clarify prompt msg id -> (Hermes session key, clarify_id, choice labels), oldest first.
         self._clarify_prompts: Dict[int, tuple] = {}
+        # Every part of every prompt above, answered or not, newest last (a
+        # bounded ordered set): reactions on them never become agent turns.
+        self._prompt_parts: Dict[int, None] = {}
 
         # Group mention gating (opt-in; DMs are never gated). Set
         # platforms.deltachat-platform.require_mention / mention_aliases in
@@ -818,6 +824,11 @@ class DeltaChatAdapter(BasePlatformAdapter):
         # On by default; off removes the list again and keeps your own bio text.
         self._commands_bio_enabled = _is_on(
             _setting(extra, "commands_bio", "DELTACHAT_COMMANDS_BIO", "1"))
+
+        # Experimental, off by default: every reaction to our messages costs a
+        # model call and gets a reply. Reactions to prompts work regardless.
+        self._reactions_to_agent = _is_on(
+            _setting(extra, "reactions_to_agent", "DELTACHAT_REACTIONS_TO_AGENT"))
 
     async def _intake_allows(self, msg: Dict, chat_id) -> bool:
         """Drop what Hermes' own authorization can't judge, and leave groups
@@ -1688,7 +1699,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
         reply = f"{', '.join(commands)} or `/deny`."
         if request_id:
             text = (f"{prompt.text}\n\n"
-                    "React to this exact message:\n👍 = approve once\n👎 = deny\n\n"
+                    f"{_REACT_PROMPT}:\n👍 = approve once\n👎 = deny\n\n"
                     f"Or reply {reply}")
         else:
             text = f"{prompt.text}\n\nReply {reply}"
@@ -1707,8 +1718,11 @@ class DeltaChatAdapter(BasePlatformAdapter):
         """
         for msg_id in (*(result.continuation_message_ids or ()), result.message_id):
             prompts[int(msg_id)] = value
+            self._prompt_parts[int(msg_id)] = None
         while len(prompts) > self._MAX_APPROVAL_PROMPTS:
             del prompts[next(iter(prompts))]
+        while len(self._prompt_parts) > 8 * self._MAX_APPROVAL_PROMPTS:
+            del self._prompt_parts[next(iter(self._prompt_parts))]
 
     def _pending_request_id(self, prompt) -> Optional[str]:
         """The request_id of the pending approval *prompt* was rendered from.
@@ -1751,7 +1765,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
             from tools.slash_confirm import resolve  # noqa: F401 -- the reaction path needs it
         except ImportError:
             return SendResult(success=False, error="Not supported")
-        text = f"{message}\n\nReact to this exact message:\n👍 = approve once\n👎 = cancel"
+        text = f"{message}\n\n{_REACT_PROMPT}:\n👍 = approve once\n👎 = cancel"
         if "/approve" not in message:
             text += "\n\nOr reply `/approve`, `/always`, or `/cancel`."
         result = await self.send(chat_id, text, metadata=metadata)
@@ -1793,7 +1807,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
             return await super().send_clarify(**args)
         numbered = [f"{n}️⃣ {choice}" for n, choice in enumerate(choices, start=1)]
         text = "\n".join([f"❓ {question}", "", *numbered, "",
-                          "React to this exact message with a number, or reply with the "
+                          f"{_REACT_PROMPT} with a number, or reply with the "
                           "number, the option text, or your own answer."])
         mark_awaiting_text(clarify_id)
         result = await self.send(chat_id, text, metadata=metadata)
@@ -1857,7 +1871,8 @@ class DeltaChatAdapter(BasePlatformAdapter):
         return True
 
     async def _handle_reaction(self, event: Dict[str, Any]) -> None:
-        """Answer the prompt a reaction was given to, if it's one of ours."""
+        """Answer the prompt a reaction was given to, if it's one of ours, or
+        else pass it on to the agent (DELTACHAT_REACTIONS_TO_AGENT)."""
         msg_id = event.get("msg_id")
         if msg_id in self._approval_prompts:
             await self._handle_approval_reaction(event)
@@ -1865,6 +1880,74 @@ class DeltaChatAdapter(BasePlatformAdapter):
             await self._handle_slash_confirm_reaction(event)
         elif msg_id in self._clarify_prompts:
             await self._handle_clarify_reaction(event)
+        elif self._reactions_to_agent and event.get("reaction"):
+            await self._reaction_turn(event)
+
+    async def _reaction_turn(self, event: Dict[str, Any]) -> None:
+        """Hand a reaction to one of our messages to the agent, as a reply to it.
+
+        Core reports reactions to our own messages only, so it's addressed to
+        us, mention gate or not. Hermes would answer a contact it doesn't
+        approve with a pairing code; for a reaction we stay silent instead.
+        why not internal=True, which would let the agent stay silent: that
+        also skips Hermes' authorization and emergency stop.
+        """
+        msg_id, chat_id, contact_id = event.get("msg_id"), event.get("chat_id"), event.get("contact_id")
+        # A prompt part answered, or not carrying the marker below (send() splits
+        # long prompts): its reactions were meant for the prompt, not the agent.
+        if msg_id in self._prompt_parts:
+            return
+        try:
+            contact = await self.rpc.get_contact(self.account_id, int(contact_id))
+            chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
+        except Exception as e:
+            logger.warning("Ignoring reaction on message %s: %s", msg_id, e)
+            return
+        chat_type = "group" if chat.get("chat_type") == "Group" else "dm"
+        if not contact.get("is_key_contact") or self._is_sender_authorized(
+                str(contact_id), chat_type, str(chat_id)) is not True:
+            logger.debug("Not passing on reaction from unapproved contact %s", contact_id)
+            return
+        try:
+            ours = await self.rpc.get_message(self.account_id, int(msg_id))
+            token = await _get_or_create_chat_token(self.rpc, self.account_id, int(chat_id))
+        except Exception as e:
+            logger.warning("Ignoring reaction on message %s: %s", msg_id, e)
+            return
+        # Same for a prompt from before a restart, which emptied the maps above
+        if _REACT_PROMPT in (ours.get("text") or ""):
+            return
+        source = self.build_source(
+            chat_id=str(chat_id),
+            chat_name=chat.get("name", f"Chat {chat_id}"),
+            chat_type=chat_type,
+            user_id=str(contact_id),
+            user_name=(contact.get("name") or contact.get("display_name")
+                       or contact.get("name_and_addr") or f"Contact {contact_id}"),
+        )
+        # Core sends any string as a reaction; keep it to one short line of our own
+        reaction = " ".join(re.sub(r"[\[\]]", "", event["reaction"]).split())[:32]
+        turn = MessageEvent(
+            text=f"[Reacted with {reaction}]\n[dc:chat={token}]",
+            message_type=MessageType.TEXT,
+            source=source,
+            message_id=None,
+            reply_to_message_id=str(msg_id),
+            reply_to_text=(ours.get("text") or ours.get("file_name")
+                           or f"[{ours.get('view_type') or 'message'}]"),
+            reply_to_author_id=str(DC_CONTACT_ID_SELF),
+            reply_to_is_own_message=True,
+            # why: otherwise it could answer a pending clarify or /update prompt as text
+            allow_gateway_control=False,
+        )
+        # why: on a busy session Hermes would interrupt or redirect the running
+        # turn for it (busy_input_mode interrupt, the default) -- not for a 👍
+        key = self._event_session_key(turn)
+        self._heal_stale_session_lock(key)  # as handle_message does before the same test
+        if key in self._active_sessions:
+            logger.debug("Dropping reaction on message %s: the agent is busy", msg_id)
+            return
+        await self.handle_message(turn)
 
     async def _handle_clarify_reaction(self, event: Dict[str, Any]) -> None:
         """Answer the clarify a keycap reaction picks a choice of.
