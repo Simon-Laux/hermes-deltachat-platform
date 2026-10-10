@@ -23,7 +23,7 @@ The branch starts from `origin/main` and the PR targets `main`. Run
   found in live use were mismatches with real Hermes (a wrong skill name, a dropped
   `reply_to_text`, a hardcoded STT model). Check every Hermes signature, attribute and
   config key you use against the installed source (see "Finding Hermes Source" in
-  `Agents.md`). Add to `tests/hermes_contract/` when the contract can be tested.
+  `AGENTS.md`). Add to `tests/hermes_contract/` when the contract can be tested.
 - Run the whole suite and pyflakes (the same checks as CI). Both must pass:
 
   ```bash
