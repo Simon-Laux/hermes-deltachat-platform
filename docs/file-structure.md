@@ -96,4 +96,4 @@ The default Hermes profile uses `~/.hermes/` directly:
 ### `skills/webxdc-converter/`
 - Bundled with the plugin
 - Provides Webxdc conversion capability
-- Accessible via: `skill_view("plugin:deltachat-platform:webxdc-converter")`
+- Accessible via: `skill_view("deltachat-platform:webxdc-converter")`

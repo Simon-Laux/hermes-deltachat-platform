@@ -44,6 +44,12 @@ repairs and doc typo fixes are left out; see the git log for those.
 
 ### Fixed
 
+- **The agent couldn't load the bundled webxdc skill.** The system prompt
+  told it to call `skill_view('plugin:deltachat-platform:webxdc-converter')`,
+  which Hermes reads as a plugin called `plugin`, so the call returned "Skill
+  not found". The prompt now uses `deltachat-platform:webxdc-converter`, the
+  name Hermes actually registers the skill under.
+
 - **The bot now sees which message you replied to.** A quote-reply used to
   reach Hermes as plain text, so the agent had to guess what "this" meant.
   The quoted message (in full, if it is from the same chat) and its author
