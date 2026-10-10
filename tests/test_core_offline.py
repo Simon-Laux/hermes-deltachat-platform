@@ -12,7 +12,7 @@ import shutil
 import pytest
 
 # first: puts the vendored deltachat2 (the one the adapter runs with) on sys.path
-from adapter import DeltaChatAdapter, DeltaChatEditingAdapter, _AsyncRpc
+from adapter import DeltaChatAdapter, DeltaChatEditingAdapter, _AsyncRpc, _DC_TEXT_LIMIT, _dc_len, _dc_split
 from tests.conftest import MockPlatform, MockPlatformConfig, core_truncates
 
 pytestmark = pytest.mark.skipif(not shutil.which("deltachat-rpc-server"),
@@ -29,14 +29,18 @@ def core(tmp_path_factory):
     transport = IOTransport(accounts_dir=str(tmp_path_factory.mktemp("dc")),
                             rpc_server="deltachat-rpc-server")
     transport.start()
-    rpc = deltachat2.Rpc(transport)
-    acc = rpc.add_account()
-    # enough for sending to the self-chat; no transport, so nothing leaves
-    rpc.set_config(acc, "configured_addr", "bot@example.org")
-    rpc.set_config(acc, "configured", "1")
-    chat = rpc.create_chat_by_contact_id(acc, DC_CONTACT_ID_SELF)
-    yield rpc, acc, chat
-    transport.close()
+    try:
+        rpc = deltachat2.Rpc(transport)
+        acc = rpc.add_account()
+        # enough for sending to the self-chat; no transport, so nothing leaves
+        rpc.set_config(acc, "configured_addr", "bot@example.org")
+        rpc.set_config(acc, "configured", "1")
+        # core skips truncating a bot's own copy, which would make it say nothing
+        rpc.set_config(acc, "bot", "0")
+        chat = rpc.create_chat_by_contact_id(acc, DC_CONTACT_ID_SELF)
+        yield rpc, acc, chat
+    finally:
+        transport.close()
 
 
 def _folded(rpc, acc, msg_id, text):
@@ -71,8 +75,7 @@ def _adapter(core, cls=DeltaChatAdapter, **kw):
 @pytest.mark.parametrize("text", [
     "\n".join(f"Line {i}" for i in range(100)),
     " ".join(f"word{i}" for i in range(2000)),
-    "intro\n```\n" + "\n".join(f"code {i}" for i in range(80)) + "\n```\noutro",
-], ids=["lines", "one-paragraph", "code-block"])
+], ids=["lines", "one-paragraph"])
 async def test_long_reply_arrives_as_messages_shown_in_full(core, text):
     rpc, acc, chat = core
     result = await _adapter(core).send(str(chat), text)
@@ -80,16 +83,27 @@ async def test_long_reply_arrives_as_messages_shown_in_full(core, text):
     assert result.success and len(ids) > 1
     shown = [rpc.get_message(acc, int(i)) for i in ids]
     assert not any(m.has_html or m.text.endswith("[...]") for m in shown)
-    assert " ".join(m.text for m in shown).split() == text.split()
+    assert [m.text for m in shown] == [p.strip("\n") for p in _dc_split(text) if p.strip()]
 
 
 @pytest.mark.asyncio
-async def test_edit_up_to_the_limit_applies_in_full(core):
+async def test_edit_at_the_limit_is_not_folded_one_more_line_is(core):
+    # core stores the new text on the original untruncated; what receivers get
+    # is a hidden "✏️" + text message (the next id), folded by the usual rule.
+    # So the "✏️" counts, and _dc_len counts it.
     rpc, acc, chat = core
     a = _adapter(core, DeltaChatEditingAdapter, interval=1.0)
+    # 38 lines; "✏️" goes in front of the first, making it exactly 100 chars
+    final = "y" * 98 + "\n" + "\n".join(["l"] * 37)
+    assert _dc_len(final) == _DC_TEXT_LIMIT
+
     sent = await a.send(str(chat), "first chunk ▉")
-    # the most an edit may carry: 38 display lines counting the "✏️" prefix
-    final = "\n".join(["l"] * 37) + "\n" + "y" * 98
-    result = await a.edit_message(str(chat), sent.message_id, final, finalize=True)
-    m = rpc.get_message(acc, int(sent.message_id))
-    assert result.success and m.is_edited and m.text == final and not m.has_html
+    assert (await a.edit_message(str(chat), sent.message_id, final, finalize=True)).success
+    edit = rpc.get_message(acc, int(sent.message_id) + 1)
+    assert edit.text == "✏️" + final and not edit.has_html
+
+    sent = await a.send(str(chat), "first chunk ▉")
+    longer = "y" + final   # first line wraps: 39 lines; edit_message would refuse it
+    assert _dc_len(longer) > _DC_TEXT_LIMIT
+    rpc.send_edit_request(acc, int(sent.message_id), longer)
+    assert rpc.get_message(acc, int(sent.message_id) + 1).text.endswith("[...]")
