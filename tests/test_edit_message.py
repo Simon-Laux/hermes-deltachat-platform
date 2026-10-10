@@ -197,7 +197,7 @@ async def test_cleanup_cancels_flusher(ed, monkeypatch):
     await ed.edit_message("5", "123", "a")
     await ed.edit_message("5", "123", "ab")
     flusher, rpc = ed._edit_flusher, ed.rpc
-    ed._cleanup()
+    await ed._cleanup()
     await asyncio.sleep(INTERVAL * 2)
     assert flusher.cancelled()
     assert ed._edit_pending == {}

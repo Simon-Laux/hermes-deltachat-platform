@@ -2704,12 +2704,12 @@ class DeltaChatEditingAdapter(DeltaChatAdapter):
                 msg = next(iter(self._edit_pending))
                 await self._send_edit(msg, self._edit_pending.pop(msg))
 
-    def _cleanup(self) -> None:
+    async def _cleanup(self) -> None:
         if self._edit_flusher:
             self._edit_flusher.cancel()
             self._edit_flusher = None
         self._edit_pending.clear()
-        super()._cleanup()
+        await super()._cleanup()
 
 
 def check_requirements() -> bool:
