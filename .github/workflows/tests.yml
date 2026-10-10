@@ -2,22 +2,70 @@ name: tests
 
 on:
   push:
-    branches: [main, dev]
+    branches: [main]
   pull_request:
 
 jobs:
   pytest:
     runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python: ["3.12", "3.14"]  # Hermes 0.21.5 runs on 3.12, 0.21.6 on 3.14
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-python@v5
         with:
-          python-version: "3.12"  # what Hermes runs on
-      # Hermes itself is mocked in tests/conftest.py; aiortc/numpy are for the call tests;
-      # deltachat-rpc-server (pinned like plugin.yaml) runs tests/test_core_offline.py
-      - run: pip install pytest pytest-asyncio aiortc numpy "deltachat-rpc-server>=2.51.0,<2.61"
+          python-version: ${{ matrix.python }}
+      # Hermes itself is mocked in tests/conftest.py. Dependencies come only from plugin.yaml,
+      # so one missing there fails here instead of on a fresh install (numpy, #96).
+      - run: pip install pyyaml pytest pytest-asyncio
+      - run: |
+          python -c 'import yaml; print("\n".join(yaml.safe_load(open("plugin.yaml"))["python_dependencies"]))' > "$RUNNER_TEMP/plugin-requirements.txt"
+          pip install -r "$RUNNER_TEMP/plugin-requirements.txt"
       # The slow WebRTC loopback tests are excluded by tests/pytest.ini (`-m "not slow"`)
       - run: python -m pytest tests/
+        env:
+          PYTHONPATH: .
+
+  # The mocks above drift from real Hermes; most bugs found in live use were mismatches
+  # there. tests/test_hermes_contract.py runs our adapter against Hermes' real gateway code.
+  hermes-contract:
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # the minimum in plugin.yaml's requires_hermes (0.21.5), and the newest release
+          - { hermes: v2026.9.24, python: "3.12" }
+          - { hermes: latest, python: "3.14" }  # 0.21.6's lockfile only supports 3.14+
+    steps:
+      - uses: actions/checkout@v4
+      - id: ref
+        env:
+          GH_TOKEN: ${{ github.token }}
+          WANT: ${{ matrix.hermes }}
+        run: |
+          if [ "$WANT" = latest ]; then
+            WANT=$(gh release view -R NousResearch/hermes-agent --json tagName -q .tagName)
+          fi
+          echo "tag=$WANT" >> "$GITHUB_OUTPUT"
+      - uses: actions/checkout@v4
+        with:
+          repository: NousResearch/hermes-agent
+          ref: ${{ steps.ref.outputs.tag }}
+          path: hermes-src
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python }}
+      - uses: astral-sh/setup-uv@v6
+      # From Hermes' lockfile, like its Nix and Docker builds: pyproject.toml alone misses
+      # packages (0.21.6 declares ruamel.yaml only for 3.14 but imports it everywhere)
+      - run: uv sync --frozen --project hermes-src --python "$(which python)"
+      - run: |
+          H=hermes-src/.venv/bin/python
+          $H -c 'import yaml; print("\n".join(yaml.safe_load(open("plugin.yaml"))["python_dependencies"]))' > "$RUNNER_TEMP/plugin-requirements.txt"
+          uv pip install --python $H pytest pytest-asyncio -r "$RUNNER_TEMP/plugin-requirements.txt"
+      - run: HERMES_PYTHON=$PWD/hermes-src/.venv/bin/python hermes-src/.venv/bin/python -m pytest tests/test_hermes_contract.py
         env:
           PYTHONPATH: .
 
@@ -32,4 +80,4 @@ jobs:
       # Real errors only (undefined names, unused variables, ...), no style: `make lint`
       # still has ~80 style hits. F401 is off because conftest fixtures and re-exports
       # look like unused imports.
-      - run: flake8 --select=F --extend-ignore=F401 --exclude=vendor,.git,.worktrees .
+      - run: flake8 --select=F --extend-ignore=F401 --exclude=vendor,.git,.worktrees,.venv .
