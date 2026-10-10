@@ -37,8 +37,9 @@ repairs and doc typo fixes are left out; see the git log for those.
   in the previous message.
 - **The webxdc skill guards against unsafe or broken app content.** It
   tells the bot to show user text with `textContent` instead of unescaped
-  `innerHTML` (XSS in shared apps), to escape `</` in JSON baked into a
-  `<script>`, and to say when baked-in data will go stale. When the bot has
+  `innerHTML` (XSS in shared apps), to ship baked-in data as a JSON file
+  loaded with `fetch` rather than inlining it into a `<script>`, and to say
+  when that data will go stale. When the bot has
   an image generator it may draw the icon with it, and the skill explains
   how to prompt it and how to catch a JPEG saved as `icon.png`. The bot now
   says when it hasn't opened an app itself, and it makes changes in the
