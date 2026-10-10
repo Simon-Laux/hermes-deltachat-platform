@@ -60,6 +60,7 @@ def test_api_contract(run):
     assert {"success", "message_id", "error", "retryable"} <= set(c["sendresult_fields"])
     assert all(c["prompt_params_match"].values()), c["prompt_params_match"]
     assert c["slash_confirm_api"] and c["clarify_api"]
+    assert c["deliver_media_params"] == ["self", "event", "media_files", "local_files"]
 
 
 def test_streamed_reply_is_one_throttled_message(run):
@@ -85,3 +86,10 @@ def test_reply_over_40_lines_continues_as_new_message(run):
     assert s["text"].startswith(shown[0]) and s["text"].endswith(shown[1])
     assert len(shown[0]) + len(shown[1]) >= len(s["text"])
     assert s["pending"] == 0
+
+
+def test_tagged_and_bare_file_is_sent_once(run):
+    """MEDIA: tag plus a bare mention of the same file: one attachment."""
+    for name, r in run["media"].items():
+        assert r["files"] == [name], r
+        assert r["text"] == "Here it is:\n\nSaved at  too.", r

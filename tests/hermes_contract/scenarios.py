@@ -33,6 +33,7 @@ class FakeRpc:
         self.t0 = time.monotonic()
         self.log = []      # [time, method, msg id, text]
         self.screen = {}   # msg id -> text currently shown
+        self.files = []    # attachments sent, in order
         self._next_id = 100
 
     def _record(self, method, msg, text):
@@ -40,6 +41,8 @@ class FakeRpc:
 
     async def send_msg(self, account_id, chat_id, data):
         self._next_id += 1
+        if data.file:
+            self.files.append(data.file)
         self.screen[self._next_id] = data.text
         self._record("send_msg", self._next_id, data.text)
         return self._next_id
@@ -101,7 +104,38 @@ def contract():
             dc.DeltaChatAdapter.edit_message is BasePlatformAdapter.edit_message,
         "base_params_accepted": all(p in ours for p in base),
         "sendresult_fields": [f.name for f in dataclasses.fields(SendResult)],
+        # our override drops bare paths a MEDIA: tag already sends
+        "deliver_media_params": params(BasePlatformAdapter, "_deliver_media_attachments")[:4],
     }
+
+
+async def media():
+    """Run a reply through Hermes' real extract -> filter -> deliver chain.
+
+    Each reply names the file with a MEDIA: tag and again as a bare path;
+    both used to go out (once per list).
+    """
+    import tempfile
+    from gateway.platforms.event import MessageEvent
+    from gateway.session import SessionSource
+
+    out = {}
+    with tempfile.TemporaryDirectory() as d:
+        for name in ("app.xdc", "report.pdf"):
+            path = os.path.join(d, name)
+            with open(path, "wb") as f:
+                f.write(b"x")
+            a = editing_adapter()
+            source = SessionSource(platform=a.platform, chat_id="42", chat_type="dm")
+            event = MessageEvent(text="hi", source=source)
+            reply = f"Here it is:\nMEDIA:{path}\nSaved at {path} too."
+            extracted = await a._extract_response_content(
+                reply, event, "s", is_ephemeral_response=False)
+            await a._deliver_attachments(event, extracted, {}, anything_sent=True,
+                                         record_delivery=lambda r: None)
+            out[name] = {"files": [os.path.basename(f) for f in a.rpc.files],
+                         "text": extracted.text_content}
+    return out
 
 
 async def main():
@@ -110,6 +144,7 @@ async def main():
         "contract": contract(),
         "stream": await stream(words, 2.0 / len(words)),
         "long": await stream(words[:10] + [f"\nL{i}" for i in range(45)], 0.03),
+        "media": await media(),
     }))
 
 
