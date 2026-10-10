@@ -137,6 +137,7 @@ class MockBasePlatformAdapter:
         self._fatal_error_message = None
         self._fatal_error_retryable = True
         self._fatal_error_handler = None
+        self._reaction_handler = None
 
     @property
     def is_connected(self) -> bool:
