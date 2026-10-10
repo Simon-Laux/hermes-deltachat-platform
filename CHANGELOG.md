@@ -11,6 +11,11 @@ repairs and doc typo fixes are left out; see the git log for those.
   note sent to the text-chat session now names the call's Hermes session,
   so the bot reads the transcript with `session_search` instead of saying it
   has no record of the call. Shared-history mode is unchanged.
+- **The webxdc skill shows two ways to structure shared state.** For
+  multi-user apps built on plain `sendUpdate`, it now compares
+  last-writer-wins (one key per user, e.g. polls) with event sourcing (send
+  actions and replay them, e.g. games), and points to Yjs when several
+  people edit the same data at once.
 
 ### Fixed
 

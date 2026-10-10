@@ -281,6 +281,51 @@ function reportScore(score) {
 }
 ```
 
+### Design patterns for shared state
+
+Two ways to structure the payloads when using `sendUpdate` directly. If several users can edit the same piece of data at the same time, neither is enough — go to Level 2.
+
+#### Last-writer-wins
+Simplest approach — each user owns one key and the latest value per key wins. Send only the key that changed, not the whole state. Works for simple apps like polls.
+
+```javascript
+let state = { votes: {} };
+
+window.webxdc.setUpdateListener((update) => {
+  Object.assign(state.votes, update.payload.votes);
+  render();
+}, 0);
+
+function vote(option) {
+  state.votes[window.webxdc.selfAddr] = option;
+  window.webxdc.sendUpdate({
+    payload: { votes: { [window.webxdc.selfAddr]: option } },
+    info: `${window.webxdc.selfName} voted`,
+    summary: `${Object.keys(state.votes).length} votes`
+  }, "");
+}
+```
+
+#### Event sourcing
+Send individual actions and apply them one by one to build up the state. Good for games and collaborative tools. Apply each update as it arrives instead of replaying the whole list every time, and draw only once the history is caught up.
+
+```javascript
+let state = newGame();
+render();  // empty state, until updates arrive
+
+window.webxdc.setUpdateListener((update) => {
+  applyMove(state, update.payload);
+  if (update.serial === update.max_serial) render();  // caught up
+}, 0);
+
+function makeMove(move) {
+  window.webxdc.sendUpdate({
+    payload: { player: window.webxdc.selfAddr, ...move },
+    info: `${window.webxdc.selfName} made a move`
+  }, "");
+}
+```
+
 ---
 
 ## Level 2: Yjs for collaborative state
