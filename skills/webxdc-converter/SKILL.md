@@ -68,7 +68,7 @@ The default assumption is Level 0. Only go higher when there's a clear reason.
 
 ## Step 2: Prepare the HTML
 
-All webxdc apps must be **fully self-contained** — no external CDN links, no fetch calls, no external images.
+All webxdc apps must be **fully self-contained** — no external CDN links, no requests to external URLs, no external images. Loading files packaged in the `.xdc` by relative path (e.g. `fetch("data.json")`) works.
 
 When converting an existing artifact or HTML file:
 
@@ -196,7 +196,7 @@ EOF
 
 For a bundled app, run the build first and pass the build output instead: `python3 - myapp/dist myapp.xdc`.
 
-Fix every ERROR and package again. The network check looks for absolute URLs in tags, CSS and ES module imports; `fetch()` calls and URLs built in JavaScript still need your own eyes.
+Fix every ERROR and package again. The network check only finds absolute URLs written in tags, CSS and ES module imports. It does not see requests made from JavaScript, so before sending, search all of the app's JavaScript (`.js` files and inline `<script>` blocks) for `fetch(`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `navigator.sendBeacon` and URLs assembled from strings (`"https://" + host`, template literals). `fetch` and `XMLHttpRequest` may load files inside the `.xdc` by relative path; every other hit must be removed — an external request fails in the chat even though the app works in a browser.
 
 ### Size guidance
 
