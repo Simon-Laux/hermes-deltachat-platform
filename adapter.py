@@ -32,6 +32,7 @@ from gateway.platforms.base import (
     MessageEvent,
     MessageType,
 )
+from gateway.platforms.helpers import MessageDeduplicator
 from gateway.config import Platform, PlatformConfig
 
 # Must use "hermes_plugins.*" prefix so records appear in gateway.log.
@@ -716,6 +717,16 @@ class DeltaChatAdapter(BasePlatformAdapter):
         # Exec-approval prompt msg id -> (Hermes session key, request_id),
         # oldest first. Only prompts whose request_id is known are here.
         self._approval_prompts: Dict[int, tuple] = {}
+        # Ids of messages a previous run may never have got to; see _replay_unhandled.
+        self._replay_ids: List[int] = []
+        # Ids of messages already handed to Hermes, so a replay can't make a
+        # second turn of one whose read receipt failed (see _mark_seen).
+        # why: an attribute of this type, because the gateway carries those
+        # into the adapter it rebuilds (helpers.inbound_dedup_caches), and a
+        # rebuild is exactly when we replay. It lives in memory only, so a
+        # process restart still replays such a message once. The TTL only has
+        # to outlast the gateway's reconnect backoff (30s -> 300s).
+        self._handed_off = MessageDeduplicator(ttl_seconds=24 * 3600)
 
         # Group mention gating (opt-in; DMs are never gated). Set
         # platforms.deltachat-platform.require_mention / mention_aliases in
@@ -1254,6 +1265,11 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 logger.warning(f"Could not set bot config: {e}")
 
             await self._update_commands_bio()
+
+            # why: before start_io, so the list can't overlap with messages
+            # arriving from now on — those get their own IncomingMsg event.
+            # Only the ids: loading each message is left to the listener.
+            self._replay_ids = await self._unhandled_message_ids()
 
             # Start IO for the account to receive events
             await self.rpc.start_io(self.account_id)
@@ -2087,6 +2103,8 @@ body {{
         _handle_listener_error.
         """
         try:
+            # Ahead of live events, so a chat's messages reach Hermes in order.
+            await self._replay_unhandled()
             while self._running:
                 try:
                     if self.account_id:
@@ -2226,6 +2244,82 @@ body {{
         else:
             logger.debug(f"Unhandled event type: {event_kind}")
 
+    async def _unhandled_message_ids(self) -> List[int]:
+        """Ids of messages a previous run may have received but never handed
+        to Hermes, oldest first; _unhandled_messages narrows them down.
+
+        Core emits IncomingMsg once, from the process that stored the message,
+        and events die with that process. So a message stored just before a
+        crash, or still queued when deltachat-rpc-server died and the gateway
+        rebuilt us, never gets an event again. It does stay "fresh" (unseen)
+        and above last_msg_id, which markseen_msgs advances — and we mark a
+        message seen only once Hermes has it.
+        """
+        try:
+            msg_ids = await self.rpc.get_next_msgs(self.account_id)
+        except Exception as e:
+            # Deprecated in core; losing it must not stop the adapter.
+            logger.warning("Could not look for messages missed by the last run: %s", e)
+            return []
+        return [int(i) for i in msg_ids or []]
+
+    async def _unhandled_messages(self, msg_ids: List[int]) -> List[Dict[str, Any]]:
+        """IncomingMsg events for those of *msg_ids* worth handling again.
+
+        get_next_msgs returns everything above last_msg_id, our own replies
+        included, so only fresh incoming messages are kept. Those must also be
+        fully downloaded: a bot gets IncomingMsg only then, so anything still
+        partial gets its event when the rest arrives. Call messages never get
+        IncomingMsg either (calls have their own events), so they are skipped.
+
+        What is left is still wider than "never handed to Hermes": messages
+        the intake gate dropped, and empty ones, stay fresh too and come back
+        here. Handling them again just drops them again.
+        """
+        from deltachat2.types import MessageState
+
+        events = []
+        for msg_id in msg_ids:
+            try:
+                msg = await self.rpc.get_message(self.account_id, msg_id)
+            except Exception as e:
+                logger.debug("Could not load message %s: %s", msg_id, e)
+                continue
+            if (msg.get("state") == MessageState.IN_FRESH
+                    and msg.get("download_state") == "Done"
+                    and msg.get("view_type") != "Call"):
+                events.append({"chat_id": msg.get("chat_id"), "msg_id": msg_id})
+        return events
+
+    async def _replay_unhandled(self) -> None:
+        """Handle what connect() found unhandled (see _unhandled_message_ids).
+
+        Runs in the listener, ahead of live events, rather than in connect():
+        one get_message per id would otherwise hold up start_io.
+        """
+        msg_ids, self._replay_ids = self._replay_ids, []
+        events = await self._unhandled_messages(msg_ids)
+        if events:
+            logger.info("Handling %d message(s) the last run never got to", len(events))
+        for event in events:
+            logger.debug("Handling message %s that the last run never got to", event["msg_id"])
+            await self._handle_incoming_message(event)
+
+    async def _mark_seen(self, msg_id) -> None:
+        """Record the message as handed off and send the read receipt — only
+        once Hermes has it, since the receipt also moves last_msg_id past it
+        (see _unhandled_message_ids).
+
+        A failed receipt leaves the message fresh, so the next connect lists
+        it again. _handed_off keeps that from becoming a second turn, but only
+        within this process: after a gateway restart it is replayed once.
+        """
+        self._handed_off.is_duplicate(str(msg_id))  # records it
+        try:
+            await self.rpc.markseen_msgs(self.account_id, [int(msg_id)])
+        except Exception as e:
+            logger.warning("Could not mark message %s as seen: %s", msg_id, e)
+
     async def _handle_incoming_message(self, event: Dict[str, Any]) -> None:
         """Handle an incoming text message.
 
@@ -2240,6 +2334,14 @@ body {{
                 logger.warning(f"Invalid message event: {event}")
                 return
 
+            # A replay of a message Hermes already has, after its read receipt
+            # failed. Checked for live events too: a message whose download
+            # completes right after start_io can come both ways.
+            if self._handed_off.contains(str(msg_id)):
+                logger.debug("Message %s was already handed to Hermes", msg_id)
+                await self._mark_seen(msg_id)  # retry the receipt
+                return
+
             # Get message details via direct RPC
             msg = await self.rpc.get_message(
                 self.account_id,
@@ -2249,18 +2351,13 @@ body {{
                 logger.warning(f"Could not retrieve message {msg_id}")
                 return
 
-            # Before the read receipt: a dropped sender learns nothing.
+            # No read receipt for these: a dropped sender learns nothing.
             if not await self._intake_allows(msg, chat_id):
                 return
 
-            # Send read receipt immediately
-            try:
-                await self.rpc.markseen_msgs(self.account_id, [int(msg_id)])
-            except Exception as e:
-                logger.debug(f"Could not mark message {msg_id} as seen: {e}")
-
             # Before the text/non-text split so images and voice are gated too.
             if not await self._mention_gate_allows(msg, chat_id):
+                await self._mark_seen(msg_id)
                 return
 
             text = msg.get("text", "")
@@ -2275,6 +2372,7 @@ body {{
                     view_type, bool(text), msg.get("file"), msg.get("file_mime"), msg_id,
                 )
                 await self._handle_non_text_message(msg, chat_id, msg_id)
+                await self._mark_seen(msg_id)
                 return
 
             # Get chat info
@@ -2326,6 +2424,7 @@ body {{
                 message_id=str(msg_id),
             )
             await self.handle_message(message_event)
+            await self._mark_seen(msg_id)
 
         except Exception as e:
             logger.error(f"Error handling message event: {e}")
