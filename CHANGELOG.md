@@ -15,7 +15,8 @@ action`, and get as much space as people need to upgrade safely.
   asking it to call you rings your phone instead of getting "I can't make
   calls". Asked from a chat, it calls that chat without needing the chat
   token. To call you later, it schedules a cron job with the token in the
-  job's prompt.
+  job's prompt. It no longer starts a second call into a chat that is
+  already on one, which used to silence the running call.
 - **Slash-command confirmations can be answered with reactions.** When
   `/reset`, `/new`, `/undo`, `/reload-mcp` or a costly `/model` asks for
   confirmation, react 👍 to approve once or 👎 to cancel. "Always approve"

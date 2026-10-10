@@ -599,6 +599,7 @@ class CallManager:
         self._chat_to_msg: Dict[str, int] = {}        # chat_id → msg_id
         self._pending_answers: Dict[int, asyncio.Future] = {}  # msg_id → answer-SDP future (outgoing)
         self._drop_call_ack: Dict[str, int] = {}  # chat_id → suppress the agent's post-dc_start_call line
+        self._dialing: set = set()  # chat_ids with an outgoing call still being set up
 
         # The gateway/agent loop (where we were constructed — connect() is async).
         # handle_message must run here; aiortc must NOT.
@@ -1107,6 +1108,19 @@ class CallManager:
         return []
 
     async def _start_call(self, chat_id: str, opening: str = "") -> int:
+        # why: a session is registered only after ICE gathering and
+        # place_outgoing_call, so two calls for one chat started together both
+        # got through; the second then took over the chat's routing. Runs on
+        # the single call loop, so check and add cannot interleave.
+        if chat_id in self._chat_to_msg or chat_id in self._dialing:
+            raise RuntimeError("already on a call in this chat")
+        self._dialing.add(chat_id)
+        try:
+            return await self._dial(chat_id, opening)
+        finally:
+            self._dialing.discard(chat_id)
+
+    async def _dial(self, chat_id: str, opening: str = "") -> int:
         """Place an outgoing voice call to *chat_id*; return the call msg_id.
 
         Blocks until the other party answers (or raises on timeout/decline).
@@ -1172,7 +1186,17 @@ class CallManager:
 
         logger.info("Remote answer candidates: %s", self._sdp_candidates(sdp_answer))
         logger.info("Remote answer media: %s", self._sdp_media(sdp_answer))
-        await pc.setRemoteDescription(RTCSessionDescription(type="answer", sdp=sdp_answer))
+        try:
+            await pc.setRemoteDescription(RTCSessionDescription(type="answer", sdp=sdp_answer))
+        except Exception:
+            # why: the pc never leaves "new", so no state hook tears it down and
+            # the chat would stay "on a call" until the peer ends it.
+            if opening_task:
+                opening_task.cancel()
+            with contextlib.suppress(Exception):
+                await self._adapter.rpc.end_call(self._adapter.account_id, msg_id)
+            await self._teardown_session(msg_id)
+            raise
 
         # Briefly confirm the media path comes up before returning, so the tool
         # reports a genuinely live call and surfaces an immediate failure as an

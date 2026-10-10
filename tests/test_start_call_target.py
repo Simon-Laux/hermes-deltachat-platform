@@ -97,3 +97,13 @@ async def test_blank_token_calls_the_asking_chat(start_call, calls, monkeypatch)
     _session(monkeypatch, HERMES_SESSION_PLATFORM=DC, HERMES_SESSION_CHAT_ID="20")
     assert json.loads(await start_call({"chat_token": "  ", "opening": "Hi!"}))["success"]
     calls.start_call.assert_awaited_once_with("20", opening="Hi!")
+
+
+@pytest.mark.asyncio
+async def test_no_second_call_into_a_live_one_by_token(start_call, calls, monkeypatch):
+    """The token resolves to an int while call state is keyed by str."""
+    _session(monkeypatch)
+    monkeypatch.setitem(adapter._chat_token_to_id, "tok", 20)
+    calls.has_active_call = lambda chat_id: chat_id == "20"
+    assert "error" in json.loads(await start_call({"chat_token": "tok", "opening": "Hi!"}))
+    calls.start_call.assert_not_awaited()
