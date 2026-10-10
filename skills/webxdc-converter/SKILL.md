@@ -68,7 +68,7 @@ The default assumption is Level 0. Only go higher when there's a clear reason.
 
 ## Step 2: Prepare the HTML
 
-All webxdc apps must be **fully self-contained** — no external CDN links, no requests to external URLs, no external images. Loading files packaged in the `.xdc` by relative path (e.g. `fetch("data.json")`) works.
+All webxdc apps must be **fully self-contained** — no external CDN links, no requests to external URLs, no external images. Loading files packaged in the `.xdc` by relative path (e.g. `fetch("data.json")`) works. Ship data the app shows (notes, lists) as a JSON file loaded this way, and show an error if loading fails. If you inline JSON into a `<script>` instead, replace every `<` in it with `\u003c`, or text in the data can end the script block early.
 
 When converting an existing artifact or HTML file:
 
@@ -137,7 +137,7 @@ EOF
 
 Replace `AB` with the app's initials (one or two letters, more don't fit) and choose a fitting background color. Without Pillow the icon is a plain colored square.
 
-**Icon from an image generator.** Unless the user asked for a particular style, ask for a flat icon: one centred symbol on a solid background of an exact hex colour, with no text, gradients or texture. Vaguer prompts tend to give grainy or off-centre results. Keep the subject in the middle ~70% of the image, because the chat shows the icon on a rounded tile. Generators sometimes return a JPEG under a `.png` name, so check the first bytes: a PNG starts with `\x89PNG`, a JPEG with `\xff\xd8`. Save a JPEG as `icon.jpg` (or convert it to PNG) instead of packing it as `icon.png`.
+**Icon from an image generator.** Unless the user asked for a particular style, prompt the generator for a flat icon: one centred symbol on a full-bleed solid background of an exact hex colour, with no text, gradients, texture, border or rounded corners. Vaguer prompts tend to give grainy or off-centre results. Keep the subject in the middle ~70% of the image, because the messenger may crop the icon to a rounded square or a circle. Resize the result to 256–512 px. Generators don't always return the format the file name says, so check the first bytes: a PNG starts with `\x89PNG`, a JPEG with `\xff\xd8`. Save a JPEG as `icon.jpg`; convert anything else (e.g. WebP, starting with `RIFF`) to PNG.
 
 ### Create and check the .xdc file
 
@@ -200,7 +200,7 @@ For a bundled app, run the build first and pass the build output instead: `pytho
 
 Fix every ERROR and package again. The messenger blocks network access, so anything loaded from outside the `.xdc` (a CDN script, a web font, an API call) just fails, even though the app works in a browser. The check catches URLs in tags, CSS and imports, but not requests made from JavaScript: search the JS for `http://`, `https://`, `ws://`, `wss://` and `"//`, and make sure the app doesn't need any of them to work. Bundle what it needs into the `.xdc`; for features that need a server, see "Replace or remove calls to external servers" above.
 
-Make every change in the app directory (or in the sources, for a bundled app) and package again. Don't patch files only inside the `.xdc`, so that the sources still reproduce the app.
+Make every change in the app directory (or in the sources, for a bundled app: then build again) and package again. Don't patch files only inside the `.xdc`, so that the sources still reproduce the app.
 
 ### Size guidance
 
@@ -222,7 +222,9 @@ Here is your report. MEDIA:<absolute path of your working directory>/report.pdf
 
 For Level 1+ apps, shared state belongs to the one app message it was sent in. Sending the `.xdc` again — including a fixed or improved version — starts a separate, empty instance: earlier scores, votes or entries stay in the old message. Say so when you send a new version, so nobody wonders where their data went.
 
-The packaging checks don't open the app. Unless you actually ran it, say in your reply that it is untested and ask the user to try it on their device.
+The packaging checks don't open the app. Unless you actually ran it, say in your reply that it is untested and ask the user to try it on their device. To run it yourself, serve the app directory over HTTP (e.g. `python3 -m http.server`); opened as a `file://` page, `fetch` of packaged files fails.
+
+If the app contains data copied in when it was built (e.g. `data.json`), say that it won't update when its source changes. To refresh it, regenerate the data from the source, package again and send the new `.xdc`.
 
 **For Level 0 apps, you're done here.** The sections below are only for apps that need shared state.
 
@@ -406,7 +408,5 @@ Inform the user if their app would benefit from a hybrid approach (realtime for 
 - **`window.open()` is blocked** — open pages in the same window or show content in the page.
 - **Don't rely on browser permissions** — camera, microphone, clipboard, geolocation and similar requests may be denied. Feature-detect and keep the app usable without them. WebRTC is blocked as part of the no-internet rule.
 - **External links: offer to copy them** — some clients ask the user before opening an outbound link, others do nothing when it is clicked. Show the URL as selectable text so the user can copy it (a copy button is a bonus, but fall back to selectable text if `navigator.clipboard` fails).
-- **Escape what you show** — chat members can type anything into a shared app, and text inserted with `innerHTML` is parsed as HTML, so it can run script on every device (XSS). Show text with `textContent` / `innerText`; if you need markup, escape `&`, `<`, `>`, `"` and `'` in the user text first.
-- **Ship baked-in data as a file** — put data (notes, lists) in a JSON file in the `.xdc` and load it with `fetch("data.json")`, showing an error if that fails. If you inline it into a `<script>` instead, replace `</` with `<\/` in the JSON, or a `</script>` in the data ends the script block early.
-- **Baked-in data goes stale** — data copied into the app when it is built (e.g. `data.json`) doesn't update when its source changes. Say so when you send the app. To refresh it, regenerate the data from the source, package again and send the new `.xdc`.
+- **Escape what you show** — chat members can type anything into a shared app, and text inserted with `innerHTML` is parsed as HTML, so it can run script on every device (XSS). Show text with `textContent`. If you need markup, escape `&`, `<`, `>`, `"` and `'` in the user text, and put it only in element content or quoted attribute values, never in `href`/`src`, `on…` attributes or a `<script>`.
 - **Never leave a white page** — if something essential fails (a script error during startup, a WebAssembly module that fails to load, missing data), show an error message in the page. Add a `window.addEventListener("error", …)` and `"unhandledrejection"` handler that displays the error.
