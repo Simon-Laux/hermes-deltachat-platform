@@ -386,6 +386,64 @@ class TestOutgoingCall:
         with pytest.raises(RuntimeError):
             fut.result()
 
+    @pytest.mark.asyncio
+    async def test_no_second_call_into_a_live_one(self):
+        from unittest.mock import AsyncMock
+        mgr = self._manager()
+        mgr._chat_to_msg["12"] = 5
+        mgr._dial = AsyncMock()
+        with pytest.raises(RuntimeError, match="already on a call"):
+            await mgr._start_call("12", "Hi!")
+        mgr._dial.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_no_second_call_while_the_first_is_dialling(self):
+        """No session exists until the first call is placed; the guard must
+        hold during that setup too."""
+        mgr = self._manager()
+        release = asyncio.Event()
+
+        async def dial(chat_id, opening):
+            await release.wait()
+            return 5
+        mgr._dial = dial
+        first = asyncio.ensure_future(mgr._start_call("12", "Hi!"))
+        await asyncio.sleep(0)
+        with pytest.raises(RuntimeError, match="already on a call"):
+            await asyncio.wait_for(mgr._start_call("12", "Hi!"), 1)
+        release.set()
+        assert await first == 5
+        assert "12" not in mgr._dialing   # a later call may dial again
+
+    @pytest.mark.asyncio
+    async def test_unusable_answer_tears_the_call_down(self):
+        """A pc that never leaves "new" fires no state hook; without explicit
+        teardown the chat stayed "on a call" and blocked every redial."""
+        from unittest.mock import AsyncMock, MagicMock
+        mgr = self._manager()
+        mgr._adapter.rpc.place_outgoing_call = AsyncMock(return_value=5)
+        mgr._adapter.rpc.end_call = AsyncMock()
+        mgr._resolve_chat_contact = AsyncMock(return_value=("10", "Bob"))
+        pc = MagicMock()
+        pc.setLocalDescription = AsyncMock()
+        pc.createOffer = AsyncMock()
+        pc.setRemoteDescription = AsyncMock(side_effect=ValueError("bad sdp"))
+        pc.close = AsyncMock()
+        pc.localDescription.sdp = "v=0"
+        mgr._new_peer_connection = AsyncMock(return_value=(pc, None))
+        mgr._gather_ice = AsyncMock()
+        mgr._warmup_stt = AsyncMock()
+        mgr._note_call_ended = AsyncMock()
+
+        call = asyncio.ensure_future(mgr._start_call("12"))
+        while 5 not in mgr._pending_answers:
+            await asyncio.sleep(0)
+        mgr._pending_answers.pop(5).set_result("v=0 answer")
+        with pytest.raises(ValueError):
+            await call
+        mgr._adapter.rpc.end_call.assert_awaited_once_with(mgr._adapter.account_id, 5)
+        assert not mgr.has_active_call("12")
+
     def test_call_end_reply_is_recognised_by_its_anchor(self):
         # Both injected notes (call thread + main thread) share the prefix.
         assert ch.CallManager.is_call_end_reply("callend-35422583") is True
