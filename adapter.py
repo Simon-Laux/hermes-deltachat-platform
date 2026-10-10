@@ -12,6 +12,7 @@ import random
 import re
 import secrets
 import sys
+import time
 import uuid
 import asyncio
 import concurrent.futures
@@ -716,6 +717,8 @@ class DeltaChatAdapter(BasePlatformAdapter):
         # Exec-approval prompt msg id -> (Hermes session key, request_id),
         # oldest first. Only prompts whose request_id is known are here.
         self._approval_prompts: Dict[int, tuple] = {}
+        # Slash-confirm prompt msg id -> (Hermes session key, confirm_id), oldest first.
+        self._slash_confirm_prompts: Dict[int, tuple] = {}
 
         # Group mention gating (opt-in; DMs are never gated). Set
         # platforms.deltachat-platform.require_mention / mention_aliases in
@@ -1611,10 +1614,15 @@ body {{
             text = f"{prompt.text}\n\nReply {reply}"
         result = await self.send(prompt.chat_id, text, metadata=prompt.metadata)
         if result.success and result.message_id and request_id:
-            self._approval_prompts[int(result.message_id)] = (prompt.session_key, request_id)
-            while len(self._approval_prompts) > self._MAX_APPROVAL_PROMPTS:
-                del self._approval_prompts[next(iter(self._approval_prompts))]
+            self._remember_prompt(self._approval_prompts, result.message_id,
+                                  (prompt.session_key, request_id))
         return result
+
+    def _remember_prompt(self, prompts: Dict[int, tuple], msg_id, value: tuple) -> None:
+        """Remember a reaction-answerable prompt, dropping the oldest past the cap."""
+        prompts[int(msg_id)] = value
+        while len(prompts) > self._MAX_APPROVAL_PROMPTS:
+            del prompts[next(iter(prompts))]
 
     def _pending_request_id(self, prompt) -> Optional[str]:
         """The request_id of the pending approval *prompt* was rendered from.
@@ -1641,48 +1649,135 @@ body {{
                 return data["request_id"]
         return None
 
-    async def _handle_reaction(self, event: Dict[str, Any]) -> None:
-        """Resolve the exec approval a 👍/👎 reaction answers.
+    # "Always" persists a global opt-out in config.yaml, so it is typed-only (/always):
+    # a casual reaction must not flip it.
+    _SLASH_CONFIRM_REACTIONS = {"👍": "once", "👎": "cancel"}
+
+    async def send_slash_confirm(self, chat_id: str, title: str, message: str, session_key: str,
+                                 confirm_id: str, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+        """Send Hermes' slash-command confirm (/reset, /reload-mcp, ...) answerable by reaction.
+
+        Hermes registers the confirm before calling this and intercepts the
+        typed /approve, /always, /cancel either way. *message* already holds
+        the title, so it isn't repeated.
+        """
+        try:
+            from tools.slash_confirm import resolve  # noqa: F401 -- the reaction path needs it
+        except ImportError:
+            return SendResult(success=False, error="Not supported")
+        text = f"{message}\n\nReact to this exact message:\n👍 = approve once\n👎 = cancel"
+        if "/approve" not in message:
+            text += "\n\nOr reply `/approve`, `/always`, or `/cancel`."
+        result = await self.send(chat_id, text, metadata=metadata)
+        if result.success and result.message_id:
+            self._remember_prompt(self._slash_confirm_prompts, result.message_id,
+                                  (session_key, confirm_id))
+        return result
+
+    @staticmethod
+    def _reaction_choice(event: Dict[str, Any], mapping: Dict[str, Any]):
+        """The value *mapping* gives the event's reaction, or None.
+
+        Skin tones and variation selectors are ignored; the reaction must map
+        to exactly one value. Values may be falsy (0), so test `is None`.
+        """
+        emojis = re.sub("[\U0001F3FB-\U0001F3FF️]", "", event.get("reaction") or "").split()
+        choices = {mapping.get(e) for e in emojis}
+        if len(choices) != 1 or None in choices:
+            return None
+        (choice,) = choices
+        return choice
+
+    async def _reaction_authorized(self, event: Dict[str, Any], session_key: str,
+                                   command: Optional[str]) -> bool:
+        """Whether the reactor may answer the prompt of *session_key*.
 
         Hermes never sees reactions, so this is the authorization gate: the
         reactor must be a key contact Hermes approves for this chat. The
         prompt's session must belong to this chat and, for per-user group
-        sessions, to the reactor — whoever could have typed /approve for it.
+        sessions, to the reactor — whoever could have typed the answer. With
+        *command*, the reactor must also be allowed to run that slash command.
         """
         msg_id, chat_id, contact_id = event.get("msg_id"), event.get("chat_id"), event.get("contact_id")
-        if msg_id not in self._approval_prompts:
-            return
-        session_key, request_id = self._approval_prompts[msg_id]
-        emojis = re.sub("[\U0001F3FB-\U0001F3FF️]", "", event.get("reaction") or "").split()
-        choices = {self._APPROVAL_REACTIONS.get(e) for e in emojis}
-        if len(choices) != 1 or None in choices:
-            return
-        (choice,) = choices
         try:
             contact = await self.rpc.get_contact(self.account_id, int(contact_id))
             chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
         except Exception as e:
-            logger.warning("Ignoring approval reaction on prompt %s: %s", msg_id, e)
-            return
+            logger.warning("Ignoring reaction on prompt %s: %s", msg_id, e)
+            return False
         chat_type = "group" if chat.get("chat_type") == "Group" else "dm"
         # why: exact keys, not a ":<chat_id>" suffix -- chat and contact ids share a range,
         # so group 12's per-user key for contact 12 ("...:group:12:12") ends in ":12" too
         own = f":{chat_type}:{chat_id}"
         if not (session_key.endswith(own) or session_key.endswith(f"{own}:{contact_id}")):
-            logger.info("Ignoring approval reaction from contact %s on prompt %s: not their session",
+            logger.info("Ignoring reaction from contact %s on prompt %s: not their session",
                         contact_id, msg_id)
-            return
+            return False
         if not contact.get("is_key_contact") or self._is_sender_authorized(
                 str(contact_id), chat_type, str(chat_id)) is not True:
-            logger.info("Ignoring approval reaction from unauthorized contact %s", contact_id)
-            return
+            logger.info("Ignoring reaction from unauthorized contact %s", contact_id)
+            return False
+        if command is None:
+            return True
         from gateway.slash_access import policy_from_extra
         # why: Hermes refuses /approve and /deny from non-admins when allow_admin_from is set;
         # a reaction must not get around that
-        command = "deny" if choice == "deny" else "approve"
         if not policy_from_extra(self.config.extra or {}, chat_type).can_run(str(contact_id), command):
-            logger.info("Ignoring approval reaction from contact %s: /%s is admin-only",
-                        contact_id, command)
+            logger.info("Ignoring reaction from contact %s: /%s is admin-only", contact_id, command)
+            return False
+        return True
+
+    async def _handle_reaction(self, event: Dict[str, Any]) -> None:
+        """Answer the prompt a reaction was given to, if it's one of ours."""
+        msg_id = event.get("msg_id")
+        if msg_id in self._approval_prompts:
+            await self._handle_approval_reaction(event)
+        elif msg_id in self._slash_confirm_prompts:
+            await self._handle_slash_confirm_reaction(event)
+
+    async def _handle_slash_confirm_reaction(self, event: Dict[str, Any]) -> None:
+        """Resolve the slash confirm a 👍/👎 reaction answers."""
+        msg_id, chat_id, contact_id = event.get("msg_id"), event.get("chat_id"), event.get("contact_id")
+        session_key, confirm_id = self._slash_confirm_prompts[msg_id]
+        choice = self._reaction_choice(event, self._SLASH_CONFIRM_REACTIONS)
+        if choice is None:
+            return
+        command = "deny" if choice == "cancel" else "approve"
+        if not await self._reaction_authorized(event, session_key, command):
+            return
+        if self._slash_confirm_prompts.pop(msg_id, None) is None:
+            return
+        try:
+            from tools import slash_confirm
+            # why: resolve() returns None both for a stale confirm and for a handler whose
+            # reply isn't a str (/reset's EphemeralReply), so check liveness first
+            pending = slash_confirm.get_pending(session_key)
+            live = bool(pending and pending.get("confirm_id") == confirm_id
+                        and time.time() - float(pending.get("created_at") or 0)
+                        <= slash_confirm.DEFAULT_TIMEOUT_SECONDS)
+            reply = await slash_confirm.resolve(session_key, confirm_id, choice)
+        except Exception as e:
+            logger.warning("Slash confirm reaction on prompt %s failed: %s", msg_id, e)
+            return
+        logger.info("Contact %s reacted to slash confirm prompt %s: %s (live: %s)",
+                    contact_id, msg_id, choice, live)
+        if reply:
+            await self.send(str(chat_id), reply, reply_to=str(msg_id))
+        elif live:
+            try:
+                await self.rpc.send_reaction(self.account_id, msg_id, ["✅"])
+            except Exception as e:
+                logger.warning("Can't react to slash confirm prompt %s: %s", msg_id, e)
+
+    async def _handle_approval_reaction(self, event: Dict[str, Any]) -> None:
+        """Resolve the exec approval a 👍/👎 reaction answers."""
+        msg_id, chat_id, contact_id = event.get("msg_id"), event.get("chat_id"), event.get("contact_id")
+        session_key, request_id = self._approval_prompts[msg_id]
+        choice = self._reaction_choice(event, self._APPROVAL_REACTIONS)
+        if choice is None:
+            return
+        command = "deny" if choice == "deny" else "approve"
+        if not await self._reaction_authorized(event, session_key, command):
             return
 
         from tools.approval import resolve_gateway_approval

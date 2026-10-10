@@ -7,6 +7,13 @@ repairs and doc typo fixes are left out; see the git log for those.
 
 ### New
 
+- **Slash-command confirmations can be answered with reactions.** When
+  `/reset`, `/new`, `/undo`, `/reload-mcp` or a costly `/model` asks for
+  confirmation, react 👍 to approve once or 👎 to cancel. "Always approve"
+  turns the prompt off for good in `config.yaml`, so it stays typed-only:
+  `/always`. The same contacts as for approval prompts may react, and
+  `allow_admin_from` applies. A command that has no text reply, like
+  `/reset`, gets a ✅ reaction on the prompt.
 - **The text chat can look up what was said on a call.** The "call ended"
   note sent to the text-chat session now names the call's Hermes session,
   so the bot reads the transcript with `session_search` instead of saying it

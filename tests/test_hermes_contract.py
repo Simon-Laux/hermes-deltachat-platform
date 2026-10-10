@@ -58,6 +58,8 @@ def test_api_contract(run):
     assert c["base_not_overridden"]
     assert c["base_params_accepted"]
     assert {"success", "message_id", "error", "retryable"} <= set(c["sendresult_fields"])
+    assert all(c["prompt_params_match"].values()), c["prompt_params_match"]
+    assert c["slash_confirm_api"]
 
 
 def test_streamed_reply_is_one_throttled_message(run):
