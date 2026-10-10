@@ -301,10 +301,14 @@ hermes gateway start
 | `DELTACHAT_REQUIRE_MENTION` | No | — | In **group** chats, only answer messages that say `@<display name>` (or an alias), or quote-reply to the bot; commands must be addressed as `/cmd@<name>`. DMs are never gated. Also `platforms.deltachat-platform.require_mention: true` in `config.yaml` |
 | `DELTACHAT_MENTION_ALIASES` | No | — | Comma-separated extra names that count as a mention (`@<alias>`); also `platforms.deltachat-platform.mention_aliases` |
 | `DELTACHAT_COMMANDS_BIO` | No | on | Append the slash commands that work in Delta Chat to the bot's profile bio, below a `Hermes commands:` line, one `/cmd args – what` per line so people can look them up in its profile. Your own text above that line is kept. Commands that only admins may run (`allow_admin_from`) are left out. `0` turns it off and takes the list out again, which saves ~4.9 KB per message: Delta Chat isn't optimized for long bios and sends the whole bio with every message, not only now and then like the avatar. Also `platforms.deltachat-platform.commands_bio` |
-| `DELTACHAT_MESSAGE_EDITING` | No | — | Let Hermes edit sent messages in place — see [Message editing](#message-editing-opt-in). Also `platforms.deltachat-platform.message_editing` |
+| `DELTACHAT_MESSAGE_EDITING` | No | — | *Experimental.* Let Hermes edit sent messages in place — see [Message editing](#message-editing-opt-in). Also `platforms.deltachat-platform.message_editing` |
 | `DELTACHAT_EDIT_MIN_INTERVAL` | No | `5` | Seconds between in-progress edits for the whole account (minimum 1). Also `platforms.deltachat-platform.edit_min_interval` |
 
 ### Message editing (opt-in)
+
+> **Experimental.** Covered by unit tests and by tests against Hermes' real streaming code,
+> but not yet tried much with live accounts. Feedback welcome in
+> [#54](https://github.com/Simon-Laux/hermes-deltachat-platform/issues/54).
 
 Off by default. With `DELTACHAT_MESSAGE_EDITING=1` Hermes edits its messages in place instead
 of sending new ones: streamed replies grow in one bubble, tool progress updates one message, and

@@ -24,7 +24,7 @@ repairs and doc typo fixes are left out; see the git log for those.
   `node_modules` and notes archives over 1 MB and 10 MB. Generated icons are 256 px instead of 128. When the bot sends
   a new version of a shared-state app it now tells you the old data stays
   in the previous message.
-- **Optional message editing** (`DELTACHAT_MESSAGE_EDITING`, off by default).
+- **Optional message editing, experimental** (`DELTACHAT_MESSAGE_EDITING`, off by default).
   Hermes can then edit streamed replies, tool progress, heartbeats and
   approval prompts in place. Every edit is an email through the chatmail
   relay, so in-progress edits are limited to one per

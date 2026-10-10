@@ -2615,6 +2615,7 @@ class DeltaChatEditingAdapter(DeltaChatAdapter):
 
     def __init__(self, config: PlatformConfig, interval: float = _DEFAULT_EDIT_INTERVAL):
         super().__init__(config)
+        logger.info("Message editing on (experimental): at most one edit per %ss", interval)
         self._edit_interval = interval
         # msg id -> newest text not yet sent, oldest first
         self._edit_pending: Dict[int, str] = {}
