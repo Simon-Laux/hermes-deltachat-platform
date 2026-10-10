@@ -94,6 +94,14 @@ class TestExtractLocalFiles:
 
         assert remaining == "a\n\nb"
 
+    def test_reply_without_xdc_keeps_its_blank_lines(self, platform_config):
+        """Blank lines in a code sample are content, not leftovers."""
+        adapter = _make_adapter(platform_config)
+        content = "```\ndef a():\n    pass\n\n\ndef b():\n    pass\n```"
+
+        for extract in (adapter.extract_local_files, adapter.extract_media):
+            assert extract(content)[1] == content
+
     def test_removal_leaves_other_occurrences_alone(self, platform_config, tmp_path):
         """Deletion is span-based, not a global str.replace()."""
         adapter = _make_adapter(platform_config)
