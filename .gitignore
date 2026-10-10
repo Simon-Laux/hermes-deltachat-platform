@@ -77,3 +77,6 @@ docs/fork-backport-notes.md
 
 # git worktrees for parallel branches
 .worktrees/
+
+# Python built by the call-test recipe in Agents.md
+.calltest-py

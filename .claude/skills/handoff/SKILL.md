@@ -1,18 +1,16 @@
 ---
 name: handoff
-description: Finish a change and hand it to the user as a reviewed PR. Covers tests, a changelog entry, review subagents, fixing what they find, opening the PR against main, waiting for CI, and a fixed-format handoff message. Use when the user says "handoff", "/handoff", "finish this", "open the pr", or "review and open a pr". It does not merge.
+description: Finish a change and hand it to the user as a reviewed PR. Covers tests, a changelog entry, review subagents, fixing what they find, opening the PR against main, waiting for CI, and a fixed-format handoff message. Use when the user says "handoff", "/handoff", "open the pr", or "review and open a pr". It does not merge.
 ---
 
 # Handoff
 
-The user reviews every PR before merging. This skill does everything up to that point, so
-the review is a decision and not a hunt for missing pieces. Run every step; skip one only when
-it clearly can't apply (say which and why in the handoff).
+Run every step. If one can't apply, say which and why in the handoff.
 
 ## 1. Branch
 
-The branch starts from `origin/main` and the PR targets `main`. If it is behind, rebase it now,
-not after review.
+The branch starts from `origin/main` and the PR targets `main`. Run
+`git fetch origin && git rebase origin/main` now, not after review.
 
 ## 2. Tests
 
@@ -26,24 +24,35 @@ not after review.
   `reply_to_text`, a hardcoded STT model). Check every Hermes signature, attribute and
   config key you use against the installed source (see "Finding Hermes Source" in
   `Agents.md`). Add to `tests/hermes_contract/` when the contract can be tested.
-- Run the whole suite and pyflakes as described in `Agents.md`. Both must pass.
+- Run the whole suite and pyflakes (the same checks as CI). Both must pass:
+
+  ```bash
+  mkdir -p .testhome && nix develop -c env -u LD_LIBRARY_PATH HOME=$PWD/.testhome pytest tests -q; rm -rf .testhome
+  nix develop -c flake8 --select=F --extend-ignore=F401 --exclude=vendor,.git,.worktrees,.venv .
+  ```
+
+  `HOME` keeps the live `~/.hermes/aiortc-env` out of the call tests. `make lint` is a
+  style check with known hits, not this one.
 
 ## 3. Changelog
 
-Add an entry under `## Unreleased` in `CHANGELOG.md` for anything people running the adapter
+Add an entry under `## Unreleased` in `CHANGELOG.md`, in the matching `### New`,
+`### Fixed` or `### Changed` subsection, as a `- **Bold summary.**` bullet like the others, for anything people running the adapter
 would notice. Write it for them: what changed and what they need to do, not how. Internal
 refactors and test-only changes get no entry.
 
 ## 4. Review subagents
 
-Start these in parallel, each with the diff (`git diff origin/main...HEAD`) and the reason
+Commit first; reviewers only see committed work. Then start these in parallel, each with the diff (`git diff origin/main...HEAD`) and the reason
 for the change:
 
 1. **Bugs and regressions:** what breaks for existing users, plus wrong behaviour on the new path.
 2. **Edge cases and tests:** inputs and states the tests don't cover, and races with the
    event loop or the RPC server.
 3. **Simplification** (only for diffs over ~150 lines or ones that touch the
-   sending/editing path): use the `simplify` and `ponytail-review` skills.
+   sending/editing path): `ponytail-review` plus reuse/simplification findings. Reviewers
+   only report; they never edit files, because the others are reading them. Apply
+   accepted findings yourself in step 5.
 
 Tell every reviewer:
 - Each finding needs a `file:line` and a concrete failure scenario.
@@ -66,7 +75,8 @@ Tell every reviewer:
 - design choices with more than one reasonable answer
 - scope growth
 
-**File as an issue on our own repo:** pre-existing problems outside the PR's scope.
+**File as an issue** with `gh issue create -R Simon-Laux/hermes-deltachat-platform`:
+pre-existing problems outside the PR's scope.
 
 If the user asked to be consulted on each point, do that instead.
 
@@ -76,14 +86,11 @@ only.
 ## 6. Open the PR
 
 Push the branch and open the PR against `main` on `Simon-Laux/hermes-deltachat-platform`. The
-body says what changed and why, how it was tested, and the manual test steps from step 8.
-Then wait for CI with `gh pr checks <n> --watch` and fix any failures.
+body says what changed and why, how it was tested, and the manual test steps from step 7.
+Then wait for CI with `gh pr checks <n> --watch` and fix any failures. Merge only when
+the user says so in this conversation.
 
-## 7. Don't merge
-
-Merge only when the user says so in this conversation.
-
-## 8. Handoff message
+## 7. Handoff message
 
 End with exactly this structure, kept short:
 
