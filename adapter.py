@@ -860,18 +860,46 @@ class DeltaChatAdapter(BasePlatformAdapter):
                      msg.get("id"))
         return False
 
-    async def _quotes_own_message(self, msg: Dict) -> bool:
-        """True if *msg* quote-replies to a message this account sent."""
+    async def _quoted_message(self, msg: Dict) -> Optional[Dict]:
+        """The message *msg* quote-replies to, or None if there is none we have."""
         quote = msg.get("quote") or {}
         if quote.get("kind") != "WithMessage" or not quote.get("message_id"):
-            return False
+            return None
         try:
-            quoted = await self.rpc.get_message(self.account_id, int(quote["message_id"]))
+            return await self.rpc.get_message(self.account_id, int(quote["message_id"])) or None
         except Exception as e:
-            # e.g. the quoted message was deleted locally: no proof it was ours
+            # e.g. the quoted message was deleted locally
             logger.debug("Could not load quoted message %s: %s", quote["message_id"], e)
-            return False
+            return None
+
+    async def _quotes_own_message(self, msg: Dict) -> bool:
+        """True if *msg* quote-replies to a message this account sent."""
+        quoted = await self._quoted_message(msg)
         return bool(quoted) and quoted.get("from_id") == DC_CONTACT_ID_SELF
+
+    async def _reply_context(self, msg: Dict, chat_id) -> Dict[str, Any]:
+        """MessageEvent reply_to_* fields for a quote-reply, {} for anything else.
+
+        Hermes only shows the reply context when both the id and the text are
+        set, so a quote of a message we don't have (kind "JustText") is left out.
+        """
+        quoted = await self._quoted_message(msg)
+        if not quoted:
+            return {}
+        quote = msg["quote"]
+        # why: the quote names its message by Message-ID, which a sender can
+        # set to one from another chat. Only take the full text from this
+        # chat; otherwise use the quote text the sender sent along anyway.
+        same_chat = str(quoted.get("chat_id")) == str(chat_id)
+        text = ((quoted.get("text") if same_chat else "") or quote.get("text")
+                or f"[{quote.get('view_type') or 'message'}]")
+        return {
+            "reply_to_message_id": str(quote["message_id"]),
+            "reply_to_text": text,
+            "reply_to_author_id": str(quoted.get("from_id")),
+            "reply_to_author_name": quote.get("author_display_name"),
+            "reply_to_is_own_message": quoted.get("from_id") == DC_CONTACT_ID_SELF,
+        }
 
     def _get_dc_config_dir(self) -> str:
         """Get Delta Chat config directory path.
@@ -2324,6 +2352,7 @@ body {{
                 message_type=MessageType.TEXT,
                 source=source,
                 message_id=str(msg_id),
+                **await self._reply_context(msg, chat_id),
             )
             await self.handle_message(message_event)
 
@@ -2434,6 +2463,7 @@ body {{
             user_name=user_name,
         )
 
+        reply = await self._reply_context(msg, chat_id)
         token = await _get_or_create_chat_token(self.rpc, self.account_id, int(chat_id))
 
         from deltachat2.types import MessageViewtype
@@ -2493,6 +2523,7 @@ body {{
                 message_type=hermes_type,
                 source=source,
                 message_id=str(msg_id),
+                **reply,
                 media_urls=[resolved] if resolved else [],
                 media_types=[file_mime or ("audio/ogg" if is_voice else "audio/mpeg")] if resolved else [],
             )
@@ -2512,6 +2543,7 @@ body {{
                 message_type=MessageType.PHOTO,
                 source=source,
                 message_id=str(msg_id),
+                **reply,
                 media_urls=[resolved] if resolved else [],
                 media_types=[file_mime or "image/jpeg"] if resolved else [],
             )
@@ -2542,6 +2574,7 @@ body {{
                 message_type=MessageType.VIDEO if is_video else MessageType.DOCUMENT,
                 source=source,
                 message_id=str(msg_id),
+                **reply,
                 media_urls=[resolved] if resolved else [],
                 media_types=[file_mime or "application/octet-stream"] if resolved else [],
             )
