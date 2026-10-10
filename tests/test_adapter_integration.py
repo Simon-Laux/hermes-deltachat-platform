@@ -330,6 +330,19 @@ class TestSendMessage:
         cm.play_response.assert_called_once_with("19", "Here's a joke.")
 
     @pytest.mark.asyncio
+    async def test_call_stream_preview_is_not_reported_delivered(self, platform_config, mock_rpc):
+        """A streamed preview that reports success makes Hermes send only the
+        unseen tail as the final — seen live as replies never spoken."""
+        adapter, cm = self._in_call(platform_config, mock_rpc)
+
+        result = await adapter.send("19", "Here's a",
+                                    metadata={"thread_id": "call-1780", "expect_edits": True})
+
+        assert result.success is False
+        cm.play_response.assert_not_called()
+        mock_rpc.send_msg.assert_not_awaited()
+
+    @pytest.mark.asyncio
     async def test_text_thread_during_a_call_still_sends(self, platform_config, mock_rpc):
         """The filter is call-only: a text-chat send during a call is delivered."""
         adapter, cm = self._in_call(platform_config, mock_rpc)

@@ -113,3 +113,12 @@ def test_tagged_and_bare_file_is_sent_once(run):
     for name, r in run["media"].items():
         assert r["files"] == [name], r
         assert name not in r["text"] and "MEDIA:" not in r["text"], r
+
+
+def test_streamed_reply_in_a_call_is_spoken_in_full(run):
+    """A streamed preview reported as delivered left Hermes sending only the
+    unseen tail as the final, so the reply was never spoken."""
+    c = run["call"]
+    assert [s.strip() for s in c["spoken"]] == [c["text"].strip()], c
+    assert c["log"] == []  # nothing leaks into the chat as text
+    assert c["final_sent"]

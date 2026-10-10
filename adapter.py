@@ -1557,6 +1557,15 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 if not (metadata or {}).get("notify"):
                     logger.debug("Call %s: not speaking non-final send: %r",
                                  chat_id, (content or "")[:80])
+                    # why: a streamed preview (expect_edits) that "succeeds" puts
+                    # Hermes's stream consumer in fallback mode, and the final then
+                    # carries only the unseen tail — often nothing, so the reply is
+                    # never spoken. Failing it makes Hermes send the whole final
+                    # (stream_consumer_transport.py `_first_send`). Other status
+                    # sends stay successful: a failed busy ack goes through
+                    # `_send_with_retry`'s plain-text fallback and logs warnings.
+                    if (metadata or {}).get("expect_edits"):
+                        return SendResult(success=False, error="call: preview not spoken")
                     return SendResult(success=True, message_id=None)
                 # Reply belongs to the call conversation — speak it into the call.
                 # In shared-history mode the placing agent's "call connected" ack
