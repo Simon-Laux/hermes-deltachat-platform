@@ -64,47 +64,44 @@ def editing_adapter():
     return a
 
 
-async def stream(chunks, delay):
-    """Stream chunks through Hermes' consumer the way a model reply arrives."""
+async def stream(chunks, delay, metadata=None, calls=None):
+    """Stream chunks through Hermes' consumer the way a model reply arrives:
+    from the agent's worker thread."""
     a = editing_adapter()
+    a._call_manager = calls
     consumer = GatewayStreamConsumer(
-        a, "42", StreamConsumerConfig(edit_interval=0.05, buffer_threshold=5))
+        a, "42", StreamConsumerConfig(edit_interval=0.05, buffer_threshold=5),
+        metadata=metadata)
     task = asyncio.create_task(consumer.run())
-    for chunk in chunks:
-        consumer.on_delta(chunk)
-        await asyncio.sleep(delay)
-    consumer.finish()
+
+    def feed():
+        for chunk in chunks:
+            consumer.on_delta(chunk)
+            time.sleep(delay)
+        consumer.finish()
+    await asyncio.to_thread(feed)
     await asyncio.wait_for(task, 30)
     await asyncio.sleep(INTERVAL * 3)  # let any queued edit flush
     return {"log": a.rpc.log, "screen": a.rpc.screen, "pending": len(a._edit_pending),
-            "text": "".join(chunks)}
+            "text": "".join(chunks), "final_sent": consumer.final_response_sent}
 
 
 async def call_stream(chunks, delay):
-    """Stream a reply into an active call; returns what got spoken."""
-    a = editing_adapter()
-    spoken = []
+    """Stream a reply into an active call; adds what got spoken."""
+    spoken, sends = [], []
 
     class Calls:  # the CallManager surface send() touches
-        def is_call_end_reply(self, reply_to): return False
+        def is_call_end_reply(self, reply_to):
+            sends.append(reply_to)  # send() asks this first
+            return False
+
         def has_active_call(self, chat_id): return True
         def is_call_thread(self, thread_id): return thread_id == "call-1"
         def consume_call_ack(self, chat_id): return False
         async def play_response(self, chat_id, text): spoken.append(text)
 
-    a._call_manager = Calls()
-    consumer = GatewayStreamConsumer(
-        a, "42", StreamConsumerConfig(edit_interval=0.05, buffer_threshold=5),
-        metadata={"thread_id": "call-1"})
-    task = asyncio.create_task(consumer.run())
-    for chunk in chunks:
-        consumer.on_delta(chunk)
-        await asyncio.sleep(delay)
-    consumer.finish()
-    await asyncio.wait_for(task, 30)
-    await asyncio.sleep(0.1)  # play_response runs as its own task
-    return {"spoken": spoken, "log": a.rpc.log, "text": "".join(chunks),
-            "final_sent": consumer.final_response_sent}
+    r = await stream(chunks, delay, {"thread_id": "call-1"}, Calls())
+    return {**r, "spoken": spoken, "sends": len(sends)}
 
 
 def contract():
@@ -178,6 +175,8 @@ async def main():
                                "y" * 99] + [f"\nm{i}" for i in range(5)], 0.4),
         "media": await media(),
         "call": await call_stream(words[:20], 0.02),
+        # over the 36-line limit: Hermes would split it into heads
+        "call_long": await call_stream([f"Item {i}.\n" for i in range(50)], 0.02),
     }))
 
 

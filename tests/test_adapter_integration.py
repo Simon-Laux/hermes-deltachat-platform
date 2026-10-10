@@ -320,6 +320,11 @@ class TestSendMessage:
         for status in ("💾 Memory updated", "⏳ Queued", "🔧 terminal: ls"):
             result = await adapter.send("19", status, metadata={"thread_id": "call-1780"})
             assert result.success is True
+        # a streamed preview must not count as delivered, or Hermes sends
+        # only the unseen tail as the final (tests/test_hermes_contract.py)
+        result = await adapter.send("19", "Here's a",
+                                    metadata={"thread_id": "call-1780", "expect_edits": True})
+        assert result.success is False
         cm.play_response.assert_not_called()
         cm.consume_call_ack.assert_not_called()   # a status line must not use up the ack drop
         mock_rpc.send_msg.assert_not_awaited()     # nor leak into the chat as text
@@ -329,18 +334,13 @@ class TestSendMessage:
         await asyncio.sleep(0)
         cm.play_response.assert_called_once_with("19", "Here's a joke.")
 
-    @pytest.mark.asyncio
-    async def test_call_stream_preview_is_not_reported_delivered(self, platform_config, mock_rpc):
-        """A streamed preview that reports success makes Hermes send only the
-        unseen tail as the final — seen live as replies never spoken."""
+    def test_no_stream_split_during_a_call(self, platform_config, mock_rpc):
+        """Split heads fail like previews in a call, and Hermes retries them in
+        a loop that never yields (tests/test_hermes_contract.py)."""
         adapter, cm = self._in_call(platform_config, mock_rpc)
-
-        result = await adapter.send("19", "Here's a",
-                                    metadata={"thread_id": "call-1780", "expect_edits": True})
-
-        assert result.success is False
-        cm.play_response.assert_not_called()
-        mock_rpc.send_msg.assert_not_awaited()
+        assert adapter.max_message_length_for_chat("19") > 10**6
+        cm.has_active_call = lambda chat_id: False
+        assert adapter.max_message_length_for_chat("19") == adapter.MAX_MESSAGE_LENGTH
 
     @pytest.mark.asyncio
     async def test_text_thread_during_a_call_still_sends(self, platform_config, mock_rpc):

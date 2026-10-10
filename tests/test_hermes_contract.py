@@ -115,10 +115,14 @@ def test_tagged_and_bare_file_is_sent_once(run):
         assert name not in r["text"] and "MEDIA:" not in r["text"], r
 
 
-def test_streamed_reply_in_a_call_is_spoken_in_full(run):
+@pytest.mark.parametrize("case", ["call", "call_long"])
+def test_streamed_reply_in_a_call_is_spoken_once_in_full(run, case):
     """A streamed preview reported as delivered left Hermes sending only the
-    unseen tail as the final, so the reply was never spoken."""
-    c = run["call"]
-    assert [s.strip() for s in c["spoken"]] == [c["text"].strip()], c
+    unseen tail as the final, so the reply was cut short or never spoken. Over
+    the length limit, failed previews had Hermes retry its split in a loop that
+    never yields, speaking the head twice."""
+    c = run[case]
+    assert [s.strip() for s in c["spoken"]] == [c["text"].strip()], c["spoken"]
     assert c["log"] == []  # nothing leaks into the chat as text
     assert c["final_sent"]
+    assert c["sends"] < 20, c["sends"]
