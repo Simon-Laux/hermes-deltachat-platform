@@ -94,8 +94,7 @@ def contract():
         "prompt_params_match": {
             name: params(dc.DeltaChatAdapter, name) == params(BasePlatformAdapter, name)
             for name in ("send_slash_confirm", "send_clarify")},
-        "slash_confirm_api": all(hasattr(slash_confirm, n) for n in (
-            "resolve",)),
+        "slash_confirm_api": hasattr(slash_confirm, "resolve"),
         "clarify_api": all(hasattr(clarify_gateway, n) for n in (
             "_lock", "_entries", "resolve_gateway_clarify", "mark_awaiting_text"))
             and "multi_select" in {f.name for f in dataclasses.fields(clarify_gateway._ClarifyEntry)},
@@ -145,7 +144,11 @@ async def main():
     print(json.dumps({
         "contract": contract(),
         "stream": await stream(words, 2.0 / len(words)),
-        "long": await stream(words[:10] + [f"\nL{i}" for i in range(45)], 0.03),
+        "long": await stream(words[:10] + [f"\nL{i}" for i in range(90)], 0.02),
+        # code block reaching the limit with a long last line, then a pause: the
+        # cursor wrap and the fence Hermes closes each add a line to the edit
+        "fence": await stream(["```\n" + "\n".join(f"c{i}" for i in range(35)) + "\n",
+                               "y" * 99] + [f"\nm{i}" for i in range(5)], 0.4),
         "media": await media(),
     }))
 

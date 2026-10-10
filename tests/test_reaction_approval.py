@@ -242,3 +242,26 @@ async def test_remembered_prompts_are_capped(platform_config, approval):
         await a._send_exec_approval_prompt(_prompt())
     assert len(a._approval_prompts) == n - 1
     assert 1 not in a._approval_prompts
+
+
+@pytest.mark.asyncio
+async def test_split_prompt_answers_a_reaction_on_any_part(platform_config, resolver, queued):
+    # send() splits a long prompt; "React to this exact message" may land in
+    # the first part, so a reaction there must work too
+    a = _adapter(platform_config)
+    a.rpc.send_msg.side_effect = [42, 43]
+    prompt = _prompt()
+    prompt.text = "\n".join(["⚠️ Dangerous command requires approval"] + ["line"] * 35)
+    result = await a._send_exec_approval_prompt(prompt)
+    assert (result.message_id, result.continuation_message_ids) == ("43", ("42",))
+    assert a._approval_prompts == {42: (SESSION, "r1"), 43: (SESSION, "r1")}
+    await a._handle_dc_event(_reaction("👍", msg_id=42))
+    resolver.assert_called_once_with(SESSION, "once", request_id="r1")
+
+
+def test_approval_preview_counts_characters(platform_config):
+    # a 40-line script must not be cut at 30 display lines before approval
+    a = _adapter(platform_config)
+    script = "\n".join(f"step {i}" for i in range(40))
+    assert a._ea_fit(script, 3000) == script
+    assert a._ea_fit("x" * 3001, 3000) == "x" * 3000 + "..."

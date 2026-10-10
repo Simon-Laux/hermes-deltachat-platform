@@ -41,6 +41,7 @@ class MockSendResult:
     metadata: Optional[Dict[str, Any]] = None
     raw_response: Any = None
     retryable: bool = False
+    continuation_message_ids: tuple = ()
 
 
 @dataclass
@@ -313,6 +314,22 @@ gateway_module.config = gateway_config_module
 # ---------------------------------------------------------------------------
 
 import pytest  # noqa: E402
+
+
+def core_truncates(text):
+    """Port of Delta Chat core's truncate_by_lines(text, 38, 100) decision
+    (src/tools.rs): would a receiver cut this text with "[...]"?"""
+    lines = line_chars = 0
+    for ch in text:
+        if ch == "\n":
+            line_chars, lines = 0, lines + 1
+        else:
+            line_chars += 1
+            if line_chars > 100:
+                line_chars, lines = 1, lines + 1
+        if lines == 38:
+            return True
+    return False
 
 
 @pytest.fixture

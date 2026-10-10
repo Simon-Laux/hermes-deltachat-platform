@@ -48,7 +48,7 @@ repairs and doc typo fixes are left out; see the git log for those.
   Hermes can then edit streamed replies, tool progress, heartbeats and
   approval prompts in place. Every edit is an email through the chatmail
   relay, so in-progress edits are limited to one per
-  `DELTACHAT_EDIT_MIN_INTERVAL` seconds (default 5) for the whole account;
+  `DELTACHAT_EDIT_MIN_INTERVAL` seconds (default 3) for the whole account;
   the final text always goes out. See the README. (#54)
 
 ### Fixed
@@ -116,6 +116,14 @@ repairs and doc typo fixes are left out; see the git log for those.
   fails to start.
 
 ### Changed
+
+- **Long replies arrive as several messages instead of one folded message.**
+  Replies over 40 lines used to be sent as one message with an HTML part,
+  showing only the start until you tapped "Show full message". Delta Chat
+  shows a text in full only up to 38 lines (a line over 100 characters
+  counts as several), so the adapter now splits longer replies into
+  messages of at most that size, breaking at line ends. This happens while
+  streaming too, and for tool-progress messages.
 
 - **Hermes no longer streams replies on Delta Chat while editing is off.**
   Before, streaming (if enabled in Hermes) sent the first chunk with a `▉`

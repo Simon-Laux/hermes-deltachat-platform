@@ -14,6 +14,8 @@ import subprocess
 
 import pytest
 
+from tests.conftest import core_truncates
+
 SCRIPT = os.path.join(os.path.dirname(__file__), "hermes_contract", "scenarios.py")
 INTERVAL = 0.3  # must match scenarios.py
 CURSOR = "▉"
@@ -83,14 +85,26 @@ def test_streamed_reply_is_one_throttled_message(run):
     assert s["pending"] == 0
 
 
-def test_reply_over_40_lines_continues_as_new_message(run):
+def test_code_block_at_the_limit_keeps_streaming(run):
+    s = run["fence"]
+    assert not any(e[3] is None for e in s["log"])
+    assert not any(core_truncates("✏️" + e[3]) for e in s["log"]), "a message would be folded"
+    shown = list(s["screen"].values())
+    assert not any(CURSOR in m for m in shown), "stream froze with the cursor on screen"
+    # nothing repeated: what's on screen is the reply plus at most Hermes' fences
+    assert sum(len(m) for m in shown) <= len(s["text"]) + 20
+    assert s["pending"] == 0
+
+
+def test_long_reply_is_split_into_messages_shown_in_full(run):
+    # Hermes splits by the adapter's message_len_fn while streaming, so no
+    # message gets past what Delta Chat shows without "Show full message"
     s = run["long"]
     shown = [s["screen"][k] for k in sorted(s["screen"], key=int)]
-    assert len(shown) == 2
+    assert len(shown) == 3
+    assert all(len(m.split("\n")) <= 38 for m in shown)
     assert not any(CURSOR in m for m in shown)
-    # Hermes re-sends the last partial line in the continuation, by design
-    assert s["text"].startswith(shown[0]) and s["text"].endswith(shown[1])
-    assert len(shown[0]) + len(shown[1]) >= len(s["text"])
+    assert "\n".join(shown) == s["text"]
     assert s["pending"] == 0
 
 
