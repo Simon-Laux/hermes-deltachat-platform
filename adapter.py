@@ -2163,10 +2163,13 @@ body {{
         str.replace() would also strip an identical path elsewhere in the
         message — including inside the code block we just took care to mask.
         """
+        if not spans:
+            return text.strip()
         chars = list(text)
         for start, end in sorted(spans, reverse=True):
             del chars[start:end]
-        # the base extractors collapse the blank lines a removed path leaves
+        # like the base extractors: collapse the blank lines a removed path
+        # leaves, but leave a reply that had nothing removed alone
         return re.sub(r'\n{3,}', '\n\n', "".join(chars)).strip()
 
     @staticmethod
