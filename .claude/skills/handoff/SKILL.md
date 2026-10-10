@@ -45,6 +45,10 @@ For anything people running the adapter would notice:
 - If the change alters, extends or undoes something already listed under `## Unreleased`,
   rewrite that entry so it describes the end state. Don't add a second one. Delete
   entries that no longer apply.
+- **Breaking changes are the exception.** Anything that needs action on upgrade (renamed or
+  removed config, a new minimum version, changed defaults people rely on) goes first, under
+  `### Breaking / requires action`, and may be as long as it needs to be: what breaks, who
+  is affected, and the exact steps to upgrade.
 
 Internal refactors and test-only changes get no entry; label those PRs `no-changelog`.
 
