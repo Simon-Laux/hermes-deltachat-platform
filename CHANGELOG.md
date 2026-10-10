@@ -7,6 +7,16 @@ already listed rewrites that entry instead of adding another.
 Breaking changes are the exception: they go first, under `### Breaking / requires
 action`, and get as much space as people need to upgrade safely.
 
+## Unreleased
+
+### New
+
+- **Optional status reactions.** Set `DELTACHAT_REACTIONS=1` and the agent
+  reacts 👀 to the message it works on, then ✅ or ❌ when done, like on
+  Telegram or Signal. Off by default because each reaction is an email.
+  Reactions from approved contacts to the agent's messages now also fire
+  Hermes' `reaction:added` hook.
+
 ## 2.1.0 (2026-10-10)
 
 ### Breaking / requires action

@@ -17,7 +17,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from gateway.config import Platform, PlatformConfig  # noqa: E402
-from gateway.platforms.base import BasePlatformAdapter, SendResult  # noqa: E402
+from gateway.platforms.base import BasePlatformAdapter, ProcessingOutcome, SendResult  # noqa: E402
 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig  # noqa: E402
 
 # Hermes only knows the platform once the plugin is registered
@@ -104,6 +104,25 @@ async def call_stream(chunks, delay):
     return {**r, "spoken": spoken, "sends": len(sends)}
 
 
+def _reaction_handler_attr():
+    a = editing_adapter()
+    before = a._reaction_handler
+
+    async def handler(ctx):
+        pass
+    a.set_reaction_handler(handler)
+    return before is None and a._reaction_handler is handler
+
+
+def _followup_hooks_apply():
+    from gateway.platforms.base import MessageEvent, MessageType
+    from gateway.run_turn_followup_ack import _followup_processing_hooks_apply
+    a = editing_adapter()
+    event = MessageEvent(text="hi", message_type=MessageType.TEXT, message_id="42",
+                         source=a.build_source(chat_id="5", chat_type="dm", user_id="10"))
+    return _followup_processing_hooks_apply(a, event)
+
+
 def contract():
     """Facts about the real Hermes API this adapter relies on."""
     from tools import clarify_gateway, slash_confirm
@@ -122,6 +141,14 @@ def contract():
         "clarify_api": all(hasattr(clarify_gateway, n) for n in (
             "_lock", "_entries", "resolve_gateway_clarify", "mark_awaiting_text"))
             and "multi_select" in {f.name for f in dataclasses.fields(clarify_gateway._ClarifyEntry)},
+        # status reactions: Hermes calls these hooks positionally; our hook forwarding reads
+        # the handler set_reaction_handler stores
+        "processing_hooks": [params(BasePlatformAdapter, n)
+                             for n in ("on_processing_start", "on_processing_complete")],
+        "outcomes": sorted(o.name for o in ProcessingOutcome),
+        "reaction_handler_attr": _reaction_handler_attr(),
+        # follow-ups queued mid-turn get our hooks only while Hermes still applies them
+        "followup_hooks_apply": _followup_hooks_apply(),
         # tool progress stays off unless editing is enabled
         "base_not_overridden":
             dc.DeltaChatAdapter.edit_message is BasePlatformAdapter.edit_message,

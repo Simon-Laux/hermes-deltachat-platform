@@ -30,6 +30,7 @@ from gateway.platforms.base import (
     SendResult,
     MessageEvent,
     MessageType,
+    ProcessingOutcome,
 )
 from gateway.config import Platform, PlatformConfig
 
@@ -818,6 +819,13 @@ class DeltaChatAdapter(BasePlatformAdapter):
         # On by default; off removes the list again and keeps your own bio text.
         self._commands_bio_enabled = _is_on(
             _setting(extra, "commands_bio", "DELTACHAT_COMMANDS_BIO", "1"))
+
+        # Off by default: every reaction is an email to every chat member.
+        self._status_reactions = _is_on(_setting(extra, "reactions", "DELTACHAT_REACTIONS"))
+        # Message id -> the send of our 👀 on it (True once sent), until its turn ends.
+        self._acked_msgs: Dict[str, asyncio.Future] = {}
+        # Running reaction:added hooks, kept so they aren't garbage-collected mid-run.
+        self._hook_tasks: set = set()
 
     async def _intake_allows(self, msg: Dict, chat_id) -> bool:
         """Drop what Hermes' own authorization can't judge, and leave groups
@@ -1820,30 +1828,22 @@ class DeltaChatAdapter(BasePlatformAdapter):
                                    command: Optional[str]) -> bool:
         """Whether the reactor may answer the prompt of *session_key*.
 
-        Hermes never sees reactions, so this is the authorization gate: the
+        Hermes never sees prompt reactions, so this is the authorization gate: the
         reactor must be a key contact Hermes approves for this chat. The
         prompt's session must belong to this chat and, for per-user group
         sessions, to the reactor — whoever could have typed the answer. With
         *command*, the reactor must also be allowed to run that slash command.
         """
         msg_id, chat_id, contact_id = event.get("msg_id"), event.get("chat_id"), event.get("contact_id")
-        try:
-            contact = await self.rpc.get_contact(self.account_id, int(contact_id))
-            chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
-        except Exception as e:
-            logger.warning("Ignoring reaction on prompt %s: %s", msg_id, e)
+        chat_type = await self._approved_reactor_chat_type(event)
+        if chat_type is None:
             return False
-        chat_type = "group" if chat.get("chat_type") == "Group" else "dm"
         # why: exact keys, not a ":<chat_id>" suffix -- chat and contact ids share a range,
         # so group 12's per-user key for contact 12 ("...:group:12:12") ends in ":12" too
         own = f":{chat_type}:{chat_id}"
         if not (session_key.endswith(own) or session_key.endswith(f"{own}:{contact_id}")):
             logger.info("Ignoring reaction from contact %s on prompt %s: not their session",
                         contact_id, msg_id)
-            return False
-        if not contact.get("is_key_contact") or self._is_sender_authorized(
-                str(contact_id), chat_type, str(chat_id)) is not True:
-            logger.info("Ignoring reaction from unauthorized contact %s", contact_id)
             return False
         if command is None:
             return True
@@ -1856,8 +1856,27 @@ class DeltaChatAdapter(BasePlatformAdapter):
             return False
         return True
 
+    async def _approved_reactor_chat_type(self, event: Dict[str, Any],
+                                          level: int = logging.INFO) -> Optional[str]:
+        """"dm" or "group" if the reactor is a key contact Hermes approves for
+        the chat, else None (logged at *level*)."""
+        msg_id, chat_id, contact_id = event.get("msg_id"), event.get("chat_id"), event.get("contact_id")
+        try:
+            contact = await self.rpc.get_contact(self.account_id, int(contact_id))
+            chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
+        except Exception as e:
+            logger.warning("Ignoring reaction on message %s: %s", msg_id, e)
+            return None
+        chat_type = "group" if chat.get("chat_type") == "Group" else "dm"
+        if not contact.get("is_key_contact") or self._is_sender_authorized(
+                str(contact_id), chat_type, str(chat_id)) is not True:
+            logger.log(level, "Ignoring reaction from unauthorized contact %s", contact_id)
+            return None
+        return chat_type
+
     async def _handle_reaction(self, event: Dict[str, Any]) -> None:
-        """Answer the prompt a reaction was given to, if it's one of ours."""
+        """Answer the prompt a reaction was given to, if it's one of ours, or
+        else pass the reaction on to Hermes' hooks."""
         msg_id = event.get("msg_id")
         if msg_id in self._approval_prompts:
             await self._handle_approval_reaction(event)
@@ -1865,6 +1884,73 @@ class DeltaChatAdapter(BasePlatformAdapter):
             await self._handle_slash_confirm_reaction(event)
         elif msg_id in self._clarify_prompts:
             await self._handle_clarify_reaction(event)
+        elif event.get("reaction"):
+            # why: hooks are user code; one waiting on the network must not hold up
+            # the event listener, and with it every message and call behind it
+            task = asyncio.create_task(self._emit_reaction_hook(event))
+            self._hook_tasks.add(task)
+            task.add_done_callback(self._hook_tasks.discard)
+
+    async def _emit_reaction_hook(self, event: Dict[str, Any]) -> None:
+        """Fire Hermes' "reaction:added" hook for a reaction from an approved contact.
+
+        Core only reports reactions to our own messages, and not their removal,
+        so there is no "reaction:removed". Hooks never reach the model.
+        """
+        if self._reaction_handler is None:
+            return
+        if await self._approved_reactor_chat_type(event, logging.DEBUG) is None:
+            return
+        try:
+            await self._reaction_handler({
+                "platform": self.platform.value, "event_name": "reaction:added",
+                "reaction": event["reaction"], "user_id": str(event.get("contact_id")),
+                "item_user_id": None, "channel_id": str(event.get("chat_id")),
+                "message_ts": str(event.get("msg_id")), "event_ts": None, "raw_event": event})
+        except Exception as e:
+            logger.debug("Reaction hook failed: %s", e)
+
+    async def _set_reaction(self, msg_id, emoji: Optional[str]) -> bool:
+        """Make *emoji* our only reaction on *msg_id*; None takes ours off."""
+        try:
+            await self.rpc.send_reaction(self.account_id, int(msg_id), [emoji] if emoji else [])
+            return True
+        except Exception as e:
+            logger.debug("Could not react to message %s: %s", msg_id, e)
+            return False
+
+    async def on_processing_start(self, event: MessageEvent) -> None:
+        """React 👀 to the message the agent starts working on (DELTACHAT_REACTIONS).
+
+        Hermes calls this before it checks who sent the message, so only
+        contacts it approves get one: anyone else would learn a bot reads along.
+        Call turns are skipped, since they all point at the call message.
+        """
+        msg_id, source = str(event.message_id or ""), event.source
+        if not self._status_reactions or not msg_id.isdigit():
+            return
+        if self._is_sender_authorized(source.user_id, source.chat_type, source.chat_id) is not True:
+            return
+        try:
+            msg = await self.rpc.get_message(self.account_id, int(msg_id))
+        except Exception as e:
+            logger.debug("Could not load message %s to react to: %s", msg_id, e)
+            return
+        if msg.get("view_type") == "Call":
+            return
+        # why: a /stop cancelling us mid-send can't stop the RPC thread, so the 👀
+        # may still land; on_processing_complete waits for it before replacing it
+        eyes = self._acked_msgs[msg_id] = asyncio.ensure_future(self._set_reaction(msg_id, "👀"))
+        await asyncio.shield(eyes)
+
+    async def on_processing_complete(self, event: MessageEvent, outcome: ProcessingOutcome) -> None:
+        """Swap our 👀 for ✅ or ❌; a cancelled turn (/stop, /new) just loses it."""
+        msg_id = str(event.message_id or "")
+        eyes = self._acked_msgs.pop(msg_id, None)
+        if eyes is None or not await eyes:
+            return
+        await self._set_reaction(msg_id, {ProcessingOutcome.SUCCESS: "✅",
+                                          ProcessingOutcome.FAILURE: "❌"}.get(outcome))
 
     async def _handle_clarify_reaction(self, event: Dict[str, Any]) -> None:
         """Answer the clarify a keycap reaction picks a choice of.
