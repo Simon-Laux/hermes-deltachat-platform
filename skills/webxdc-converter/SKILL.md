@@ -107,7 +107,7 @@ Optionally add `source_code_url = "https://..."` if the user provides one.
 
 ### Generate icon
 
-If the user supplies an icon, use it (convert it to PNG or JPEG if needed). Otherwise generate one — icons are optional but improve the app's appearance in chat. Messengers only use `icon.png` or `icon.jpg`; an `icon.svg` is ignored.
+If the user supplies an icon, use it (convert it to PNG or JPEG if needed). Otherwise, if you have an image generation tool, you can generate one with it (see the note after the script); if not, use the script. Icons are optional but improve the app's appearance in chat. Messengers only use `icon.png` or `icon.jpg`; an `icon.svg` is ignored.
 
 ```bash
 mkdir -p myapp
@@ -136,6 +136,8 @@ EOF
 ```
 
 Replace `AB` with the app's initials (one or two letters, more don't fit) and choose a fitting background color. Without Pillow the icon is a plain colored square.
+
+**Icon from an image generator.** Unless the user asked for a particular style, ask for a flat icon: one centred symbol on a solid background of an exact hex colour, with no text, gradients or texture. Vaguer prompts tend to give grainy or off-centre results. Keep the subject in the middle ~70% of the image, because the chat shows the icon on a rounded tile. Generators sometimes return a JPEG under a `.png` name, so check the first bytes: a PNG starts with `\x89PNG`, a JPEG with `\xff\xd8`. Save a JPEG as `icon.jpg` (or convert it to PNG) instead of packing it as `icon.png`.
 
 ### Create and check the .xdc file
 
@@ -198,6 +200,8 @@ For a bundled app, run the build first and pass the build output instead: `pytho
 
 Fix every ERROR and package again. The messenger blocks network access, so anything loaded from outside the `.xdc` (a CDN script, a web font, an API call) just fails, even though the app works in a browser. The check catches URLs in tags, CSS and imports, but not requests made from JavaScript: search the JS for `http://`, `https://`, `ws://`, `wss://` and `"//`, and make sure the app doesn't need any of them to work. Bundle what it needs into the `.xdc`; for features that need a server, see "Replace or remove calls to external servers" above.
 
+Make every change in the app directory (or in the sources, for a bundled app) and package again. Don't patch files only inside the `.xdc`, so that the sources still reproduce the app.
+
 ### Size guidance
 
 Aim for under 1 MB; the script notes anything bigger. Under 10 MB is the practical ceiling for a chat attachment. Actual hard limits vary by messenger.
@@ -217,6 +221,8 @@ Here is your report. MEDIA:<absolute path of your working directory>/report.pdf
 ```
 
 For Level 1+ apps, shared state belongs to the one app message it was sent in. Sending the `.xdc` again — including a fixed or improved version — starts a separate, empty instance: earlier scores, votes or entries stay in the old message. Say so when you send a new version, so nobody wonders where their data went.
+
+The packaging checks don't open the app. Unless you actually ran it, say in your reply that it is untested and ask the user to try it on their device.
 
 **For Level 0 apps, you're done here.** The sections below are only for apps that need shared state.
 
@@ -400,4 +406,7 @@ Inform the user if their app would benefit from a hybrid approach (realtime for 
 - **`window.open()` is blocked** — open pages in the same window or show content in the page.
 - **Don't rely on browser permissions** — camera, microphone, clipboard, geolocation and similar requests may be denied. Feature-detect and keep the app usable without them. WebRTC is blocked as part of the no-internet rule.
 - **External links: offer to copy them** — some clients ask the user before opening an outbound link, others do nothing when it is clicked. Show the URL as selectable text so the user can copy it (a copy button is a bonus, but fall back to selectable text if `navigator.clipboard` fails).
+- **Escape what you show** — chat members can type anything into a shared app, and text inserted with `innerHTML` is parsed as HTML, so it can run script on every device (XSS). Show text with `textContent` / `innerText`; if you need markup, escape `&`, `<`, `>`, `"` and `'` in the user text first.
+- **Escape inline JSON** — to bake data (notes, lists) into `index.html`, serialise it with `json.dumps(data, ensure_ascii=False)` and replace `</` with `<\/` before putting it in a `<script>`. Otherwise a `</script>` in the data ends the script block early.
+- **Baked-in data goes stale** — an app with data embedded at build time doesn't update when the source changes. Say so when you send it; package it again to refresh it.
 - **Never leave a white page** — if something essential fails (a script error during startup, a WebAssembly module that fails to load, missing data), show an error message in the page. Add a `window.addEventListener("error", …)` and `"unhandledrejection"` handler that displays the error.
