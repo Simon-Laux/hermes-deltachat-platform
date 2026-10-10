@@ -29,7 +29,8 @@ def _adapter(extra=None, chat_type="Group", quoted_from=None, displayname="Ghost
 def _msg(text, quote_id=None):
     msg = {"id": 7, "text": text, "from_id": 9}
     if quote_id:
-        msg["quote"] = {"kind": "WithMessage", "message_id": quote_id, "text": "earlier"}
+        msg["quote"] = {"kind": "WithMessage", "message_id": quote_id, "chat_id": 5,
+                        "text": "earlier"}
     return msg
 
 
@@ -89,6 +90,15 @@ async def test_quote_reply_to_own_message_counts_as_mention():
     a = _adapter({"require_mention": True}, quoted_from=DC_CONTACT_ID_SELF)
     assert await a._mention_gate_allows(_msg("and what about this?", quote_id=3), 5)
     a.rpc.get_message.assert_awaited_once_with(1, 3)
+
+
+@pytest.mark.asyncio
+async def test_quote_of_own_message_in_another_chat_is_not_a_mention():
+    a = _adapter({"require_mention": True}, quoted_from=DC_CONTACT_ID_SELF)
+    msg = _msg("and what about this?", quote_id=3)
+    msg["quote"]["chat_id"] = 99
+    assert not await a._mention_gate_allows(msg, 5)
+    a.rpc.get_message.assert_not_awaited()
 
 
 @pytest.mark.asyncio

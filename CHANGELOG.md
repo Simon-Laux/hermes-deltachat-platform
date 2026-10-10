@@ -44,6 +44,11 @@ repairs and doc typo fixes are left out; see the git log for those.
 
 ### Fixed
 
+- **The bot now sees which message you replied to.** A quote-reply used to
+  reach Hermes as plain text, so the agent had to guess what "this" meant.
+  The quoted message (in full, if it is from the same chat) and its author
+  are now passed on, for text, voice, image and file messages alike.
+
 - **Attachments over Hermes' size cap still reached the agent.** When
   Hermes refused to cache a file over `gateway.max_inbound_media_bytes`
   (default 128 MiB), the adapter passed the raw Delta Chat file instead, and
