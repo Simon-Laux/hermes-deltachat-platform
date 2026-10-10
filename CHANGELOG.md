@@ -7,7 +7,7 @@ already listed rewrites that entry instead of adding another.
 Breaking changes are the exception: they go first, under `### Breaking / requires
 action`, and get as much space as people need to upgrade safely.
 
-## Unreleased
+## 2.1.0 (2026-10-10)
 
 ### New
 
@@ -28,38 +28,70 @@ action`, and get as much space as people need to upgrade safely.
   react with one to answer. Typing the number, the option text or your own
   answer still works. Multi-select questions and those with more choices
   keep the plain numbered list.
+- **The bot now sees which message you replied to.** A quote-reply used to
+  reach Hermes as plain text, so the agent had to guess what "this" meant.
+  The quoted message (in full, if it is from the same chat) and its author
+  are now passed on, for text, voice, image and file messages alike.
 - **The text chat can look up what was said on a call.** The "call ended"
   note sent to the text-chat session now names the call's Hermes session,
   so the bot reads the transcript with `session_search` instead of saying it
   has no record of the call. Shared-history mode is unchanged.
-- **The webxdc skill shows two ways to structure shared state.** For
-  multi-user apps built on plain `sendUpdate`, it now compares
-  last-writer-wins (one key per user, e.g. polls) with event sourcing (send
-  actions and replay them, e.g. games), and points to Yjs when several
-  people edit the same data at once.
-- **The webxdc skill checks the `.xdc` before sending it.** One script now
-  packages the app and reports an error if `index.html` isn't at the
-  archive root, if `webxdc.js` was packaged, or if the app loads anything
-  from the network (CDN scripts and modules, web fonts — webxdc apps are
-  offline, so these break the app). It leaves out dotfiles and
-  `node_modules` and notes archives over 1 MB and 10 MB. Generated icons are 256 px instead of 128. When the bot sends
-  a new version of a shared-state app it now tells you the old data stays
-  in the previous message.
-- **The webxdc skill guards against unsafe or broken app content.** It
-  tells the bot to show user text with `textContent` instead of unescaped
-  `innerHTML` (XSS in shared apps), to ship baked-in data as a JSON file
-  loaded with `fetch`, and to say when that data will go stale. When the
-  bot has an image generator it may draw the icon with it, and the skill
-  explains how to prompt it and how to catch an image whose format doesn't
-  match its file name. The bot now
-  says when it hasn't opened an app itself, and it makes changes in the
-  sources rather than only inside the `.xdc`.
-- **Optional message editing, experimental** (`DELTACHAT_MESSAGE_EDITING`, off by default).
-  Hermes can then edit streamed replies, tool progress, heartbeats and
-  approval prompts in place. Every edit is an email through the chatmail
-  relay, so in-progress edits are limited to one per
+- **Optional message editing, experimental** (`DELTACHAT_MESSAGE_EDITING`,
+  off by default). Hermes can then edit streamed replies, tool progress,
+  heartbeats and approval prompts in place. Every edit is an email through
+  the chatmail relay, so in-progress edits are limited to one per
   `DELTACHAT_EDIT_MIN_INTERVAL` seconds (default 3) for the whole account;
   the final text always goes out. See the README. (#54)
+
+### Webxdc skill
+
+The bundled webxdc skill was reworked throughout, so apps the bot builds
+are far more likely to work on the first try.
+
+- **The agent can load the skill again.** The system prompt told it to
+  call `skill_view('plugin:deltachat-platform:webxdc-converter')`, which
+  Hermes reads as a plugin called `plugin`, so the call returned "Skill not
+  found". The prompt now uses `deltachat-platform:webxdc-converter`, the
+  name Hermes actually registers the skill under.
+- **The skill shows a description in the skill list.** Hermes doesn't read
+  it from `SKILL.md` for plugin skills, so the adapter now passes it along.
+  It also says it is the Delta Chat-specific webxdc skill, to tell it apart
+  from any other webxdc skill installed alongside it.
+- **The `.xdc` is checked before it is sent.** One script now packages the
+  app and reports an error if `index.html` isn't at the archive root, if
+  `webxdc.js` was packaged, or if the app loads anything from the network
+  (CDN scripts and modules, web fonts — webxdc apps are offline, so these
+  break the app). It leaves out dotfiles and `node_modules` and notes
+  archives over 1 MB and 10 MB. The skill also lists what the check can't
+  see.
+- **Apps load `webxdc.js`.** The skill now says plainly that any app using
+  the webxdc API must load `<script src="webxdc.js"></script>` before its
+  own scripts. The messenger provides the file, so it is still not
+  packaged, but without the tag `window.webxdc` is undefined.
+- **Apps have an icon.** The skill generated an `icon.svg`, but messengers
+  only use `icon.png` or `icon.jpg`. It now generates a 256 px PNG.
+- **The API reference matches the webxdc spec.** `desktopApiVersion`,
+  `getAllInstanceIds()` and `sendToInstance()` don't exist and are gone;
+  the signatures of `setUpdateListener`, `sendToChat`, `importFiles` and
+  the realtime channel are fixed, and the reference links the upstream
+  spec pages. It also lists Delta Chat's actual update limits and quirks.
+- **Guidance on structuring shared state.** For multi-user apps built on
+  plain `sendUpdate`, the skill compares last-writer-wins (one key per
+  user, e.g. polls) with event sourcing (send actions and replay them,
+  e.g. games), and points to Yjs when several people edit the same data at
+  once. When the bot sends a new version of a shared-state app it tells
+  you the old data stays in the previous message.
+- **Runtime constraints.** The skill tells the bot not to use
+  `alert`/`confirm`/`prompt` or `window.open`, and to show an error
+  instead of a blank page when the app fails to start.
+- **Safer, more maintainable app content.** The bot shows user text with
+  `textContent` instead of unescaped `innerHTML` (XSS in shared apps),
+  ships baked-in data as a JSON file loaded with `fetch`, and says when
+  that data will go stale. When it has an image generator it may draw the
+  icon with it; the skill explains how to prompt it and how to catch an
+  image whose format doesn't match its file name. The bot says when it
+  hasn't opened an app itself, and makes changes in the sources rather than
+  only inside the `.xdc`.
 
 ### Fixed
 
@@ -73,18 +105,15 @@ action`, and get as much space as people need to upgrade safely.
   in; the receive loop died on its first frame without a log line, so the
   bot greeted and then never answered. `plugin.yaml` now declares `numpy`
   and `av`, and a crash in a call's background task is logged at ERROR.
+- **A missing aiortc, av or numpy no longer stops the whole adapter.** Text
+  messaging connects and calls are disabled, with an ERROR saying what to
+  install; incoming calls are ended instead of ringing out, and
+  `dc_start_call` says why it can't call.
 - **Call problems on a fresh instance are now visible in `gateway.log`.**
   A failed transcription (no STT provider, failed model download) is logged
   at ERROR with Hermes's reason instead of being dropped at DEBUG. So are a
   missing TURN server and an SDP of ours without a relay candidate, which
   behind NAT mean the call will not connect.
-- **Declined callers now hear back.** A call from a contact Hermes doesn't
-  know yet used to be hung up silently. The call is still declined, but the
-  caller now gets what an unknown contact's message gets: a pairing code by
-  default, or the decline text, or nothing, per `unauthorized_dm_behavior`,
-  rate-limited by Hermes. With `ignore`, an unknown caller now also shows up
-  as Hermes's "Unauthorized user" warning and its one-time notice in the
-  home channel, like an unknown sender's message does.
 - **The first incoming call on a fresh install had no Whisper warmup.** It
   wrote into a folder that didn't exist yet. The warmup also no longer runs
   on the call's event loop, where Hermes installing faster-whisper on first
@@ -93,25 +122,43 @@ action`, and get as much space as people need to upgrade safely.
   hallucinations, so a plain "bye" couldn't end the call. Calls only
   transcribe audio that is clearly speech, so these now reach the agent, also
   combined ("Okay, bye."). The same phrase repeated is still dropped.
-- **A missing aiortc, av or numpy no longer stops the whole adapter.** Text
-  messaging connects and calls are disabled, with an ERROR saying what to
-  install; incoming calls are ended instead of ringing out, and
-  `dc_start_call` says why it can't call.
-- **The agent couldn't load the bundled webxdc skill.** The system prompt
-  told it to call `skill_view('plugin:deltachat-platform:webxdc-converter')`,
-  which Hermes reads as a plugin called `plugin`, so the call returned "Skill
-  not found". The prompt now uses `deltachat-platform:webxdc-converter`, the
-  name Hermes actually registers the skill under.
-- **The bundled webxdc skill showed no description in the skill list.**
-  Hermes doesn't read it from the skill's `SKILL.md` for plugin skills, so
-  the adapter now passes it along. The description also says it is the
-  Delta Chat-specific webxdc skill, to tell it apart from any other webxdc
-  skill installed alongside it.
-
-- **The bot now sees which message you replied to.** A quote-reply used to
-  reach Hermes as plain text, so the agent had to guess what "this" meant.
-  The quoted message (in full, if it is from the same chat) and its author
-  are now passed on, for text, voice, image and file messages alike.
+- **Declined callers now hear back.** A call from a contact Hermes doesn't
+  know yet used to be hung up silently. The call is still declined, but the
+  caller now gets what an unknown contact's message gets: a pairing code by
+  default, or the decline text, or nothing, per `unauthorized_dm_behavior`,
+  rate-limited by Hermes. With `ignore`, an unknown caller now also shows up
+  as Hermes's "Unauthorized user" warning and its one-time notice in the
+  home channel, like an unknown sender's message does.
+- **An incoming call was answered when the authorization check failed.**
+  If Hermes' check raised an error or returned no clear answer, the call
+  was picked up anyway. It is now declined, as approval reactions already
+  were.
+- **Calls whose peer vanished never ended.** A caller who lost network or
+  had the app killed left the call open forever: replies kept going to
+  speech, the per-call model stayed active and `dc_end_call` could pick
+  the dead call. Such calls now end after about 30 seconds.
+- **`dc_end_call` could hang up a call in another chat.** With calls in
+  several chats at once, "bye" in one could end another. It now ends the
+  call of the chat that asked.
+- **Calls failed with "Invalid model: medium" on cloud STT providers.** With
+  `DELTACHAT_CALL_STT_VOXTRAL` off, or after a Voxtral error, call audio was
+  sent with the local Whisper size `medium` to whatever `stt.provider` is
+  set. With `mistral` (or any other cloud provider) every utterance failed,
+  and the bot never answered in calls. Calls now use the configured provider
+  and model, the same as voice messages. The Voxtral shortcut honours
+  `stt.mistral.model`. If you use `stt.provider: local`, calls now use
+  `stt.local.model` instead of a forced `medium`. Set it explicitly if you
+  relied on that.
+- **Smaller call fixes.** Redialling with `DELTACHAT_CALL_SHARED_HISTORY`
+  on no longer drops the new call's `DELTACHAT_CALL_MODEL`, and the
+  greeting of an outgoing call that died while connecting is no longer
+  sent as a chat message.
+- **A hung `deltachat-rpc-server` could freeze the whole gateway.**
+  Shutting down waited on the server without a limit, on the gateway's
+  event loop, so every platform stalled with it. The server now gets the
+  30 s Delta Chat core needs to close IMAP/SMTP cleanly, off the event
+  loop, and is killed if it still won't exit. A malformed line from the
+  server no longer leaves a dead server that made every later call hang.
 - **Attachments could arrive twice.** A reply that sent a file with a
   `MEDIA:` tag and also mentioned its path ("saved at /…/app.xdc"), or
   mentioned one file under two spellings (`~/app.xdc` and its full path, or
@@ -132,32 +179,8 @@ action`, and get as much space as people need to upgrade safely.
   (default 128 MiB), the adapter passed the raw Delta Chat file instead, and
   documents and videos were never checked. Oversized attachments now reach
   the agent as text with a note that the file was too large. Set the option
-  to 0 to turn the cap off.
-- **Calls failed with "Invalid model: medium" on cloud STT providers.** With
-  `DELTACHAT_CALL_STT_VOXTRAL` off, or after a Voxtral error, call audio was
-  sent with the local Whisper size `medium` to whatever `stt.provider` is
-  set. With `mistral` (or any other cloud provider) every utterance failed,
-  and the bot never answered in calls. Calls now use the configured provider
-  and model, the same as voice messages. The Voxtral shortcut honours
-  `stt.mistral.model`. If you use `stt.provider: local`, calls now use
-  `stt.local.model` instead of a forced `medium`. Set it explicitly if you
-  relied on that.
-- **Webxdc apps from the skill could ship without `webxdc.js`.** The skill
-  now says plainly that any app using the webxdc API must load
-  `<script src="webxdc.js"></script>` before its own scripts. The messenger
-  provides the file, so it is still not packaged, but without the tag
-  `window.webxdc` is undefined.
-- **Webxdc apps from the skill had no icon.** The skill generated an
-  `icon.svg`, but messengers only use `icon.png` or `icon.jpg`. It now
-  generates a PNG.
-- **The skill's webxdc API reference described functions that don't
-  exist.** `desktopApiVersion`, `getAllInstanceIds()` and `sendToInstance()`
-  are gone, and the signatures of `setUpdateListener`, `sendToChat`,
-  `importFiles` and the realtime channel now match the webxdc spec. The
-  reference also lists Delta Chat's actual update limits and quirks. The
-  skill tells the bot not to use `alert`/`confirm`/`prompt` or
-  `window.open`, and to show an error instead of a blank page when the app
-  fails to start.
+  to 0 to turn the cap off. Incoming videos now reach Hermes as videos
+  rather than documents.
 
 ### Changed
 
@@ -168,7 +191,11 @@ action`, and get as much space as people need to upgrade safely.
   counts as several), so the adapter now splits longer replies into
   messages of at most that size, breaking at line ends. This happens while
   streaming too, and for tool-progress messages.
-
+- **Message content stays out of the default logs.** Captions, call
+  transcripts, file names of received documents and raw RPC responses
+  were written to `gateway.log`/`agent.log` at INFO or WARNING. They are
+  now logged only at DEBUG; IDs, sizes and errors stay at INFO for
+  troubleshooting.
 - **Hermes no longer streams replies on Delta Chat while editing is off.**
   Before, streaming (if enabled in Hermes) sent the first chunk with a `▉`
   cursor that could never be removed, then the rest as a second message.
