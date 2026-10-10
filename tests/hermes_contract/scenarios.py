@@ -106,6 +106,7 @@ async def call_stream(chunks, delay):
 
 def contract():
     """Facts about the real Hermes API this adapter relies on."""
+    from gateway import session_context
     from tools import clarify_gateway, slash_confirm
 
     def params(cls, name):
@@ -122,6 +123,9 @@ def contract():
         "clarify_api": all(hasattr(clarify_gateway, n) for n in (
             "_lock", "_entries", "resolve_gateway_clarify", "mark_awaiting_text"))
             and "multi_select" in {f.name for f in dataclasses.fields(clarify_gateway._ClarifyEntry)},
+        # dc_react and dc_end_call find the turn's chat and sender through these
+        "session_vars": sorted({"HERMES_SESSION_PLATFORM", "HERMES_SESSION_CHAT_ID",
+                                "HERMES_SESSION_USER_ID"} - set(session_context._VAR_MAP)),
         # tool progress stays off unless editing is enabled
         "base_not_overridden":
             dc.DeltaChatAdapter.edit_message is BasePlatformAdapter.edit_message,
