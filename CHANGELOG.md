@@ -11,6 +11,11 @@ action`, and get as much space as people need to upgrade safely.
 
 ### New
 
+- **"Call me" works.** The agent is now told that it can phone you, so
+  asking it to call you rings your phone instead of getting "I can't make
+  calls". Asked from a chat, it calls that chat without needing the chat
+  token. To call you later, it schedules a cron job with the token in the
+  job's prompt.
 - **Slash-command confirmations can be answered with reactions.** When
   `/reset`, `/new`, `/undo`, `/reload-mcp` or a costly `/model` asks for
   confirmation, react 👍 to approve once or 👎 to cancel. "Always approve"
