@@ -36,10 +36,17 @@ The branch starts from `origin/main` and the PR targets `main`. Run
 
 ## 3. Changelog
 
-Add an entry under `## Unreleased` in `CHANGELOG.md`, in the matching `### New`,
-`### Fixed` or `### Changed` subsection, as a `- **Bold summary.**` bullet like the others, for anything people running the adapter
-would notice. Write it for them: what changed and what they need to do, not how. Internal
-refactors and test-only changes get no entry.
+The changelog is a short overview for humans and agents; the git log has the details.
+For anything people running the adapter would notice:
+
+- Add a `- **Bold summary.**` bullet under `## Unreleased`, in the matching `### New`,
+  `### Fixed` or `### Changed` subsection. Say what changed and what they need to do, not how.
+- Keep it to one or two sentences.
+- If the change alters, extends or undoes something already listed under `## Unreleased`,
+  rewrite that entry so it describes the end state. Don't add a second one. Delete
+  entries that no longer apply.
+
+Internal refactors and test-only changes get no entry; label those PRs `no-changelog`.
 
 ## 4. Review subagents
 
