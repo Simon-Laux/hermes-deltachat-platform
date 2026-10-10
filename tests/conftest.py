@@ -54,6 +54,7 @@ class MockSource:
     user_id: str
     user_name: str
     metadata: Dict[str, Any] = field(default_factory=dict)
+    message_id: Optional[str] = None
 
 
 @dataclass
@@ -196,6 +197,7 @@ class MockBasePlatformAdapter:
         user_id: str,
         user_name: str,
         metadata: Optional[Dict[str, Any]] = None,
+        message_id: Optional[str] = None,
     ) -> MockSource:
         """Build a source object for message events."""
         return MockSource(
@@ -205,6 +207,7 @@ class MockBasePlatformAdapter:
             user_id=user_id,
             user_name=user_name,
             metadata=metadata or {},
+            message_id=message_id,
         )
 
     async def send_clarify(self, chat_id, question, choices, clarify_id, session_key, metadata=None):

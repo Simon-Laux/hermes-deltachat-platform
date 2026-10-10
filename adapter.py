@@ -800,9 +800,6 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._slash_confirm_prompts: Dict[int, tuple] = {}
         # Clarify prompt msg id -> (Hermes session key, clarify_id, choice labels), oldest first.
         self._clarify_prompts: Dict[int, tuple] = {}
-        # (chat id, sender id) -> id of the last message of theirs handed to Hermes
-        # there, not counting commands: what dc_react reacts to.
-        self._last_inbound: Dict[tuple, str] = {}
 
         # Group mention gating (opt-in; DMs are never gated). Set
         # platforms.deltachat-platform.require_mention / mention_aliases in
@@ -2596,6 +2593,8 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 chat_type=chat_type,
                 user_id=user_id,
                 user_name=user_name,
+                # the turn's triggering message (HERMES_SESSION_MESSAGE_ID): what dc_react reacts to
+                message_id=str(msg_id),
             )
 
             # Append chat token for dc_safe_rpc_call — skip on slash commands so
@@ -2614,7 +2613,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 message_id=str(msg_id),
                 **await self._reply_context(msg, chat_id),
             )
-            await self._to_hermes(message_event)
+            await self.handle_message(message_event)
 
         except Exception as e:
             logger.error(f"Error handling message event: {e}")
@@ -2721,6 +2720,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
             chat_type=chat_type,
             user_id=user_id,
             user_name=user_name,
+            message_id=str(msg_id),
         )
 
         token = await _get_or_create_chat_token(self.rpc, self.account_id, int(chat_id))
@@ -2786,7 +2786,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 media_urls=[resolved] if resolved else [],
                 media_types=[file_mime or ("audio/ogg" if is_voice else "audio/mpeg")] if resolved else [],
             )
-            await self._to_hermes(message_event)
+            await self.handle_message(message_event)
 
         # Image
         elif view_type in (MessageViewtype.IMAGE.value, MessageViewtype.GIF.value, MessageViewtype.STICKER.value) and filename:
@@ -2806,7 +2806,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 media_urls=[resolved] if resolved else [],
                 media_types=[file_mime or "image/jpeg"] if resolved else [],
             )
-            await self._to_hermes(message_event)
+            await self.handle_message(message_event)
 
         # File / document / video. Incoming .xdc apps have viewtype Webxdc and
         # are not handled here.
@@ -2837,7 +2837,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 media_urls=[resolved] if resolved else [],
                 media_types=[file_mime or "application/octet-stream"] if resolved else [],
             )
-            await self._to_hermes(message_event)
+            await self.handle_message(message_event)
 
         elif view_type == "Call":
             # DC sends a Call info message (Missed call / Call ended) after calls.
@@ -2846,12 +2846,6 @@ class DeltaChatAdapter(BasePlatformAdapter):
 
         else:
             logger.debug(f"Unhandled view_type={view_type}, file={filename}")
-
-    async def _to_hermes(self, event: MessageEvent) -> None:
-        """Hand a chat message to Hermes, remembering it for dc_react."""
-        if not (event.text or "").startswith("/"):
-            self._last_inbound[(event.source.chat_id, event.source.user_id)] = event.message_id
-        await self.handle_message(event)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Get metadata for a chat.
@@ -3339,12 +3333,16 @@ def register_rpc_tools(ctx) -> None:
         if adapter is None or chat_id is None:
             return json.dumps({"error": "Only works when answering a Delta Chat message"})
         from gateway.session_context import get_session_env
-        # why: the sender's own latest message, not the chat's: in a group someone
-        # else may have written since
-        msg_id = adapter._last_inbound.get((chat_id, get_session_env("HERMES_SESSION_USER_ID", "")))
-        if msg_id is None:
-            return json.dumps({"error": "No message from this user to react to"})
-        emoji = str(args.get("emoji") or "").strip()
+        # Hermes binds the message that started this turn; call turns have none
+        msg_id = get_session_env("HERMES_SESSION_MESSAGE_ID", "")
+        if not msg_id.isdigit():
+            return json.dumps({"error": "No message to react to in this turn"})
+        emoji = (args or {}).get("emoji")
+        # why: Hermes doesn't check arguments against the schema, and core sends any
+        # string as the "emoji" -- a sentence would show up as a reaction
+        if not isinstance(emoji, str) or len(emoji.strip()) > 16 or len(emoji.split()) > 1:
+            return json.dumps({"error": "emoji must be a single emoji, or '' to remove yours"})
+        emoji = emoji.strip()
         try:
             await adapter.rpc.send_reaction(adapter.account_id, int(msg_id), [emoji] if emoji else [])
         except Exception as e:
@@ -3543,10 +3541,10 @@ def register_rpc_tools(ctx) -> None:
         toolset="deltachat",
         schema={
             "description": (
-                "React to the user's latest message with a single emoji, like a tapback. "
+                "React to the message you are answering with a single emoji, like a tapback. "
                 "Use it when a reaction is what a person would do: something funny gets a 😂, "
-                "warmth gets a ❤️, a plan you're on board with gets a 👍. If the reaction says "
-                "it all, it can BE the reply; otherwise carry on with what the message needs. "
+                "warmth gets a ❤️, a plan you're on board with gets a 👍. Still reply with "
+                "text, if only a few words: a turn without text shows the user an error. "
                 "Occasionally, when felt: not on every message, never as a status signal, and "
                 "never narrate it ('I reacted with...'). One reaction per message: another "
                 "emoji replaces yours, an empty string removes it."

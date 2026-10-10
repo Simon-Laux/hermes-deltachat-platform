@@ -58,9 +58,8 @@ time far more often.
   JSON file, the skill explains last-writer-wins vs. event sourcing for shared
   state, and the bot says when it hasn't opened an app itself.
 - **The agent can react to your message.** A new `dc_react` tool lets it
-  answer with an emoji (❤️ for a thank-you, 😂 for a joke) instead of, or as
-  well as, a reply. It only reacts to the latest message of the person it is
-  answering, in that chat.
+  add an emoji to its reply (❤️ for a thank-you, 😂 for a joke). It can only
+  react to the message it is answering.
 
 ### Fixed
 

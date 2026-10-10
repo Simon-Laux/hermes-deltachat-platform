@@ -86,8 +86,8 @@ Deep integration with Delta Chat's native features — voice messages, voice cal
 - Bidirectional text, voice messages (auto-transcribed via Hermes STT), images, files, locations
 - Group chat support — add the agent to a group you are in
 - Read receipts
-- The agent can react to your latest message with an emoji (`dc_react` tool), the way a
-  person would tapback; it can't react to anything else
+- The agent can react with an emoji (`dc_react` tool) to the message it is answering, the
+  way a person would tapback; it can't react to anything else
 - Bot mode: auto-accepts contact requests, no manual approval needed
 - Only end-to-end encrypted contacts reach the agent — in Delta Chat identity is the key, so
   unencrypted mail is dropped unread. Calls from contacts Hermes hasn't approved are declined;
