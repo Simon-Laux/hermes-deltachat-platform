@@ -819,6 +819,11 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._commands_bio_enabled = _is_on(
             _setting(extra, "commands_bio", "DELTACHAT_COMMANDS_BIO", "1"))
 
+        # Experimental, off by default: every reaction to our messages costs a
+        # model call and gets a reply. Reactions to prompts work regardless.
+        self._reactions_to_agent = _is_on(
+            _setting(extra, "reactions_to_agent", "DELTACHAT_REACTIONS_TO_AGENT"))
+
     async def _intake_allows(self, msg: Dict, chat_id) -> bool:
         """Drop what Hermes' own authorization can't judge, and leave groups
         no approved contact is a member of.
@@ -1857,7 +1862,8 @@ class DeltaChatAdapter(BasePlatformAdapter):
         return True
 
     async def _handle_reaction(self, event: Dict[str, Any]) -> None:
-        """Answer the prompt a reaction was given to, if it's one of ours."""
+        """Answer the prompt a reaction was given to, if it's one of ours, or
+        else pass it on to the agent (DELTACHAT_REACTIONS_TO_AGENT)."""
         msg_id = event.get("msg_id")
         if msg_id in self._approval_prompts:
             await self._handle_approval_reaction(event)
@@ -1865,6 +1871,52 @@ class DeltaChatAdapter(BasePlatformAdapter):
             await self._handle_slash_confirm_reaction(event)
         elif msg_id in self._clarify_prompts:
             await self._handle_clarify_reaction(event)
+        elif self._reactions_to_agent and event.get("reaction"):
+            await self._reaction_turn(event)
+
+    async def _reaction_turn(self, event: Dict[str, Any]) -> None:
+        """Hand a reaction to one of our messages to the agent, as a reply to it.
+
+        Core reports reactions to our own messages only, so it's addressed to
+        us, mention gate or not. Hermes would answer a contact it doesn't
+        approve with a pairing code; for a reaction we stay silent instead.
+        why not internal=True, which would let the agent stay silent: that
+        also skips Hermes' authorization and emergency stop.
+        """
+        msg_id, chat_id, contact_id = event.get("msg_id"), event.get("chat_id"), event.get("contact_id")
+        try:
+            contact = await self.rpc.get_contact(self.account_id, int(contact_id))
+            chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
+            ours = await self.rpc.get_message(self.account_id, int(msg_id))
+            token = await _get_or_create_chat_token(self.rpc, self.account_id, int(chat_id))
+        except Exception as e:
+            logger.warning("Ignoring reaction on message %s: %s", msg_id, e)
+            return
+        chat_type = "group" if chat.get("chat_type") == "Group" else "dm"
+        if not contact.get("is_key_contact") or self._is_sender_authorized(
+                str(contact_id), chat_type, str(chat_id)) is not True:
+            logger.debug("Not passing on reaction from unapproved contact %s", contact_id)
+            return
+        source = self.build_source(
+            chat_id=str(chat_id),
+            chat_name=chat.get("name", f"Chat {chat_id}"),
+            chat_type=chat_type,
+            user_id=str(contact_id),
+            user_name=(contact.get("name") or contact.get("display_name")
+                       or contact.get("name_and_addr") or f"Contact {contact_id}"),
+        )
+        # Hermes puts '[Replying to your previous message: "<ours>"]' in front
+        await self.handle_message(MessageEvent(
+            text=f"[Reacted with {event['reaction']}]\n[dc:chat={token}]",
+            message_type=MessageType.TEXT,
+            source=source,
+            message_id=None,
+            reply_to_message_id=str(msg_id),
+            reply_to_text=(ours.get("text") or ours.get("file_name")
+                           or f"[{ours.get('view_type') or 'message'}]"),
+            reply_to_author_id=str(DC_CONTACT_ID_SELF),
+            reply_to_is_own_message=True,
+        ))
 
     async def _handle_clarify_reaction(self, event: Dict[str, Any]) -> None:
         """Answer the clarify a keycap reaction picks a choice of.

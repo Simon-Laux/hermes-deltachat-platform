@@ -7,6 +7,15 @@ already listed rewrites that entry instead of adding another.
 Breaking changes are the exception: they go first, under `### Breaking / requires
 action`, and get as much space as people need to upgrade safely.
 
+## Unreleased
+
+### New
+
+- **Experimental: the agent can see reactions to its messages.** With
+  `DELTACHAT_REACTIONS_TO_AGENT=1`, a ❤️ or 👎 on one of its replies reaches
+  the agent as a reply to that message, and it answers. Off by default, as each
+  one is a model call; reactions answering prompts work either way.
+
 ## 2.1.0 (2026-10-10)
 
 ### Breaking / requires action
