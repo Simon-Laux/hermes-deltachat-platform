@@ -97,9 +97,13 @@ Deep integration with Delta Chat's native features — voice messages, voice cal
 `DELTACHAT_REACTIONS_TO_AGENT=1`, a ❤️, 👎 or other reaction to one of the agent's messages is
 passed on to the agent, shown to it as a reply to that message ("[Reacted with 👎]"), so it can
 pick up on praise or "that's wrong". Each one is a model call, and the agent answers each with a
-message: Hermes doesn't let a turn from a person end silently. Only contacts Hermes approves are
-passed on, and removing a reaction isn't (Delta Chat doesn't report that). This is only about
-these generic reactions: answering prompts with reactions (below) works with or without it.
+message: Hermes doesn't let a turn from a person end silently. Changing a reaction counts as a new
+one; removing one isn't passed on (Delta Chat doesn't report that). In a group, every approved
+member's reaction counts, `DELTACHAT_REQUIRE_MENTION` or not, and the whole group sees the answer.
+Reactions while the agent is still working on that person's turn are dropped, so they never
+interrupt it, and only contacts Hermes approves are passed on. This is only about these generic
+reactions: answering prompts with reactions (below) works with or without it, and reactions on
+those prompts never reach the agent.
 
 **Answering prompts with reactions.** Delta Chat has no buttons, so some prompts can be
 answered by reacting to that exact message (typed replies still work):

@@ -133,9 +133,14 @@ async def reaction_turn():
     async def capture(event):
         events.append(event)
     a.handle_message = capture
-    await a._handle_reaction({"msg_id": 77, "chat_id": 5, "contact_id": 10, "reaction": "👎"})
+    reaction = {"msg_id": 77, "chat_id": 5, "contact_id": 10, "reaction": "👎"}
+    await a._handle_reaction(reaction)
     event = events[0]
-    return GatewayInboundMixin._prepend_inbound_reply_context(event, event.source, event.text)
+    # a turn running in that session: the reaction must not reach Hermes
+    a._active_sessions[a._event_session_key(event)] = asyncio.Event()
+    await a._handle_reaction(reaction)
+    return {"text": GatewayInboundMixin._prepend_inbound_reply_context(event, event.source, event.text),
+            "gateway_control": event.allow_gateway_control, "turns": len(events)}
 
 
 def contract():
