@@ -1,0 +1,29 @@
+name: changelog
+
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, labeled, unlabeled]
+
+jobs:
+  changelog:
+    # Internal refactors and test repairs get no entry (see CHANGELOG.md's intro): label those
+    if: ${{ !contains(github.event.pull_request.labels.*.name, 'no-changelog') }}
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+          HEAD: ${{ github.event.pull_request.head.sha }}
+        run: |
+          changed=$(git diff --name-only "$(git merge-base "$BASE" "$HEAD")" "$HEAD")
+          # Docs, tests and tooling don't change what people running the adapter get;
+          # skills/**/*.md do (they steer the agent), so only top-level *.md is exempt.
+          shipped=$(echo "$changed" | grep -vE '^(tests/|docs/|\.github/|\.claude/|[^/]*\.md$|Makefile$|flake\.|\.gitignore$)' || true)
+          if [ -n "$shipped" ] && ! echo "$changed" | grep -qx CHANGELOG.md; then
+            echo "::error::This PR changes shipped files but not CHANGELOG.md:"
+            echo "$shipped"
+            echo "Add a short entry under '## Unreleased' (or rewrite the one this PR changes), or label the PR 'no-changelog' if users won't notice."
+            exit 1
+          fi
