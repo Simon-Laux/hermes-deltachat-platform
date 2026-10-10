@@ -95,6 +95,8 @@ When converting an existing artifact or HTML file:
 
 **Where to write files:** Write all outputs (source files, the `.xdc`, and any build artifacts) to your **current working directory** — run `pwd` to find it. In the Docker sandbox that is `/workspace/`; on other deployments it is wherever the agent runs (`$PWD`). Never write to `/tmp/` — on Docker it is container-local tmpfs the host cannot read. The examples below use paths **relative to the working directory**, so they run unchanged in Docker and elsewhere. Never assume `/workspace/` exists — outside the Docker sandbox you usually cannot create it.
 
+Build the app in a directory of its own (the examples use `myapp/`) so that the directory's contents are exactly what goes into the archive: `index.html`, `manifest.toml`, the icon and any other assets. For a bundled app that directory is the build output (e.g. `myapp/dist/`): put `manifest.toml` and `icon.png` in `public/` so the bundler copies them, or copy them in after the build.
+
 ### Create manifest.toml
 
 ```toml
@@ -111,14 +113,14 @@ If the user supplies an icon, use it (convert it to PNG or JPEG if needed). Othe
 mkdir -p myapp
 python3 - << 'EOF'
 import struct, zlib
-initials, color, size = "AB", (0x4E, 0xCD, 0xC4), 128  # app initials, background RGB
+initials, color, size = "AB", (0x4E, 0xCD, 0xC4), 256  # app initials, background RGB
 try:
     from PIL import Image, ImageDraw, ImageFont
     img = Image.new("RGB", (size, size), color)
     try:
-        font = ImageFont.truetype("DejaVuSans-Bold.ttf", 64)
+        font = ImageFont.truetype("DejaVuSans-Bold.ttf", size // 2)
     except OSError:
-        font = ImageFont.load_default(size=64)
+        font = ImageFont.load_default(size=size // 2)
     ImageDraw.Draw(img).text((size / 2, size / 2), initials, fill="white", font=font, anchor="mm")
     img.save("myapp/icon.png")
 except Exception:
@@ -133,76 +135,72 @@ except Exception:
 EOF
 ```
 
-Replace `AB` with the app's initials and choose a fitting background color. Without Pillow the icon is a plain colored square.
+Replace `AB` with the app's initials (one or two letters, more don't fit) and choose a fitting background color. Without Pillow the icon is a plain colored square.
 
-### Create the .xdc file
+### Create and check the .xdc file
 
-A `.xdc` file is a ZIP archive. Use Python's `zipfile` — it is always available, unlike `zip` which may not be installed:
-
-```bash
-# Single-file app
-python3 -c "
-import zipfile
-with zipfile.ZipFile('myapp.xdc', 'w', zipfile.ZIP_DEFLATED) as zf:
-    zf.write('myapp/index.html', 'index.html')
-    zf.write('myapp/manifest.toml', 'manifest.toml')
-    zf.write('myapp/icon.png', 'icon.png')
-"
-
-# Multi-file app — walk the entire app directory
-python3 -c "
-import zipfile, os
-base = 'myapp'
-with zipfile.ZipFile('myapp.xdc', 'w', zipfile.ZIP_DEFLATED) as zf:
-    for root, dirs, files in os.walk(base):
-        for f in files:
-            path = os.path.join(root, f)
-            zf.write(path, os.path.relpath(path, base))
-"
-
-# React/bundled app — build first, then zip the dist output
-# Put icon.png and manifest.toml in public/ (vite copies it into dist/) or copy them into dist/ after the build
-npm run build   # produces dist/index.html, dist/assets/, etc.
-python3 -c "
-import zipfile, os
-base = 'myapp/dist'
-with zipfile.ZipFile('myapp.xdc', 'w', zipfile.ZIP_DEFLATED) as zf:
-    for root, dirs, files in os.walk(base):
-        for f in files:
-            path = os.path.join(root, f)
-            zf.write(path, os.path.relpath(path, base))
-"
-```
-
-`index.html` MUST be at the root of the archive (arcname `'index.html'`, not a subdirectory path). All output files must go to your current working directory — **not** `/tmp/`. On Docker the `/tmp/` directory is container-local tmpfs and the host cannot read it.
-
-**Always use ZIP format** — `.xdc` is a ZIP file. Never use tar, tar.gz, or any other archive format; webxdc clients will not open them.
-
-### Validate before sending
-
-Always verify the archive before delivering. This catches wrong arcnames, missing `index.html`, and corrupt zips early:
+A `.xdc` file is a ZIP archive — not tar or tar.gz, webxdc clients will not open those. This zips the app directory and then checks the result, because the usual mistakes (`index.html` ending up in a subfolder, a leftover CDN link) are invisible until someone opens the app in a chat:
 
 ```bash
-python3 -c "
-import zipfile, sys
-path = 'myapp.xdc'
-with zipfile.ZipFile(path) as zf:
+python3 - myapp myapp.xdc << 'EOF'
+import os, re, sys, zipfile
+src, out = sys.argv[1], sys.argv[2]
+if not os.path.isdir(src):
+    sys.exit(f"ERROR: {src} is not a directory")
+with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
+    for root, dirs, files in os.walk(src):
+        dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d != "node_modules")
+        for name in sorted(files):
+            path = os.path.join(root, name)
+            if not name.startswith(".") and not os.path.samefile(path, out):
+                zf.write(path, os.path.relpath(path, src))
+
+errors, notes = [], []
+with zipfile.ZipFile(out) as zf:
     names = zf.namelist()
-    print('Files in archive:', names)
-    if 'index.html' not in names:
-        print('ERROR: index.html missing from archive root!')
-        sys.exit(1)
+    if "index.html" not in names:
+        errors.append("index.html is not at the archive root")
+    if any(n.split("/")[-1] == "webxdc.js" for n in names):
+        errors.append("the archive contains webxdc.js; the messenger provides that file")
     if not {"icon.png", "icon.jpg"} & set(names):
-        print("WARNING: no icon.png or icon.jpg at the archive root (icon.svg is ignored)")
-    print('OK — index.html present, size:', zf.getinfo('index.html').file_size, 'bytes')
-"
+        notes.append("no icon.png or icon.jpg at the archive root")
+    url = r"""(?:https?:)?//[^"'\s>)]+"""
+    markup = [  # in .html and .css
+        r"""<(?:script|img|iframe|source|video|audio|track|embed|object)\b[^>]*?(?<![\w-])(?:src|srcset|data|poster)\s*=\s*["']?(?:[^"'>]*[\s,])?""" + url,
+        r"""<link\b(?=[^>]*\brel\s*=\s*["']?[^"'>]*\b(?:stylesheet|icon|preload|modulepreload|manifest))[^>]*?\bhref\s*=\s*["']?""" + url,
+        r"""url\(\s*["']?""" + url,
+        r"""@import\s+["']""" + url,
+    ]
+    imports = [r"""\bfrom\s*["']""" + url, r"""\bimport\s*\(?\s*["']""" + url]  # in .html and .js
+    for n in names:
+        patterns = (markup if n.endswith((".html", ".htm", ".css")) else []) + (imports if n.endswith((".html", ".htm", ".js", ".mjs")) else [])
+        text = zf.read(n).decode("utf-8", "replace") if patterns else ""
+        for pattern in patterns:
+            for h in re.findall(pattern, text, re.I):
+                errors.append(f"{n} loads something from the network: {h[:90]}")
+size = os.path.getsize(out)
+if size > 10_000_000:
+    notes.append("over 10 MB, too large for most chats")
+elif size > 1_000_000:
+    notes.append("over 1 MB, consider shrinking the assets")
+print(f"{out}: {len(names)} files, {size / 1024:.0f} KiB")
+for n in sorted(names):
+    print("  " + n)
+for msg in notes:
+    print("NOTE: " + msg)
+for msg in errors:
+    print("ERROR: " + msg)
+sys.exit(1 if errors else 0)
+EOF
 ```
 
-If `index.html` is missing or listed as e.g. `myapp/index.html`, re-package with the correct arcname before sending.
+For a bundled app, run the build first and pass the build output instead: `python3 - myapp/dist myapp.xdc`.
+
+Fix every ERROR and package again. The network check looks for absolute URLs in tags, CSS and ES module imports; `fetch()` calls and URLs built in JavaScript still need your own eyes.
 
 ### Size guidance
 
-Aim for under 1 MB. Under 10 MB is the practical ceiling — beyond that it becomes impractical as a chat attachment. Actual hard limits vary by messenger.
+Aim for under 1 MB; the script notes anything bigger. Under 10 MB is the practical ceiling for a chat attachment. Actual hard limits vary by messenger.
 
 ### Deliver the file
 
@@ -217,6 +215,8 @@ The same works for any other output file type (use its absolute path):
 ```
 Here is your report. MEDIA:<absolute path of your working directory>/report.pdf
 ```
+
+For Level 1+ apps, shared state belongs to the one app message it was sent in. Sending the `.xdc` again — including a fixed or improved version — starts a separate, empty instance: earlier scores, votes or entries stay in the old message. Say so when you send a new version, so nobody wonders where their data went.
 
 **For Level 0 apps, you're done here.** The sections below are only for apps that need shared state.
 
