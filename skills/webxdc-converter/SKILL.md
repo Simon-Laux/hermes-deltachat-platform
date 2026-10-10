@@ -166,7 +166,7 @@ with zipfile.ZipFile(out) as zf:
         notes.append("no icon.png or icon.jpg at the archive root")
     url = r"""(?:https?:)?//[^"'\s>)]+"""
     markup = [  # in .html and .css
-        r"""<(?:script|img|iframe|source|video|audio|track|embed|object)\b[^>]*?(?<![\w-])(?:src|srcset|data|poster)\s*=\s*["']?(?!data:)(?:[^"'>]*[\s,])?""" + url,  # data: URIs are inline; base64 MP3 starts with //
+        r"""<(?:script|img|iframe|source|video|audio|track|embed|object)\b[^>]*?(?<![\w-])(?:src|srcset|data|poster)\s*=\s*["']?(?:[^"'>]*[\s,])?(?<!base64,)""" + url,  # base64 data can start with //, e.g. inline MP3
         r"""<link\b(?=[^>]*\brel\s*=\s*["']?[^"'>]*\b(?:stylesheet|icon|preload|modulepreload|manifest))[^>]*?\bhref\s*=\s*["']?""" + url,
         r"""url\(\s*["']?""" + url,
         r"""@import\s+["']""" + url,
@@ -196,7 +196,7 @@ EOF
 
 For a bundled app, run the build first and pass the build output instead: `python3 - myapp/dist myapp.xdc`.
 
-Fix every ERROR and package again. The messenger blocks network access, so anything loaded from outside the `.xdc` (a CDN script, a web font, an API call) just fails, even though the app works in a browser. The check catches URLs in tags, CSS and imports, but not requests made from JavaScript: search the JS for `http://`, `https://`, `wss://` and `"//`, and make sure the app doesn't need any of them to work. Bundle what it needs into the `.xdc`; for features that need a server, see step 2 of the conversion list above.
+Fix every ERROR and package again. The messenger blocks network access, so anything loaded from outside the `.xdc` (a CDN script, a web font, an API call) just fails, even though the app works in a browser. The check catches URLs in tags, CSS and imports, but not requests made from JavaScript: search the JS for `http://`, `https://`, `ws://`, `wss://` and `"//`, and make sure the app doesn't need any of them to work. Bundle what it needs into the `.xdc`; for features that need a server, see "Replace or remove calls to external servers" above.
 
 ### Size guidance
 
