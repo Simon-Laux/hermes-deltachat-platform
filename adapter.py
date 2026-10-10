@@ -854,16 +854,21 @@ class DeltaChatAdapter(BasePlatformAdapter):
         if any(re.search(r"(?<![\w@])@" + re.escape(n) + r"(?![\w-])", text, re.IGNORECASE)
                for n in names):
             return True
-        if await self._quotes_own_message(msg):
+        if await self._quotes_own_message(msg, chat_id):
             return True
         logger.debug("Ignoring unmentioned group message %s (require_mention)",
                      msg.get("id"))
         return False
 
-    async def _quoted_message(self, msg: Dict) -> Optional[Dict]:
-        """The message *msg* quote-replies to, or None if there is none we have."""
+    async def _quoted_message(self, msg: Dict, chat_id) -> Optional[Dict]:
+        """The message *msg* quote-replies to, if we have it and it is in *chat_id*."""
         quote = msg.get("quote") or {}
         if quote.get("kind") != "WithMessage" or not quote.get("message_id"):
+            return None
+        # why: the quote names its message by Message-ID, which a sender can
+        # set to one from another chat (or "Reply Privately" does). Nothing
+        # from another chat counts: not its text, author or being ours.
+        if str(quote.get("chat_id")) != str(chat_id):
             return None
         try:
             return await self.rpc.get_message(self.account_id, int(quote["message_id"])) or None
@@ -872,9 +877,9 @@ class DeltaChatAdapter(BasePlatformAdapter):
             logger.debug("Could not load quoted message %s: %s", quote["message_id"], e)
             return None
 
-    async def _quotes_own_message(self, msg: Dict) -> bool:
-        """True if *msg* quote-replies to a message this account sent."""
-        quoted = await self._quoted_message(msg)
+    async def _quotes_own_message(self, msg: Dict, chat_id) -> bool:
+        """True if *msg* quote-replies to a message this account sent in *chat_id*."""
+        quoted = await self._quoted_message(msg, chat_id)
         return bool(quoted) and quoted.get("from_id") == DC_CONTACT_ID_SELF
 
     async def _reply_context(self, msg: Dict, chat_id) -> Dict[str, Any]:
@@ -882,23 +887,23 @@ class DeltaChatAdapter(BasePlatformAdapter):
 
         Hermes only shows the reply context when both the id and the text are
         set, so a quote of a message we don't have (kind "JustText") is left out.
+        When the quoted message is in another chat or can't be loaded, only the
+        quote text the sender sent along is passed on.
         """
-        quoted = await self._quoted_message(msg)
-        if not quoted:
+        quote = msg.get("quote") or {}
+        if quote.get("kind") != "WithMessage" or not quote.get("message_id"):
             return {}
-        quote = msg["quote"]
-        # why: the quote names its message by Message-ID, which a sender can
-        # set to one from another chat. Only take the full text from this
-        # chat; otherwise use the quote text the sender sent along anyway.
-        same_chat = str(quoted.get("chat_id")) == str(chat_id)
-        text = ((quoted.get("text") if same_chat else "") or quote.get("text")
+        quoted = await self._quoted_message(msg, chat_id) or {}
+        text = (quoted.get("text") or quote.get("text") or quoted.get("file_name")
                 or f"[{quote.get('view_type') or 'message'}]")
+        from_id = quoted.get("from_id")
         return {
             "reply_to_message_id": str(quote["message_id"]),
             "reply_to_text": text,
-            "reply_to_author_id": str(quoted.get("from_id")),
-            "reply_to_author_name": quote.get("author_display_name"),
-            "reply_to_is_own_message": quoted.get("from_id") == DC_CONTACT_ID_SELF,
+            "reply_to_author_id": str(from_id) if from_id else None,
+            "reply_to_author_name": (quoted.get("override_sender_name")
+                                     or quote.get("author_display_name")) if quoted else None,
+            "reply_to_is_own_message": from_id == DC_CONTACT_ID_SELF,
         }
 
     def _get_dc_config_dir(self) -> str:
@@ -2463,7 +2468,6 @@ body {{
             user_name=user_name,
         )
 
-        reply = await self._reply_context(msg, chat_id)
         token = await _get_or_create_chat_token(self.rpc, self.account_id, int(chat_id))
 
         from deltachat2.types import MessageViewtype
@@ -2523,7 +2527,7 @@ body {{
                 message_type=hermes_type,
                 source=source,
                 message_id=str(msg_id),
-                **reply,
+                **await self._reply_context(msg, chat_id),
                 media_urls=[resolved] if resolved else [],
                 media_types=[file_mime or ("audio/ogg" if is_voice else "audio/mpeg")] if resolved else [],
             )
@@ -2543,7 +2547,7 @@ body {{
                 message_type=MessageType.PHOTO,
                 source=source,
                 message_id=str(msg_id),
-                **reply,
+                **await self._reply_context(msg, chat_id),
                 media_urls=[resolved] if resolved else [],
                 media_types=[file_mime or "image/jpeg"] if resolved else [],
             )
@@ -2574,7 +2578,7 @@ body {{
                 message_type=MessageType.VIDEO if is_video else MessageType.DOCUMENT,
                 source=source,
                 message_id=str(msg_id),
-                **reply,
+                **await self._reply_context(msg, chat_id),
                 media_urls=[resolved] if resolved else [],
                 media_types=[file_mime or "application/octet-stream"] if resolved else [],
             )

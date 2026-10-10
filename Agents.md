@@ -120,7 +120,8 @@ the names of files people send. IDs (chat, msg, contact), view types, sizes, err
 and our own paths are fine; they are what makes the logs useful. Content belongs at
 DEBUG, which is opt-in. This only covers our lines: Hermes itself logs an excerpt of
 every inbound message at INFO (`inbound message: ... msg=%r`, the first 80 characters
-of `event.text`, which includes captions and file names), so `gateway.log` is never
+of `event.text`, which includes captions and file names, plus `reply_to_text=%r`, the
+first 80 characters of a quoted message), so `gateway.log` is never
 content-free. Hermes's `RedactingFormatter` masks credential-shaped strings, not
 message content.
 

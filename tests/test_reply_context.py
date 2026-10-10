@@ -34,7 +34,7 @@ def _msg(quote=None, **kw):
 
 
 def _with_message(text="1. realtime bug", **kw):
-    return {"kind": "WithMessage", "message_id": 3, "text": text,
+    return {"kind": "WithMessage", "message_id": 3, "chat_id": 5, "text": text,
             "author_display_name": "Hermes", "view_type": "Text", **kw}
 
 
@@ -66,11 +66,14 @@ async def test_quote_of_a_message_we_dont_have_is_left_out(adapter):
 
 
 @pytest.mark.asyncio
-async def test_quoted_message_from_another_chat_only_gives_the_quote_text(adapter):
-    other = {**QUOTED, "chat_id": 99, "from_id": 4}
-    event = await _event(adapter, _msg(_with_message("what they quoted")), quoted=other)
+async def test_quote_from_another_chat_only_gives_the_quote_text(adapter):
+    # the bot's own message, named by a Message-ID from another chat
+    event = await _event(adapter, _msg(_with_message("what they quoted", chat_id=99)))
+    assert event.reply_to_message_id == "3"
     assert event.reply_to_text == "what they quoted"
     assert event.reply_to_is_own_message is False
+    assert event.reply_to_author_id is None and event.reply_to_author_name is None
+    assert [c.args[1] for c in adapter.rpc.get_message.await_args_list] == [7]
 
 
 @pytest.mark.asyncio
@@ -78,6 +81,13 @@ async def test_quote_of_a_captionless_image_still_has_text(adapter):
     image = {**QUOTED, "text": ""}
     event = await _event(adapter, _msg(_with_message("", view_type="Image")), quoted=image)
     assert event.reply_to_text == "[Image]"
+
+
+@pytest.mark.asyncio
+async def test_quote_of_a_captionless_file_names_the_file(adapter):
+    pdf = {**QUOTED, "text": "", "file_name": "report.pdf"}
+    event = await _event(adapter, _msg(_with_message("", view_type="File")), quoted=pdf)
+    assert event.reply_to_text == "report.pdf"
 
 
 @pytest.mark.asyncio
