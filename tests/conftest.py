@@ -187,6 +187,9 @@ class MockBasePlatformAdapter:
             return
         self._disconnected = True
 
+    def _heal_stale_session_lock(self, session_key) -> None:
+        pass
+
     def _event_session_key(self, event) -> str:
         # Stand-in for Hermes' build_session_key (per-user in groups by default).
         s = event.source

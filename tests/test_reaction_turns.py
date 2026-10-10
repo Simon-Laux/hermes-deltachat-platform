@@ -163,3 +163,28 @@ async def test_reaction_text_is_one_short_line(platform_config, raw, shown):
     a = _adapter(platform_config)
     event = await _turn(a, _reaction(raw))
     assert event.text == f"[Reacted with {shown}]\n[dc:chat=tok]"
+
+
+@pytest.mark.asyncio
+async def test_any_part_of_a_split_prompt_stays_out_after_it_was_answered(platform_config):
+    """send() splits a long approval prompt; only the last part carries the marker."""
+    from types import SimpleNamespace
+    a = _adapter(platform_config)
+    a._remember_prompt(a._approval_prompts,
+                       SimpleNamespace(message_id="78", continuation_message_ids=["77"]),
+                       ("agent:main:deltachat-platform:dm:5", "r1"))
+    a._approval_prompts.clear()  # answered
+    with patch("adapter._get_or_create_chat_token", AsyncMock(return_value="tok")):
+        await a._handle_dc_event(_reaction("👎", msg_id=77))
+    a.handle_message.assert_not_awaited()
+    a.rpc.get_contact.assert_not_awaited()
+
+
+def test_prompt_part_record_is_bounded(platform_config):
+    from types import SimpleNamespace
+    a = _adapter(platform_config)
+    for i in range(1000):
+        a._remember_prompt(a._clarify_prompts, SimpleNamespace(
+            message_id=str(i), continuation_message_ids=None), ("k", "c", ["a"]))
+    assert len(a._prompt_parts) == 8 * a._MAX_APPROVAL_PROMPTS
+    assert 999 in a._prompt_parts and 0 not in a._prompt_parts

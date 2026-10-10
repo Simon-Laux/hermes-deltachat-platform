@@ -100,10 +100,11 @@ pick up on praise or "that's wrong". Each one is a model call, and the agent ans
 message: Hermes doesn't let a turn from a person end silently. Changing a reaction counts as a new
 one; removing one isn't passed on (Delta Chat doesn't report that). In a group, every approved
 member's reaction counts, `DELTACHAT_REQUIRE_MENTION` or not, and the whole group sees the answer.
-Reactions while the agent is still working on that person's turn are dropped, so they never
-interrupt it, and only contacts Hermes approves are passed on. This is only about these generic
-reactions: answering prompts with reactions (below) works with or without it, and reactions on
-those prompts never reach the agent.
+Reactions while the agent is still working in that session (per person in groups, unless
+`group_sessions_per_user` is off) are dropped, so they never interrupt it, and only contacts
+Hermes approves are passed on. This is only about these generic reactions: answering prompts
+with reactions (below) works with or without it, and reactions on those prompts are kept from
+the agent.
 
 **Answering prompts with reactions.** Delta Chat has no buttons, so some prompts can be
 answered by reacting to that exact message (typed replies still work):

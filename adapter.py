@@ -803,6 +803,9 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._slash_confirm_prompts: Dict[int, tuple] = {}
         # Clarify prompt msg id -> (Hermes session key, clarify_id, choice labels), oldest first.
         self._clarify_prompts: Dict[int, tuple] = {}
+        # Every part of every prompt above, answered or not, newest last (a
+        # bounded ordered set): reactions on them never become agent turns.
+        self._prompt_parts: Dict[int, None] = {}
 
         # Group mention gating (opt-in; DMs are never gated). Set
         # platforms.deltachat-platform.require_mention / mention_aliases in
@@ -1715,8 +1718,11 @@ class DeltaChatAdapter(BasePlatformAdapter):
         """
         for msg_id in (*(result.continuation_message_ids or ()), result.message_id):
             prompts[int(msg_id)] = value
+            self._prompt_parts[int(msg_id)] = None
         while len(prompts) > self._MAX_APPROVAL_PROMPTS:
             del prompts[next(iter(prompts))]
+        while len(self._prompt_parts) > 8 * self._MAX_APPROVAL_PROMPTS:
+            del self._prompt_parts[next(iter(self._prompt_parts))]
 
     def _pending_request_id(self, prompt) -> Optional[str]:
         """The request_id of the pending approval *prompt* was rendered from.
@@ -1887,6 +1893,10 @@ class DeltaChatAdapter(BasePlatformAdapter):
         also skips Hermes' authorization and emergency stop.
         """
         msg_id, chat_id, contact_id = event.get("msg_id"), event.get("chat_id"), event.get("contact_id")
+        # A prompt part answered, or not carrying the marker below (send() splits
+        # long prompts): its reactions were meant for the prompt, not the agent.
+        if msg_id in self._prompt_parts:
+            return
         try:
             contact = await self.rpc.get_contact(self.account_id, int(contact_id))
             chat = await self.rpc.get_basic_chat_info(self.account_id, int(chat_id))
@@ -1904,8 +1914,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
         except Exception as e:
             logger.warning("Ignoring reaction on message %s: %s", msg_id, e)
             return
-        # One of our prompts, answered or forgotten (the prompt maps are bounded and
-        # in memory only): its reactions were meant for the prompt, not the agent.
+        # Same for a prompt from before a restart, which emptied the maps above
         if _REACT_PROMPT in (ours.get("text") or ""):
             return
         source = self.build_source(
@@ -1933,7 +1942,9 @@ class DeltaChatAdapter(BasePlatformAdapter):
         )
         # why: on a busy session Hermes would interrupt or redirect the running
         # turn for it (busy_input_mode interrupt, the default) -- not for a 👍
-        if self._event_session_key(turn) in self._active_sessions:
+        key = self._event_session_key(turn)
+        self._heal_stale_session_lock(key)  # as handle_message does before the same test
+        if key in self._active_sessions:
             logger.debug("Dropping reaction on message %s: the agent is busy", msg_id)
             return
         await self.handle_message(turn)
