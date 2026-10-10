@@ -9,197 +9,87 @@ action`, and get as much space as people need to upgrade safely.
 
 ## 2.1.0 (2026-10-10)
 
+### Breaking / requires action
+
+- **NixOS with voice calls: rebuild `~/.hermes/aiortc-env`.** Calls now
+  need `numpy` in it, and its Python has to match Hermes's: 3.14 since
+  Hermes 0.21.6, 3.12 for 0.21.5. An env built with the 2.0.0 instructions
+  (Python 3.12, no `numpy`) leaves calls disabled, with an ERROR in
+  `gateway.log`; text messaging keeps working. Rerun the build command in
+  [docs/nixos-installation.md](docs/nixos-installation.md) and update the
+  `python3.x` in the `PYTHONPATH` line. Other installs get `numpy` and `av`
+  from `plugin.yaml` automatically.
+- **`stt.provider: local` calls use `stt.local.model`.** Calls used to force
+  Whisper `medium`; set `stt.local.model: medium` to keep that.
+
 ### New
 
-- **"Call me" works.** The agent is now told that it can phone you, so
-  asking it to call you rings your phone instead of getting "I can't make
-  calls". Asked from a chat, it calls that chat without needing the chat
-  token. To call you later, it schedules a cron job with the token in the
-  job's prompt. It no longer starts a second call into a chat that is
-  already on one, which used to silence the running call.
-- **Slash-command confirmations can be answered with reactions.** When
-  `/reset`, `/new`, `/undo`, `/reload-mcp` or a costly `/model` asks for
-  confirmation, react 👍 to approve once or 👎 to cancel. "Always approve"
-  turns the prompt off for good in `config.yaml`, so it stays typed-only:
-  `/always`. The same contacts as for approval prompts may react, and
-  `allow_admin_from` applies. The command's reply quotes the prompt.
-- **Questions with up to 9 choices can be answered with a reaction.** When
-  the agent asks you to pick an option, the choices are numbered 1️⃣–9️⃣;
-  react with one to answer. Typing the number, the option text or your own
-  answer still works. Multi-select questions and those with more choices
-  keep the plain numbered list.
-- **The bot now sees which message you replied to.** A quote-reply used to
-  reach Hermes as plain text, so the agent had to guess what "this" meant.
-  The quoted message (in full, if it is from the same chat) and its author
-  are now passed on, for text, voice, image and file messages alike.
+- **"Call me" works.** Asked in a chat, the agent rings that chat; it can
+  also schedule a call for later, and never starts a second call into a chat
+  that is already on one.
+- **Answer with reactions.** 👍 approves and 👎 cancels slash-command
+  confirmations (`/reset`, `/new`, `/model`, …), and 1️⃣–9️⃣ picks an option
+  when the agent asks you to choose.
+- **The bot sees which message you replied to.** Quote-replies pass the
+  quoted message and its author to Hermes, for text, voice, image and file
+  messages.
 - **The text chat can look up what was said on a call.** The "call ended"
-  note sent to the text-chat session now names the call's Hermes session,
-  so the bot reads the transcript with `session_search` instead of saying it
-  has no record of the call. Shared-history mode is unchanged.
-- **Optional message editing, experimental** (`DELTACHAT_MESSAGE_EDITING`,
-  off by default). Hermes can then edit streamed replies, tool progress,
-  heartbeats and approval prompts in place. Every edit is an email through
-  the chatmail relay, so in-progress edits are limited to one per
-  `DELTACHAT_EDIT_MIN_INTERVAL` seconds (default 3) for the whole account;
-  the final text always goes out. See the README. (#54)
+  note names the call's session, so the bot can read the transcript when
+  asked.
+- **Optional message editing, experimental** (`DELTACHAT_MESSAGE_EDITING`).
+  Streamed replies, tool progress and approval prompts are edited in place,
+  at most once per `DELTACHAT_EDIT_MIN_INTERVAL` seconds (default 3). With
+  editing off, replies are no longer streamed and arrive as one message.
 
 ### Webxdc skill
 
-The bundled webxdc skill was reworked throughout, so apps the bot builds
-are far more likely to work on the first try.
+The bundled webxdc skill was reworked, so apps the bot builds work the first
+time far more often.
 
-- **The agent can load the skill again.** The system prompt told it to
-  call `skill_view('plugin:deltachat-platform:webxdc-converter')`, which
-  Hermes reads as a plugin called `plugin`, so the call returned "Skill not
-  found". The prompt now uses `deltachat-platform:webxdc-converter`, the
-  name Hermes actually registers the skill under.
-- **The skill shows a description in the skill list.** Hermes doesn't read
-  it from `SKILL.md` for plugin skills, so the adapter now passes it along.
-  It also says it is the Delta Chat-specific webxdc skill, to tell it apart
-  from any other webxdc skill installed alongside it.
-- **The `.xdc` is checked before it is sent.** One script now packages the
-  app and reports an error if `index.html` isn't at the archive root, if
-  `webxdc.js` was packaged, or if the app loads anything from the network
-  (CDN scripts and modules, web fonts — webxdc apps are offline, so these
-  break the app). It leaves out dotfiles and `node_modules` and notes
-  archives over 1 MB and 10 MB. The skill also lists what the check can't
-  see.
-- **Apps load `webxdc.js`.** The skill now says plainly that any app using
-  the webxdc API must load `<script src="webxdc.js"></script>` before its
-  own scripts. The messenger provides the file, so it is still not
-  packaged, but without the tag `window.webxdc` is undefined.
-- **Apps have an icon.** The skill generated an `icon.svg`, but messengers
-  only use `icon.png` or `icon.jpg`. It now generates a 256 px PNG.
-- **The API reference matches the webxdc spec.** `desktopApiVersion`,
-  `getAllInstanceIds()` and `sendToInstance()` don't exist and are gone;
-  the signatures of `setUpdateListener`, `sendToChat`, `importFiles` and
-  the realtime channel are fixed, and the reference links the upstream
-  spec pages. It also lists Delta Chat's actual update limits and quirks.
-- **Guidance on structuring shared state.** For multi-user apps built on
-  plain `sendUpdate`, the skill compares last-writer-wins (one key per
-  user, e.g. polls) with event sourcing (send actions and replay them,
-  e.g. games), and points to Yjs when several people edit the same data at
-  once. When the bot sends a new version of a shared-state app it tells
-  you the old data stays in the previous message.
-- **Runtime constraints.** The skill tells the bot not to use
-  `alert`/`confirm`/`prompt` or `window.open`, and to show an error
-  instead of a blank page when the app fails to start.
-- **Safer, more maintainable app content.** The bot shows user text with
-  `textContent` instead of unescaped `innerHTML` (XSS in shared apps),
-  ships baked-in data as a JSON file loaded with `fetch`, and says when
-  that data will go stale. When it has an image generator it may draw the
-  icon with it; the skill explains how to prompt it and how to catch an
-  image whose format doesn't match its file name. The bot says when it
-  hasn't opened an app itself, and makes changes in the sources rather than
-  only inside the `.xdc`.
+- **The agent finds and loads the skill reliably.** It is called by the name
+  Hermes registers (`deltachat-platform:webxdc-converter`) and shows a
+  description in the skill list.
+- **Every `.xdc` is checked before sending.** One script packages the app and
+  flags a misplaced `index.html`, a bundled `webxdc.js` and anything loaded
+  from the network.
+- **The API reference matches the webxdc spec** and lists Delta Chat's update
+  limits and quirks; apps always load `webxdc.js` and get a real PNG icon.
+- **Safer, sturdier apps.** User text is escaped, baked-in data ships as a
+  JSON file, the skill explains last-writer-wins vs. event sourcing for shared
+  state, and the bot says when it hasn't opened an app itself.
 
 ### Fixed
 
-- **Streamed replies in a call were cut short or never spoken.** With
-  streaming on, the bot spoke only the end of its reply, or nothing when the
-  reply was short. It now speaks the whole reply. What it says before using a
-  tool ("Let me check…") can now be spoken too, always before the answer,
-  never over it.
-- **Voice calls never heard the caller on a plain install.** The call code
-  needs `numpy`, which neither aiortc nor Hermes's default install brings
-  in; the receive loop died on its first frame without a log line, so the
-  bot greeted and then never answered. `plugin.yaml` now declares `numpy`
-  and `av`, and a crash in a call's background task is logged at ERROR.
-- **A missing aiortc, av or numpy no longer stops the whole adapter.** Text
-  messaging connects and calls are disabled, with an ERROR saying what to
-  install; incoming calls are ended instead of ringing out, and
-  `dc_start_call` says why it can't call.
-- **Call problems on a fresh instance are now visible in `gateway.log`.**
-  A failed transcription (no STT provider, failed model download) is logged
-  at ERROR with Hermes's reason instead of being dropped at DEBUG. So are a
-  missing TURN server and an SDP of ours without a relay candidate, which
-  behind NAT mean the call will not connect.
-- **The first incoming call on a fresh install had no Whisper warmup.** It
-  wrote into a folder that didn't exist yet. The warmup also no longer runs
-  on the call's event loop, where Hermes installing faster-whisper on first
-  use stalled call setup for minutes.
-- **"OK", "Thanks" and "Bye" spoken in a call were thrown away** as Whisper
-  hallucinations, so a plain "bye" couldn't end the call. Calls only
-  transcribe audio that is clearly speech, so these now reach the agent, also
-  combined ("Okay, bye."). The same phrase repeated is still dropped.
-- **Declined callers now hear back.** A call from a contact Hermes doesn't
-  know yet used to be hung up silently. The call is still declined, but the
-  caller now gets what an unknown contact's message gets: a pairing code by
-  default, or the decline text, or nothing, per `unauthorized_dm_behavior`,
-  rate-limited by Hermes. With `ignore`, an unknown caller now also shows up
-  as Hermes's "Unauthorized user" warning and its one-time notice in the
-  home channel, like an unknown sender's message does.
-- **An incoming call was answered when the authorization check failed.**
-  If Hermes' check raised an error or returned no clear answer, the call
-  was picked up anyway. It is now declined, as approval reactions already
-  were.
-- **Calls whose peer vanished never ended.** A caller who lost network or
-  had the app killed left the call open forever: replies kept going to
-  speech, the per-call model stayed active and `dc_end_call` could pick
-  the dead call. Such calls now end after about 30 seconds.
-- **`dc_end_call` could hang up a call in another chat.** With calls in
-  several chats at once, "bye" in one could end another. It now ends the
-  call of the chat that asked.
-- **Calls failed with "Invalid model: medium" on cloud STT providers.** With
-  `DELTACHAT_CALL_STT_VOXTRAL` off, or after a Voxtral error, call audio was
-  sent with the local Whisper size `medium` to whatever `stt.provider` is
-  set. With `mistral` (or any other cloud provider) every utterance failed,
-  and the bot never answered in calls. Calls now use the configured provider
-  and model, the same as voice messages. The Voxtral shortcut honours
-  `stt.mistral.model`. If you use `stt.provider: local`, calls now use
-  `stt.local.model` instead of a forced `medium`. Set it explicitly if you
-  relied on that.
-- **Smaller call fixes.** Redialling with `DELTACHAT_CALL_SHARED_HISTORY`
-  on no longer drops the new call's `DELTACHAT_CALL_MODEL`, and the
-  greeting of an outgoing call that died while connecting is no longer
-  sent as a chat message.
-- **A hung `deltachat-rpc-server` could freeze the whole gateway.**
-  Shutting down waited on the server without a limit, on the gateway's
-  event loop, so every platform stalled with it. The server now gets the
-  30 s Delta Chat core needs to close IMAP/SMTP cleanly, off the event
-  loop, and is killed if it still won't exit. A malformed line from the
-  server no longer leaves a dead server that made every later call hang.
-- **Attachments could arrive twice.** A reply that sent a file with a
-  `MEDIA:` tag and also mentioned its path ("saved at /…/app.xdc"), or
-  mentioned one file under two spellings (`~/app.xdc` and its full path, or
-  through a symlink), delivered it once per mention. It now goes out once,
-  for every file type.
-- **A webxdc app in the Docker sandbox could be re-sent on later replies.**
-  A bare `/workspace/app.xdc` mention was sent without checking, so when
-  Hermes could not tell it had already been delivered, the app went out
-  again. A bare `/workspace/…` path is now left as text, as it already was
-  for other file types; the agent sends files with a `MEDIA:` tag, as the
-  webxdc skill tells it to.
-- **Text after a `MEDIA:` tag for a `.xdc` could vanish.** In
-  "MEDIA:/workspace/a b.xdc and /workspace/c.xdc" the tag ran on to the last
-  `.xdc` of the line, so if the file could not be sent the rest of the
-  sentence was cut from the reply.
-- **Attachments over Hermes' size cap still reached the agent.** When
-  Hermes refused to cache a file over `gateway.max_inbound_media_bytes`
-  (default 128 MiB), the adapter passed the raw Delta Chat file instead, and
-  documents and videos were never checked. Oversized attachments now reach
-  the agent as text with a note that the file was too large. Set the option
-  to 0 to turn the cap off. Incoming videos now reach Hermes as videos
-  rather than documents.
+- **Voice calls work on a fresh install.** Missing `numpy` left calls deaf,
+  the first call got no Whisper warmup, and "OK", "Thanks" or "Bye" were
+  dropped as hallucinations. Missing call libraries now disable only calls,
+  and STT, TURN and crash problems are logged at ERROR.
+- **Calls speak the whole streamed reply.** With streaming on, only its end
+  or nothing was spoken; "Let me check…" before a tool now plays first, never
+  over the answer.
+- **Calls on cloud STT providers failed with "Invalid model: medium".** Calls
+  now use the configured STT provider and model, like voice messages.
+- **Calls end when they should.** A call whose peer vanished ends after about
+  30 s, and `dc_end_call` hangs up the call of the chat that asked, not one in
+  another chat.
+- **Call authorization.** A call is declined when Hermes' authorization check
+  fails, and declined callers get the same reply as an unknown contact's
+  message (a pairing code by default).
+- **A hung `deltachat-rpc-server` no longer freezes the gateway** on shutdown
+  or after a malformed line; it gets 30 s to close cleanly, then is killed.
+- **Attachments are sent once.** A file mentioned twice, under two spellings
+  or as a bare `/workspace/…` path is no longer sent again, and text after a
+  `MEDIA:` tag is kept.
+- **Hermes' inbound size cap (`gateway.max_inbound_media_bytes`) applies to
+  every attachment.** Oversized files reach the agent as a note, and videos
+  arrive as videos instead of documents.
 
 ### Changed
 
-- **Long replies arrive as several messages instead of one folded message.**
-  Replies over 40 lines used to be sent as one message with an HTML part,
-  showing only the start until you tapped "Show full message". Delta Chat
-  shows a text in full only up to 38 lines (a line over 100 characters
-  counts as several), so the adapter now splits longer replies into
-  messages of at most that size, breaking at line ends. This happens while
-  streaming too, and for tool-progress messages.
-- **Message content stays out of the default logs.** Captions, call
-  transcripts, file names of received documents and raw RPC responses
-  were written to `gateway.log`/`agent.log` at INFO or WARNING. They are
-  now logged only at DEBUG; IDs, sizes and errors stay at INFO for
-  troubleshooting.
-- **Hermes no longer streams replies on Delta Chat while editing is off.**
-  Before, streaming (if enabled in Hermes) sent the first chunk with a `▉`
-  cursor that could never be removed, then the rest as a second message.
-  Now the reply arrives as one message.
+- **Long replies are split into several messages** of at most 38 lines,
+  instead of one folded "Show full message".
+- **Message content stays out of the default logs.** Captions, transcripts
+  and file names are logged only at DEBUG.
 
 ## 2.0.0 (2026-10-05)
 

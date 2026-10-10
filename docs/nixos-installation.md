@@ -69,11 +69,14 @@ library paths.
 
 ### Solution: nix-managed Python environment
 
-Build a Python 3.12 environment containing aiortc and all its dependencies
+Build a Python environment containing aiortc and all its dependencies
 from **the nixpkgs your installed Hermes was built with** — not your system
 `<nixpkgs>`. The env is loaded into the Hermes process, so it has to agree with
-Hermes on two things:
+Hermes on three things:
 
+- **Python version** — Hermes 0.21.6 and newer run on Python 3.14, 0.21.5 on
+  3.12. Compiled modules built for one don't load into the other, and calls
+  stay disabled.
 - **glibc** — a newer nixpkgs links PyAV/ALSA against a newer glibc, and the
   import dies with ``version `GLIBC_2.4x' not found``.
 - **cryptography** — Hermes imports its own `cryptography` first; a pyOpenSSL
@@ -95,7 +98,8 @@ nix build --impure -o ~/.hermes/aiortc-env --expr '
       (e: builtins.match ".*NousResearch/hermes-agent.*" (e.originalUrl or "") != null)
       (builtins.attrValues manifest.elements));
     pkgs = import (builtins.getFlake hermes.url).inputs.nixpkgs { system = builtins.currentSystem; };
-  in pkgs.python312.withPackages (ps: [ ps.aiortc ps.numpy ])'
+    py = "python314";  # "python312" for Hermes 0.21.5
+  in pkgs.${py}.withPackages (ps: [ ps.aiortc ps.numpy ])'
 ```
 
 If Hermes comes from a NixOS or home-manager flake input instead of `nix
@@ -105,8 +109,8 @@ profile`, replace `hermes.url` with that input's locked ref (e.g.
 Then add the environment's site-packages to Hermes's `PYTHONPATH` in `~/.hermes/.env`:
 
 ```bash
-# Add this line (or prepend to existing PYTHONPATH):
-PYTHONPATH=/home/$USER/.hermes/aiortc-env/lib/python3.12/site-packages:/home/$USER/.hermes/python-packages
+# Add this line (or prepend to existing PYTHONPATH); python3.12 for Hermes 0.21.5:
+PYTHONPATH=/home/$USER/.hermes/aiortc-env/lib/python3.14/site-packages:/home/$USER/.hermes/python-packages
 ```
 
 Restart Hermes — voice call support is now active.
@@ -118,8 +122,8 @@ Restart Hermes — voice call support is now active.
 HERMES_PYTHON=$(nix-store -qR "$(readlink -f "$(which hermes)")" \
   | grep -- '-hermes-agent-env$')/bin/python3
 
-PYTHONPATH=~/.hermes/aiortc-env/lib/python3.12/site-packages:~/.hermes/python-packages \
-  $HERMES_PYTHON -c "import aiortc, av; from OpenSSL import crypto; print('aiortc', aiortc.__version__)"
+PYTHONPATH=~/.hermes/aiortc-env/lib/python3.14/site-packages:~/.hermes/python-packages \
+  $HERMES_PYTHON -c "import aiortc, av, numpy; from OpenSSL import crypto; print('aiortc', aiortc.__version__)"
 ```
 
 ### Keeping it up to date
