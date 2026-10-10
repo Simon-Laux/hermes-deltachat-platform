@@ -256,6 +256,10 @@ class HermesAudioTrack(AudioStreamTrack):
     def played_count(self) -> int:
         return self._played_count
 
+    @property
+    def queued_count(self) -> int:
+        return self._queue.qsize()
+
     def is_speaking(self) -> bool:
         """True if there are queued TTS frames still to play."""
         return not self._queue.empty()
@@ -1603,7 +1607,8 @@ class CallManager:
         session.interrupted = False
         session.hangup_cancelled = False
         session.is_responding = True
-        session.resp_start_frames = track.played_count
+        # The previous reply may still be queued; this one starts playing after it.
+        session.resp_start_frames = track.played_count + track.queued_count
         session.tts_checkpoints = []
 
         # Spoken-goodbye hangup: the marker rides in the reply text, so ending a

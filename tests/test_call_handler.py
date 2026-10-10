@@ -287,6 +287,15 @@ class TestHangupMarker:
                              mgr._play_response("12", " ".join(answer)))
         assert spoken == first + answer
 
+    @pytest.mark.asyncio
+    async def test_barge_in_counts_from_after_the_previous_reply(self, monkeypatch):
+        """The answer is queued behind the line before the tool; frames still
+        left of that line are not part of what the caller heard of the answer."""
+        mgr, session, _ = self._manager(monkeypatch)
+        session.outgoing_track.enqueue_tts_frames([object()] * 100)
+        await mgr._play_response("12", "It is sunny in Berlin right now.")
+        assert session.resp_start_frames == 100
+
 
 class TestIncomingCallAuthorization:
     """Calls from contacts Hermes wouldn't talk to are declined, not answered."""

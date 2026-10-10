@@ -1561,8 +1561,9 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 # turn errors — and marks only final replies with
                 # metadata["notify"] (base.py `_mark_notify_metadata`; the A2A
                 # adapter filters on the same flag). When streaming, the text
-                # before a tool call is sealed as final too, so it is spoken. Checked before the call-ack
-                # drop so a status line can't use up that one-shot drop.
+                # before a tool call is sealed as final too, so it is spoken.
+                # Checked before the call-ack drop so a status line can't use up
+                # that one-shot drop.
                 if not (metadata or {}).get("notify"):
                     logger.debug("Call %s: not speaking non-final send: %r",
                                  chat_id, (content or "")[:80])
