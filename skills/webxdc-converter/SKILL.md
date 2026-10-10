@@ -73,7 +73,7 @@ All webxdc apps must be **fully self-contained** — no external CDN links, no r
 When converting an existing artifact or HTML file:
 
 1. **Inline or bundle all external dependencies** — no CDN links. For small apps, inline CSS into `<style>` and JS into `<script>`. For larger apps with multiple files, just include the files in the ZIP (subdirectories work fine).
-2. **Remove any fetch/XHR calls** to external URLs — no internet access.
+2. **Replace or remove calls to external servers** — no internet access. Many server features can be remade with the webxdc API: shared state, scores, chat-wide lists and multiplayer via `sendUpdate` or `joinRealtimeChannel`, sharing results via `sendToChat`, loading user files via `importFiles`. If a feature can't be remade (live data from a third-party API, AI calls, accounts on an outside service), ask the user whether to drop it or rework it before you remove it.
 3. **Remove localStorage/sessionStorage for anything important** — it works in practice, but can be cleared by OS or messenger updates at any time and doesn't sync across devices. Fine for ephemeral UI preferences (current tab, theme). For anything the user would care about losing, use `sendUpdate` instead (Level 1+).
 4. **Ensure everything is in the ZIP** — fonts, images, all assets.
 5. **If the app uses the webxdc API, add `<script src="webxdc.js"></script>`** before your own scripts — the one reference to a file not in the ZIP. The messenger provides it; see "Rule: always load webxdc.js" below.
@@ -166,12 +166,12 @@ with zipfile.ZipFile(out) as zf:
         notes.append("no icon.png or icon.jpg at the archive root")
     url = r"""(?:https?:)?//[^"'\s>)]+"""
     markup = [  # in .html and .css
-        r"""<(?:script|img|iframe|source|video|audio|track|embed|object)\b[^>]*?(?<![\w-])(?:src|srcset|data|poster)\s*=\s*["']?(?:[^"'>]*[\s,])?""" + url,
+        r"""<(?:script|img|iframe|source|video|audio|track|embed|object)\b[^>]*?(?<![\w-])(?:src|srcset|data|poster)\s*=\s*["']?(?:[^"'>]*[\s,])?(?<!base64,)""" + url,  # base64 data can start with //, e.g. inline MP3
         r"""<link\b(?=[^>]*\brel\s*=\s*["']?[^"'>]*\b(?:stylesheet|icon|preload|modulepreload|manifest))[^>]*?\bhref\s*=\s*["']?""" + url,
         r"""url\(\s*["']?""" + url,
         r"""@import\s+["']""" + url,
     ]
-    imports = [r"""\bfrom\s*["']""" + url, r"""\bimport\s*\(?\s*["']""" + url]  # in .html and .js
+    imports = [r"""\b(?:import|export)\b[^;"'()]*?\bfrom\s*["']""" + url, r"""\bimport\s*\(?\s*["']""" + url]  # in .html and .js
     for n in names:
         patterns = (markup if n.endswith((".html", ".htm", ".css")) else []) + (imports if n.endswith((".html", ".htm", ".js", ".mjs")) else [])
         text = zf.read(n).decode("utf-8", "replace") if patterns else ""
@@ -196,7 +196,7 @@ EOF
 
 For a bundled app, run the build first and pass the build output instead: `python3 - myapp/dist myapp.xdc`.
 
-Fix every ERROR and package again. The network check only finds absolute URLs written in tags, CSS and ES module imports. It does not see requests made from JavaScript, so before sending, search all of the app's JavaScript (`.js` files and inline `<script>` blocks) for `fetch(`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `navigator.sendBeacon` and URLs assembled from strings (`"https://" + host`, template literals). `fetch` and `XMLHttpRequest` may load files inside the `.xdc` by relative path; every other hit must be removed — an external request fails in the chat even though the app works in a browser.
+Fix every ERROR and package again. The messenger blocks network access, so anything loaded from outside the `.xdc` (a CDN script, a web font, an API call) just fails, even though the app works in a browser. The check catches URLs in tags, CSS and imports, but not requests made from JavaScript: search the JS for `http://`, `https://`, `ws://`, `wss://` and `"//`, and make sure the app doesn't need any of them to work. Bundle what it needs into the `.xdc`; for features that need a server, see "Replace or remove calls to external servers" above.
 
 ### Size guidance
 
