@@ -272,6 +272,21 @@ class TestHangupMarker:
         assert spoken == ["Sure, here is a joke."]
         mgr._hangup_session.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_two_replies_are_spoken_one_after_the_other(self, monkeypatch):
+        """A streamed call turn speaks the line before a tool, then the answer;
+        with a fast tool both arrive at once."""
+        import time
+        mgr, _, spoken = self._manager(monkeypatch)
+        tts = sys.modules["tools.tts_tool"]
+        fast = tts.text_to_speech_tool
+        monkeypatch.setattr(tts, "text_to_speech_tool", lambda s: time.sleep(0.02) or fast(s))
+        first = ["Let me check the weather for you.", "This will take a moment or two."]
+        answer = ["It is sunny in Berlin right now.", "The temperature is twenty degrees."]
+        await asyncio.gather(mgr._play_response("12", " ".join(first)),
+                             mgr._play_response("12", " ".join(answer)))
+        assert spoken == first + answer
+
 
 class TestIncomingCallAuthorization:
     """Calls from contacts Hermes wouldn't talk to are declined, not answered."""
