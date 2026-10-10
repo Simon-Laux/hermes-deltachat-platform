@@ -2166,7 +2166,8 @@ body {{
         chars = list(text)
         for start, end in sorted(spans, reverse=True):
             del chars[start:end]
-        return "".join(chars).strip()
+        # the base extractors collapse the blank lines a removed path leaves
+        return re.sub(r'\n{3,}', '\n\n', "".join(chars)).strip()
 
     @staticmethod
     def _xdc_path_is_deliverable(path: str) -> bool:
@@ -2178,10 +2179,11 @@ body {{
         attachment.
 
         Docker /workspace/ paths never exist on the host, so a bare mention
-        of one stays text; the agent sends those with a MEDIA: tag.  Taking
-        them on faith re-sent the app on every later reply that mentioned
-        it: Hermes's "already delivered" check compares the translated host
-        path against the /workspace/ path recorded in the history.
+        of one stays text, as it does for every other file type; the agent
+        sends those with a MEDIA: tag.  Taking them on faith re-sent the app
+        whenever a later reply mentioned it and Hermes's "already delivered"
+        check failed to map the /workspace/ path in the history to the same
+        host path.
         """
         try:
             return os.path.isfile(os.path.expanduser(path))
@@ -2211,7 +2213,8 @@ body {{
         # .xdc tags (wrong extension set), so nothing is missed, and the spans
         # stay valid for the deletion below.
         xdc_re = re.compile(
-            r'[`"\']?MEDIA:\s*[`"\']?((?:~/|/)[\w./\- ]+\.xdc)[`"\']?',
+            # lazy, so "MEDIA:/w/a b.xdc and /w/c.xdc" stops at the first .xdc
+            r'[`"\']?MEDIA:\s*[`"\']?((?:~/|/)[\w./\- ]+?\.xdc)(?![\w/-])[`"\']?',
             re.IGNORECASE,
         )
         spans = []
@@ -2243,20 +2246,25 @@ body {{
         spans = []
         for path, span in self._find_xdc_paths(xdc_re, remaining):
             if not self._xdc_path_is_deliverable(path):
+                logger.info("Skipping bare .xdc path in reply (no file on disk): %s", path)
                 continue
+            # expanded like the base's, so ~/a.xdc and its full path are one file
+            path = os.path.expanduser(path)
             if path not in files:
                 files.append(path)
             spans.append(span)
 
         return files, self._delete_spans(remaining, spans)
 
-    async def _deliver_media_attachments(self, event, media_files, local_files, *args, **kwargs):
-        """Skip bare paths that a MEDIA: tag in the same reply already sends.
+    async def _deliver_media_attachments(self, event, media_files, local_files, **kwargs):
+        """Send each file once, however many times the reply names it.
 
         "MEDIA:/x/app.xdc … saved at /x/app.xdc" puts the file in both lists,
-        and Hermes sends each list in full, so the user got it twice.  This is
-        the one hook that sees both lists; by now both hold validated host
-        paths, so a /workspace/ tag compares equal to its host-side mention.
+        and Hermes sends each list in full, so the user got it twice; two
+        spellings of one file (~/ and absolute, a symlink) did the same within
+        a list.  This is the one hook that sees both lists.  Hermes has
+        validated and resolved every path by now; realpath() is a cheap guard
+        in case a future core hands them over unresolved.
         """
         def key(path):
             try:
@@ -2264,10 +2272,20 @@ body {{
             except (OSError, RuntimeError, ValueError):
                 return path
 
-        tagged = {key(p) for p, _ in media_files or []}
-        local_files = [p for p in local_files or [] if key(p) not in tagged]
+        seen = set()
+
+        def first(path):
+            k = key(path)
+            if k in seen:
+                return False
+            seen.add(k)
+            return True
+
+        media_files = [(p, v) for p, v in media_files or [] if first(p)]
+        local_files = [p for p in local_files or [] if first(p)]
+        # by keyword: works whether core declares the lists positional or keyword-only
         return await super()._deliver_media_attachments(
-            event, media_files, local_files, *args, **kwargs)
+            event, media_files=media_files, local_files=local_files, **kwargs)
 
     def _rpc_server_exit_code(self) -> Optional[int]:
         """Exit code of the deltachat-rpc-server subprocess, or None if alive.

@@ -62,12 +62,7 @@ class TestExtractLocalFiles:
         assert "/workspace/myapp.xdc" in remaining
 
     def test_bare_workspace_xdc_stays_text(self, platform_config):
-        """A bare /workspace/ path is not delivered; the agent uses MEDIA:.
-
-        Taking it on faith re-sent the app on every later reply that
-        mentioned it: Hermes's "already delivered" check compares the
-        translated host path with the /workspace/ path in the history.
-        """
+        """A bare /workspace/ path is not delivered; the agent uses MEDIA:."""
         adapter = _make_adapter(platform_config)
         content = "Built it: /workspace/app.xdc done."
 
@@ -75,6 +70,29 @@ class TestExtractLocalFiles:
 
         assert files == []
         assert remaining == content
+
+    def test_home_and_absolute_spelling_are_one_file(
+        self, platform_config, tmp_path, monkeypatch
+    ):
+        monkeypatch.setenv("HOME", str(tmp_path))
+        (tmp_path / "app.xdc").write_bytes(b"PK\x03\x04")
+        adapter = _make_adapter(platform_config)
+
+        files, remaining = adapter.extract_local_files(
+            f"See ~/app.xdc or {tmp_path}/app.xdc."
+        )
+
+        assert files == [str(tmp_path / "app.xdc")]
+        assert "app.xdc" not in remaining
+
+    def test_removed_path_leaves_no_blank_line_run(self, platform_config, tmp_path):
+        adapter = _make_adapter(platform_config)
+        app = tmp_path / "app.xdc"
+        app.write_bytes(b"PK\x03\x04")
+
+        _files, remaining = adapter.extract_local_files(f"a\n\n{app}\n\nb")
+
+        assert remaining == "a\n\nb"
 
     def test_removal_leaves_other_occurrences_alone(self, platform_config, tmp_path):
         """Deletion is span-based, not a global str.replace()."""
@@ -123,6 +141,24 @@ class TestExtractMedia:
 
         assert media == [("/workspace/myapp.xdc", False)]
         assert "MEDIA:" not in remaining
+
+    def test_media_xdc_stops_at_first_xdc(self, platform_config):
+        """A spaced path must not run on to a later .xdc and eat the prose."""
+        adapter = _make_adapter(platform_config)
+
+        media, remaining = adapter.extract_media(
+            "MEDIA:/workspace/a b.xdc and /workspace/c.xdc too"
+        )
+
+        assert media == [("/workspace/a b.xdc", False)]
+        assert remaining == "and /workspace/c.xdc too"
+
+    def test_media_xdc_before_sentence_dot(self, platform_config):
+        adapter = _make_adapter(platform_config)
+
+        media, _remaining = adapter.extract_media("Done: MEDIA:/workspace/app.xdc.")
+
+        assert media == [("/workspace/app.xdc", False)]
 
     def test_ignores_media_xdc_inside_code_block(self, platform_config):
         """A MEDIA: tag shown as documentation is not a delivery request."""
@@ -177,14 +213,14 @@ class TestDeliveryFiltersNotOverridden:
         adapter.filter_media_delivery_paths(
             [("/workspace/clip.mp4", False)], session_key=key
         )
-        adapter.filter_local_delivery_paths(["/workspace/app.xdc"], session_key=key)
+        adapter.filter_local_delivery_paths(["/workspace/report.pdf"], session_key=key)
 
         assert seen["media"] == ([("/workspace/clip.mp4", False)], key)
-        assert seen["local"] == (["/workspace/app.xdc"], key)
+        assert seen["local"] == (["/workspace/report.pdf"], key)
 
 
 class TestNoDoubleDelivery:
-    """A file named by a MEDIA: tag and as a bare path in one reply goes out once."""
+    """A file named more than once in one reply goes out once."""
 
     async def _deliver(self, adapter, media, local):
         await adapter._deliver_media_attachments(
@@ -224,12 +260,24 @@ class TestNoDoubleDelivery:
     @pytest.mark.asyncio
     async def test_other_bare_paths_are_kept(self, platform_config, tmp_path):
         adapter = _make_adapter(platform_config)
-        a, b = str(tmp_path / "a.pdf"), str(tmp_path / "b.pdf")
+        a, b, c = (str(tmp_path / n) for n in ("a.pdf", "b.pdf", "c.pdf"))
 
-        media, local, _ = await self._deliver(adapter, [(a, False)], [b, a, b])
+        media, local, _ = await self._deliver(adapter, [(a, False)], [b, a, c])
 
         assert media == [(a, False)]
-        assert local == [b, b]  # only the tagged file is dropped, order kept
+        assert local == [b, c]  # only the tagged file is dropped, order kept
+
+    @pytest.mark.asyncio
+    async def test_repeats_within_a_list_are_dropped(self, platform_config, tmp_path):
+        """Two spellings that Hermes resolves to one path, in either list."""
+        adapter = _make_adapter(platform_config)
+        a, b = str(tmp_path / "a.png"), str(tmp_path / "b.pdf")
+
+        media, local, _ = await self._deliver(
+            adapter, [(a, False), (a, False)], [b, b])
+
+        assert media == [(a, False)]
+        assert local == [b]
 
     @pytest.mark.asyncio
     async def test_empty_lists(self, platform_config):

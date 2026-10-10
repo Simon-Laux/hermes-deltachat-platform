@@ -105,7 +105,9 @@ def contract():
         "base_params_accepted": all(p in ours for p in base),
         "sendresult_fields": [f.name for f in dataclasses.fields(SendResult)],
         # our override drops bare paths a MEDIA: tag already sends
-        "deliver_media_params": params(BasePlatformAdapter, "_deliver_media_attachments")[:4],
+        "deliver_media_params": [
+            (n, p.kind.name) for n, p in inspect.signature(
+                BasePlatformAdapter._deliver_media_attachments).parameters.items()][:4],
     }
 
 
