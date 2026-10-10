@@ -2996,7 +2996,7 @@ def register_platform(ctx):
             "Location messages can be sent to share points of interest on a map. "
             "You CAN build and send webxdc mini apps and other files (PDF, HTML, etc.). "
             "MANDATORY: before attempting to build any webxdc app, you MUST first call "
-            "skill_view('plugin:deltachat-platform:webxdc-converter') to load the build instructions. "
+            "skill_view('deltachat-platform:webxdc-converter') to load the build instructions. "
             "For file delivery: write output files to your current working directory "
             "(run `pwd` to find it), NOT /tmp/. "
             "Then reference the file by ABSOLUTE path in a MEDIA directive — e.g. 'MEDIA:/abs/path/app.xdc'. "
