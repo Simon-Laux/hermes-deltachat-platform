@@ -13,8 +13,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: "3.12"  # what Hermes runs on
-      # Hermes itself is mocked in tests/conftest.py; aiortc/numpy are for the call tests
-      - run: pip install pytest pytest-asyncio aiortc numpy
+      # Hermes itself is mocked in tests/conftest.py; aiortc/numpy are for the call tests;
+      # deltachat-rpc-server (pinned like plugin.yaml) runs tests/test_core_offline.py
+      - run: pip install pytest pytest-asyncio aiortc numpy "deltachat-rpc-server>=2.51.0,<2.61"
       # The slow WebRTC loopback tests are excluded by tests/pytest.ini (`-m "not slow"`)
       - run: python -m pytest tests/
         env:
