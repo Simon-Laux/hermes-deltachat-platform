@@ -135,7 +135,7 @@ except Exception:
 EOF
 ```
 
-Replace `AB` with the app's initials and choose a fitting background color. Without Pillow the icon is a plain colored square.
+Replace `AB` with the app's initials (one or two letters, more don't fit) and choose a fitting background color. Without Pillow the icon is a plain colored square.
 
 ### Create and check the .xdc file
 
@@ -145,12 +145,14 @@ A `.xdc` file is a ZIP archive — not tar or tar.gz, webxdc clients will not op
 python3 - myapp myapp.xdc << 'EOF'
 import os, re, sys, zipfile
 src, out = sys.argv[1], sys.argv[2]
+if not os.path.isdir(src):
+    sys.exit(f"ERROR: {src} is not a directory")
 with zipfile.ZipFile(out, "w", zipfile.ZIP_DEFLATED) as zf:
     for root, dirs, files in os.walk(src):
         dirs[:] = sorted(d for d in dirs if not d.startswith(".") and d != "node_modules")
         for name in sorted(files):
-            if not name.startswith("."):
-                path = os.path.join(root, name)
+            path = os.path.join(root, name)
+            if not name.startswith(".") and not os.path.samefile(path, out):
                 zf.write(path, os.path.relpath(path, src))
 
 errors, notes = [], []
@@ -162,11 +164,19 @@ with zipfile.ZipFile(out) as zf:
         errors.append("the archive contains webxdc.js; the messenger provides that file")
     if not {"icon.png", "icon.jpg"} & set(names):
         notes.append("no icon.png or icon.jpg at the archive root")
+    url = r"""(?:https?:)?//[^"'\s>)]+"""
+    markup = [  # in .html and .css
+        r"""<(?:script|img|iframe|source|video|audio|track|embed|object)\b[^>]*?(?<![\w-])(?:src|srcset|data|poster)\s*=\s*["']?(?:[^"'>]*[\s,])?""" + url,
+        r"""<link\b(?=[^>]*\brel\s*=\s*["']?[^"'>]*\b(?:stylesheet|icon|preload|modulepreload|manifest))[^>]*?\bhref\s*=\s*["']?""" + url,
+        r"""url\(\s*["']?""" + url,
+        r"""@import\s+["']""" + url,
+    ]
+    imports = [r"""\bfrom\s*["']""" + url, r"""\bimport\s*\(?\s*["']""" + url]  # in .html and .js
     for n in names:
-        if n.endswith((".html", ".htm", ".css")):
-            text = zf.read(n).decode("utf-8", "replace")
-            hits = re.findall(r"""<(?:script|link|img|iframe|source)\b[^>]*?(?:src|href)\s*=\s*["']?(?:https?:)?//[^"'\s>]+|url\(\s*["']?(?:https?:)?//[^"')\s]+""", text, re.I)
-            for h in hits:
+        patterns = (markup if n.endswith((".html", ".htm", ".css")) else []) + (imports if n.endswith((".html", ".htm", ".js", ".mjs")) else [])
+        text = zf.read(n).decode("utf-8", "replace") if patterns else ""
+        for pattern in patterns:
+            for h in re.findall(pattern, text, re.I):
                 errors.append(f"{n} loads something from the network: {h[:90]}")
 size = os.path.getsize(out)
 if size > 10_000_000:
@@ -186,11 +196,11 @@ EOF
 
 For a bundled app, run the build first and pass the build output instead: `python3 - myapp/dist myapp.xdc`.
 
-Fix every ERROR and package again. The network check only sees tags and CSS in the packaged files; `fetch()` calls and URLs built in JavaScript still need your own eyes.
+Fix every ERROR and package again. The network check looks for absolute URLs in tags, CSS and ES module imports; `fetch()` calls and URLs built in JavaScript still need your own eyes.
 
 ### Size guidance
 
-Aim for under 1 MB. Under 10 MB is the practical ceiling — beyond that it becomes impractical as a chat attachment. Actual hard limits vary by messenger.
+Aim for under 1 MB; the script notes anything bigger. Under 10 MB is the practical ceiling for a chat attachment. Actual hard limits vary by messenger.
 
 ### Deliver the file
 
