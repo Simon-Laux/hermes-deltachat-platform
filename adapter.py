@@ -3065,6 +3065,8 @@ def register_platform(ctx):
             "You CAN send voice messages (use send_voice tool), videos, images, files, and delete messages. "
             "When a user sends a voice message, it is automatically transcribed — just respond to the transcribed content normally. "
             "Location messages can be sent to share points of interest on a map. "
+            "You CAN phone the user: dc_start_call rings them for a live voice call. "
+            "When they ask you to call them, use it — do not reply that you cannot make calls. "
             "You CAN build and send webxdc mini apps and other files (PDF, HTML, etc.). "
             "MANDATORY: before attempting to build any webxdc app, you MUST first call "
             "skill_view('deltachat-platform:webxdc-converter') to load the build instructions. "
@@ -3074,7 +3076,8 @@ def register_platform(ctx):
             "In the Docker sandbox the working directory is /workspace/, so there it is 'MEDIA:/workspace/app.xdc'. "
             "DC core auto-detects .xdc as webxdc — just send it as a regular file. "
             "Each message ends with a [dc:chat=<token>] metadata tag. "
-            "IGNORE this tag during normal conversation — it is only needed if you call dc_safe_rpc_call. "
+            "IGNORE this tag during normal conversation — it is only needed for dc_safe_rpc_call, "
+            "and for dc_start_call from a cron job (put it in the job's prompt). "
             "Do NOT call dc_safe_rpc_call, dc_chat_rpc_spec, or dc_rpc_spec unless the user explicitly "
             "asks for a Delta Chat-specific operation that cannot be done with the standard tools."
         ),
@@ -3344,9 +3347,17 @@ def register_rpc_tools(ctx) -> None:
         if not opening:
             return json.dumps({"error": "Provide 'opening' — the exact words to say when they pick up."})
 
-        real_chat_id = await _resolve_chat_token(adapter.rpc, adapter.account_id, chat_token)
-        if real_chat_id is None:
-            return json.dumps({"error": "Unknown chat_token — use the [dc:chat=...] value"})
+        # why: "call me" is asked in the very chat to call; making the agent
+        # copy the token over for that kept it from using the tool at all.
+        if chat_token:
+            real_chat_id = await _resolve_chat_token(adapter.rpc, adapter.account_id, chat_token)
+            if real_chat_id is None:
+                return json.dumps({"error": "Unknown chat_token — use the [dc:chat=...] value"})
+        else:
+            real_chat_id = _session_dc_chat_id()
+            if real_chat_id is None:
+                return json.dumps({"error": "No Delta Chat chat behind this turn — pass the "
+                                            "chat_token of the person to call"})
 
         try:
             msg_id = await adapter._call_manager.start_call(str(real_chat_id), opening=opening)
@@ -3504,12 +3515,15 @@ def register_rpc_tools(ctx) -> None:
         toolset="deltachat",
         schema={
             "description": (
-                "Place an outgoing voice call to a Delta Chat contact and talk to them. "
-                "Use this to proactively call someone — e.g. from a scheduled/cron task "
-                "(a reminder, an alert, a check-in). Creates the WebRTC offer, rings the "
-                "contact, and blocks until they answer (or times out if unanswered). "
-                "Once connected you speak normally; the conversation runs like an incoming "
-                "call. Identify the recipient with the chat_token from one of their messages."
+                "Phone the user: ring their Delta Chat app and talk to them in a live "
+                "voice call. Use it whenever they ask you to call them (\"call me\", "
+                "\"ring me\", \"can we talk?\", \"call me in 10 minutes\"), and to "
+                "proactively call from a scheduled/cron task (a reminder, an alert, a "
+                "check-in). Never say you cannot make phone calls — this tool does it. "
+                "Blocks until they answer (or times out if unanswered); once connected "
+                "you speak normally, as on an incoming call. "
+                "To call later, schedule a cron job whose prompt says to call with this "
+                "tool and includes the chat_token."
             ),
             "parameters": {
                 "type": "object",
@@ -3518,7 +3532,9 @@ def register_rpc_tools(ctx) -> None:
                         "type": "string",
                         "description": (
                             "The opaque chat token from the [dc:chat=...] line in a message "
-                            "from the person to call. Never use a token from another conversation."
+                            "from the person to call. Leave it out to call the chat you are "
+                            "talking in; required from a cron job. Never use a token from "
+                            "another conversation."
                         ),
                     },
                     "opening": {
@@ -3532,7 +3548,7 @@ def register_rpc_tools(ctx) -> None:
                         ),
                     },
                 },
-                "required": ["chat_token", "opening"],
+                "required": ["opening"],
             },
         },
         handler=_start_call_handler,

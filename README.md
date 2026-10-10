@@ -152,7 +152,7 @@ state from the same point in time, or clear the approvals as the error message d
 
 ### Voice Calls (WebRTC)
 - **Incoming calls**: auto-answer, live speech-to-text → AI → text-to-speech pipeline
-- **Outgoing calls**: the AI can call you from a scheduled task (`dc_start_call` tool)
+- **Outgoing calls**: the AI can call you when you ask it to, or from a scheduled task (`dc_start_call` tool)
 - Barge-in support: interrupt the AI mid-sentence and it adapts
 - Per-call isolated AI session with optional model override and system prompt
 - Optional Voxtral cloud STT for fast (~1–2s) transcription

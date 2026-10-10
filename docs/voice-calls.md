@@ -46,9 +46,11 @@ per `unauthorized_dm_behavior`.
 > aiortc to DEBUG) and the in-process loopback harness
 > (`tests/test_call_webrtc_loopback.py`, `pytest -m slow`).
 
-The bot can proactively call a contact with the **`dc_start_call`** tool — ideal
-from a scheduled/cron task: a reminder, an alert, a check-in. It takes the
-recipient's `chat_token` (from one of their messages) and a required `opening`:
+The bot can call a contact with the **`dc_start_call`** tool — when you ask it
+to ("call me"), or proactively from a scheduled/cron task: a reminder, an alert,
+a check-in. It takes a required `opening` and the recipient's `chat_token` (from
+one of their messages). Asked from a Delta Chat chat, the token can be left out
+and the bot calls that chat; a cron job has no chat behind it and must pass one:
 
 - `dc_start_call(chat_token=…, opening="Hi Simon, quick reminder to take your
   meds.")` — the `opening` is the exact words to say. It's synthesized **while
