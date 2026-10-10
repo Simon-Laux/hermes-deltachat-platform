@@ -20,7 +20,7 @@ jobs:
           changed=$(git diff --name-only "$(git merge-base "$BASE" "$HEAD")" "$HEAD")
           # Docs, tests and tooling don't change what people running the adapter get;
           # skills/**/*.md do (they steer the agent), so only top-level *.md is exempt.
-          shipped=$(echo "$changed" | grep -vE '^(tests/|docs/|\.github/|\.claude/|[^/]*\.md$|Makefile$|flake\.)' || true)
+          shipped=$(echo "$changed" | grep -vE '^(tests/|docs/|\.github/|\.claude/|[^/]*\.md$|Makefile$|flake\.|\.gitignore$)' || true)
           if [ -n "$shipped" ] && ! echo "$changed" | grep -qx CHANGELOG.md; then
             echo "::error::This PR changes shipped files but not CHANGELOG.md:"
             echo "$shipped"
