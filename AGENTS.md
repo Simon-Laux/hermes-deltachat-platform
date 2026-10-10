@@ -4,6 +4,20 @@
 
 This file is a living document. Agents should improve it over time when they discover something important that belongs here — but the bar is high: **prefer a code comment at the site where the knowledge is needed.** Only escalate to this file when the insight is cross-cutting, environmental, or genuinely has no good home in the code (e.g. nix environment quirks, RPC naming conventions, Hermes integration contracts). If it fits in a `# why:` comment next to the relevant line, put it there instead.
 
+## Workflow
+
+- **Plans get reviewed before implementation.** If a change needs a written plan, have a
+  subagent check it against the code and the installed Hermes source before writing code.
+  Long plans hide wrong assumptions about Hermes internals.
+- **Reviews cite their evidence.** A review finding needs a `file:line` and a concrete
+  failure. Claims about Hermes need a `file:line` in the installed Hermes source (see
+  "Finding Hermes Source"), and claims about RPC need the method in the spec. Drop findings
+  that can't be verified instead of passing them on.
+- **Changes are done when they are handed off.** Use the `handoff` skill
+  (`.claude/skills/handoff/`): tests, changelog, review subagents, fixing their findings,
+  PR against `main`, green CI, and a handoff message with a verdict and manual test
+  steps. Merge only when the user says so.
+
 ## Environment (NixOS)
 
 This project runs on NixOS. All tools are provided via `nix develop`. Never run `python3`, `pytest`, `pip`, or other commands bare — they won't be found.
