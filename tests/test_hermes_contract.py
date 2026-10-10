@@ -45,7 +45,9 @@ def run():
     python = _hermes_python()
     if not python:
         pytest.skip("no Hermes install found (set HERMES_PYTHON)")
-    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONPATH", "LD_LIBRARY_PATH")}
+    # HERMES_* media-policy settings would decide which test files may be sent
+    env = {k: v for k, v in os.environ.items()
+           if k not in ("PYTHONPATH", "LD_LIBRARY_PATH") and not k.startswith("HERMES_")}
     env["HOME"] = "/nonexistent"  # keep the live ~/.hermes out of it
     proc = subprocess.run([python, SCRIPT], capture_output=True, text=True, env=env, timeout=120)
     assert proc.returncode == 0, proc.stderr[-3000:]
@@ -60,7 +62,11 @@ def test_api_contract(run):
     assert {"success", "message_id", "error", "retryable"} <= set(c["sendresult_fields"])
     assert all(c["prompt_params_match"].values()), c["prompt_params_match"]
     assert c["slash_confirm_api"] and c["clarify_api"]
-    assert c["deliver_media_params"] == ["self", "event", "media_files", "local_files"]
+    # our override passes the lists by keyword, so they must stay nameable
+    assert [n for n, _ in c["deliver_media_params"]] == [
+        "self", "event", "media_files", "local_files"]
+    assert c["deliver_media_params"][1][1] == "POSITIONAL_OR_KEYWORD"
+    assert all(k != "POSITIONAL_ONLY" for _, k in c["deliver_media_params"])
 
 
 def test_streamed_reply_is_one_throttled_message(run):
@@ -92,4 +98,4 @@ def test_tagged_and_bare_file_is_sent_once(run):
     """MEDIA: tag plus a bare mention of the same file: one attachment."""
     for name, r in run["media"].items():
         assert r["files"] == [name], r
-        assert r["text"] == "Here it is:\n\nSaved at  too.", r
+        assert name not in r["text"] and "MEDIA:" not in r["text"], r

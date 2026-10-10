@@ -222,7 +222,6 @@ rather than a dump:
    from the sandbox root is the Linux-only alternative.
    We had the same pattern in our own `/workspace/` copy-to-cache remap,
    worse because the cache is trusted unconditionally; #47 removed it.
-
 5. **Busy-text merging drops the quote of every message but the first.**
    `_queue_text_debounce` (`gateway/platforms/base.py`, 0.21.5) merges
    text that arrives while the agent is busy into the first event: it
@@ -237,8 +236,18 @@ rather than a dump:
    since #87. Fix in core: carry the reply fields over together, e.g. keep
    the first quote and only take a later one when there is none yet, or
    fold each quote into the appended text.
+6. **One reply can deliver the same file twice.** `_extract_response_content`
+   (`gateway/platforms/base.py`, 0.21.5) dedups bare paths only against
+   earlier turns, never against the MEDIA: tags of the same reply, and
+   `_deliver_media_attachments` sends both lists in full. So
+   `MEDIA:/x/f.pdf … saved at /x/f.pdf` sends `f.pdf` twice on every
+   platform, as do two spellings of one file (`~/f.pdf` and its full path,
+   a symlink) that only become equal once validation resolves them. Fix in
+   core: dedup both lists by resolved path after the filters. Our
+   `_deliver_media_attachments` override does exactly that and can go once
+   core does.
 
-Fixing 1–2 also benefits us directly if we *stay* out of tree.
+Fixing 1–2 and 6 also benefits us directly if we *stay* out of tree.
 
 ---
 
