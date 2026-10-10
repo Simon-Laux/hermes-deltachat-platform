@@ -146,6 +146,10 @@ async def main():
         "contract": contract(),
         "stream": await stream(words, 2.0 / len(words)),
         "long": await stream(words[:10] + [f"\nL{i}" for i in range(90)], 0.02),
+        # code block reaching the limit with a long last line, then a pause: the
+        # cursor wrap and the fence Hermes closes each add a line to the edit
+        "fence": await stream(["```\n" + "\n".join(f"c{i}" for i in range(35)) + "\n",
+                               "y" * 99] + [f"\nm{i}" for i in range(5)], 0.4),
         "media": await media(),
     }))
 

@@ -337,27 +337,33 @@ def _dc_len(text: str) -> int:
 
     Used as the adapter's message_len_fn, so Hermes' own splitting (streamed
     replies, tool progress, fallback sends) measures what core truncates by.
-    Grows monotonically with the text, as Hermes' bisection needs.
+    Grows monotonically with the text, as Hermes' bisection needs. Counts the
+    "✏️" core puts in front of an edit, which receivers measure too.
     """
     return _DC_LINE_LEN * sum(1 + max(0, len(line) - 1) // _DC_LINE_LEN
-                              for line in text.split("\n"))
+                              for line in ("✏️" + text).split("\n"))
 
 
 def _dc_split(text: str) -> List[str]:
     """Cut text into pieces Delta Chat shows in full; "".join(pieces) == text.
 
-    Cuts after a newline when one is in the second half of the piece, else
-    after a space, else mid-word.
+    Cuts after a newline, else after a space, in the second half of the
+    piece; else mid-word.
     """
     pieces = []
-    while _dc_len(text) > _DC_TEXT_LIMIT:
-        lo, hi = 1, len(text)  # longest prefix that fits
+    # no text longer than this fits, so measuring past it is wasted work
+    # (re-measuring the whole rest per piece made 1 MB take ~50 s)
+    window = _DC_TEXT_LIMIT + _DC_TEXT_LINES
+    while _dc_len(text[:window + 1]) > _DC_TEXT_LIMIT:
+        lo, hi = 1, min(len(text), window)  # longest prefix that fits
         while lo < hi:
             mid = (lo + hi + 1) // 2
             lo, hi = (mid, hi) if _dc_len(text[:mid]) <= _DC_TEXT_LIMIT else (lo, mid - 1)
         cut = text.rfind("\n", 0, lo) + 1
         if cut < lo // 2:
-            cut = text.rfind(" ", 0, lo) + 1 or lo
+            cut = text.rfind(" ", 0, lo) + 1
+        if cut < lo // 2:
+            cut = lo
         pieces.append(text[:cut])
         text = text[cut:]
     pieces.append(text)
@@ -732,12 +738,26 @@ class DeltaChatAdapter(BasePlatformAdapter):
     # " ▉" cursor it can never remove. Editing lives in DeltaChatEditingAdapter.
     SUPPORTS_MESSAGE_EDITING = False
     # In _dc_len units. Hermes' stream consumer keeps a live message under
-    # MAX_MESSAGE_LENGTH - len(cursor) - 100 = 37 lines, so the cursor still fits.
-    MAX_MESSAGE_LENGTH = _DC_TEXT_LIMIT + _DC_LINE_LEN
+    # MAX_MESSAGE_LENGTH - len(cursor) - 100 = 36 lines: one line spare for the
+    # cursor wrapping a long last line, one for a code fence Hermes closes.
+    MAX_MESSAGE_LENGTH = _DC_TEXT_LIMIT
 
     @property
     def message_len_fn(self):
         return _dc_len
+
+    async def _resume_partial_send(self, chat_id, result, *, reply_to, metadata):
+        """Hermes' retry after a partial send(): send only the parts that didn't go
+        out. A send_msg that raised queued nothing, so nothing is sent twice."""
+        rest = (getattr(result, "raw_response", None) or {}).get("remainder")
+        return await self.send(chat_id, rest, metadata=metadata) if rest else None
+
+    def _ea_fit(self, text, budget, suffix="...", escape=None) -> str:
+        # why: Hermes measures approval previews with message_len_fn, which would
+        # cut a 40-line script at 30 lines and hide its tail from the approver.
+        # Count characters as before; send() splits the prompt if it is long.
+        text = str(text or "")
+        return text[:budget] + suffix if len(text) > budget else text
 
     def __init__(self, config: PlatformConfig):
         """Initialize the adapter.
@@ -1558,10 +1578,9 @@ class DeltaChatAdapter(BasePlatformAdapter):
             quoted_id = _quote_id(reply_to)
             # Long text goes out as several messages that Delta Chat shows in
             # full, not one folded behind "Show full message" (see _dc_len).
-            pieces = [p for p in _dc_split(content) if p.strip("\n")] or [content]
+            pieces = [p for p in _dc_split(content) if p.strip()] or [content]
             ids: List[str] = []
-            delivered = 0
-            for piece in pieces:
+            for n, piece in enumerate(pieces):
                 try:
                     msg_id = await self.rpc.send_msg(
                         self.account_id, dc_chat_id,
@@ -1577,10 +1596,10 @@ class DeltaChatAdapter(BasePlatformAdapter):
                     return SendResult(
                         success=False, error=str(e), message_id=ids[-1],
                         raw_response={"partial_overflow": True, "last_message_id": ids[-1],
-                                      "delivered_prefix": content[:delivered]},
+                                      "delivered_prefix": "".join(pieces[:n]),
+                                      "remainder": "".join(pieces[n:])},
                     )
                 ids.append(str(msg_id))
-                delivered += len(piece)
 
             logger.debug(f"Sent message(s) {', '.join(ids)} to chat {chat_id}")
             return SendResult(success=True, message_id=ids[-1],
@@ -1654,13 +1673,19 @@ class DeltaChatAdapter(BasePlatformAdapter):
             text = f"{prompt.text}\n\nReply {reply}"
         result = await self.send(prompt.chat_id, text, metadata=prompt.metadata)
         if result.success and result.message_id and request_id:
-            self._remember_prompt(self._approval_prompts, result.message_id,
+            self._remember_prompt(self._approval_prompts, result,
                                   (prompt.session_key, request_id))
         return result
 
-    def _remember_prompt(self, prompts: Dict[int, tuple], msg_id, value: tuple) -> None:
-        """Remember a reaction-answerable prompt, dropping the oldest past the cap."""
-        prompts[int(msg_id)] = value
+    def _remember_prompt(self, prompts: Dict[int, tuple], result: SendResult, value: tuple) -> None:
+        """Remember a reaction-answerable prompt, dropping the oldest past the cap.
+
+        why every part: send() splits a long prompt, and "React to this exact
+        message" can land in any of them. Answering one pops it, so a second
+        reaction finds nothing pending.
+        """
+        for msg_id in (*(result.continuation_message_ids or ()), result.message_id):
+            prompts[int(msg_id)] = value
         while len(prompts) > self._MAX_APPROVAL_PROMPTS:
             del prompts[next(iter(prompts))]
 
@@ -1714,7 +1739,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
             # skip its text fallback, so the confirm would wait unseen
             return SendResult(success=False, error="Prompt not delivered as a message")
         if result.success:
-            self._remember_prompt(self._slash_confirm_prompts, result.message_id,
+            self._remember_prompt(self._slash_confirm_prompts, result,
                                   (session_key, confirm_id))
         return result
 
@@ -1752,7 +1777,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
         mark_awaiting_text(clarify_id)
         result = await self.send(chat_id, text, metadata=metadata)
         if result.success and result.message_id:
-            self._remember_prompt(self._clarify_prompts, result.message_id,
+            self._remember_prompt(self._clarify_prompts, result,
                                   (session_key, clarify_id, list(choices)))
         return result
 

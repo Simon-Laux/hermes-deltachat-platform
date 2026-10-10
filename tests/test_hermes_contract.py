@@ -83,6 +83,33 @@ def test_streamed_reply_is_one_throttled_message(run):
     assert s["pending"] == 0
 
 
+def _core_folds(text):
+    """Delta Chat core's truncate_by_lines(38, 100) decision, as an edit's
+    receiver applies it (to "✏️" + text)."""
+    lines = line_chars = 0
+    for ch in "✏️" + text:
+        if ch == "\n":
+            line_chars, lines = 0, lines + 1
+        else:
+            line_chars += 1
+            if line_chars > 100:
+                line_chars, lines = 1, lines + 1
+        if lines == 38:
+            return True
+    return False
+
+
+def test_code_block_at_the_limit_keeps_streaming(run):
+    s = run["fence"]
+    assert not any(e[3] is None for e in s["log"])
+    assert not any(_core_folds(e[3]) for e in s["log"]), "a message would be folded"
+    shown = list(s["screen"].values())
+    assert not any(CURSOR in m for m in shown), "stream froze with the cursor on screen"
+    # nothing repeated: what's on screen is the reply plus at most Hermes' fences
+    assert sum(len(m) for m in shown) <= len(s["text"]) + 20
+    assert s["pending"] == 0
+
+
 def test_long_reply_is_split_into_messages_shown_in_full(run):
     # Hermes splits by the adapter's message_len_fn while streaming, so no
     # message gets past what Delta Chat shows without "Show full message"

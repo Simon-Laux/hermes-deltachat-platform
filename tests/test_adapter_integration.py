@@ -668,7 +668,8 @@ class TestLongMessages:
         for _ in range(2000):
             text = "".join(rnd.choice(["\n", "x" * rnd.randint(1, 250), " "])
                            for _ in range(rnd.randint(0, 60)))
-            assert (_dc_len(text) > _DC_TEXT_LIMIT) == self._core_truncates(text), repr(text)
+            # measured as an edit's receiver sees it: core prepends "✏️"
+            assert (_dc_len(text) > _DC_TEXT_LIMIT) == self._core_truncates("✏️" + text), repr(text)
 
     def test_split_keeps_text_and_fits(self):
         rnd = random.Random(1)
@@ -723,6 +724,34 @@ class TestLongMessages:
         assert result.raw_response["partial_overflow"] is True
         assert result.raw_response["last_message_id"] == "11"
         assert result.raw_response["delivered_prefix"].strip("\n") == first
+
+    def test_split_is_fast_on_huge_text(self):
+        # was ~50 s for 1 MB of short lines, blocking the gateway
+        import time
+        text = "short line\n" * 100_000
+        start = time.monotonic()
+        pieces = _dc_split(text)
+        assert time.monotonic() - start < 5
+        assert "".join(pieces) == text
+
+    @pytest.mark.asyncio
+    async def test_retry_after_partial_failure_sends_only_the_rest(self, platform_config, mock_rpc):
+        adapter = DeltaChatAdapter(platform_config)
+        adapter.rpc, adapter.account_id = mock_rpc, 1
+        mock_rpc.send_msg = AsyncMock(side_effect=[11, RuntimeError("relay down"), 12])
+        text = "\n".join(f"Line {i}" for i in range(60))
+
+        partial = await adapter.send("789", text)
+        resumed = await adapter._resume_partial_send("789", partial, reply_to=None, metadata=None)
+
+        sent = [c.args[2].text for c in mock_rpc.send_msg.await_args_list]
+        assert resumed.success and resumed.message_id == "12"
+        assert sent[0] + "\n" + sent[2] == text   # nothing twice, nothing lost
+
+    def test_split_does_not_send_a_tiny_first_piece(self):
+        # the only space is near the start: cut mid-word rather than send "Key:"
+        pieces = _dc_split("Key: " + "x" * 5000)
+        assert len(pieces[0]) > 1000
 
     def test_hermes_measures_like_core(self, platform_config):
         adapter = DeltaChatAdapter(platform_config)
