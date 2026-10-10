@@ -301,6 +301,44 @@ hermes gateway start
 | `DELTACHAT_REQUIRE_MENTION` | No | — | In **group** chats, only answer messages that say `@<display name>` (or an alias), or quote-reply to the bot; commands must be addressed as `/cmd@<name>`. DMs are never gated. Also `platforms.deltachat-platform.require_mention: true` in `config.yaml` |
 | `DELTACHAT_MENTION_ALIASES` | No | — | Comma-separated extra names that count as a mention (`@<alias>`); also `platforms.deltachat-platform.mention_aliases` |
 | `DELTACHAT_COMMANDS_BIO` | No | on | Append the slash commands that work in Delta Chat to the bot's profile bio, below a `Hermes commands:` line, one `/cmd args – what` per line so people can look them up in its profile. Your own text above that line is kept. Commands that only admins may run (`allow_admin_from`) are left out. `0` turns it off and takes the list out again, which saves ~4.9 KB per message: Delta Chat isn't optimized for long bios and sends the whole bio with every message, not only now and then like the avatar. Also `platforms.deltachat-platform.commands_bio` |
+| `DELTACHAT_MESSAGE_EDITING` | No | — | *Experimental.* Let Hermes edit sent messages in place — see [Message editing](#message-editing-opt-in). Also `platforms.deltachat-platform.message_editing` |
+| `DELTACHAT_EDIT_MIN_INTERVAL` | No | `5` | Seconds between in-progress edits for the whole account (minimum 1). Also `platforms.deltachat-platform.edit_min_interval` |
+
+### Message editing (opt-in)
+
+> **Experimental.** Covered by unit tests and by tests against Hermes' real streaming code,
+> but not yet tried much with live accounts. Feedback welcome in
+> [#54](https://github.com/Simon-Laux/hermes-deltachat-platform/issues/54).
+
+Off by default. With `DELTACHAT_MESSAGE_EDITING=1` Hermes edits its messages in place instead
+of sending new ones: streamed replies grow in one bubble, tool progress updates one message, and
+heartbeats and approval prompts are updated in place.
+
+In Delta Chat an edit is not a cheap update: it is a whole new email carrying the full new text,
+sent to every chat member through the chatmail relay — relays mostly run by volunteers. Current
+clients apply it to the original message; old clients show each edit as an extra message
+starting with ✏️. So the adapter throttles edits:
+
+- At most one in-progress edit per `DELTACHAT_EDIT_MIN_INTERVAL` seconds (default 5) for the
+  **whole account**, not per message. Updates in between are merged; only the newest text is
+  sent.
+- The final text of a reply always goes out right away (it replaces the new message Hermes
+  would otherwise send).
+- Replies longer than 40 lines stop being edited and continue as a new message, because the
+  adapter sends those with an HTML part and Delta Chat can't edit HTML messages. A tool-progress
+  message that grows past 40 lines just stops updating.
+
+Turning editing on also makes Hermes show tool progress, which it skips for platforms that
+can't edit. To cut the number of edits further, turn tool progress and/or streaming off for
+Delta Chat in Hermes' `config.yaml`:
+
+```yaml
+display:
+  platforms:
+    deltachat-platform:
+      tool_progress: "off"
+      # streaming: false
+```
 
 ### Multiple Agents
 
@@ -334,6 +372,7 @@ The `deltachat2` Python package is vendored in `vendor/` to avoid a manual insta
 
 - `transport.py`: dead-RPC-server handling — `_fail_all_pending()` from both reader and writer loops, `_server_dead()` probe, and a polled `_Result.wait()` so a `deltachat-rpc-server` that dies mid-call raises instead of hanging the caller forever. Upstream has none of this.
 - `transport.py`: `to_attrdict()` on RPC results (camelCase → snake_case, which `adapter.py` depends on) and `close()` guards for the never-started / already-dead cases.
+- `transport.py`: bounded teardown — `close(timeout=5, stop_io_timeout=35)` caps the `stop_io_for_all_accounts` call (via `_call(..., timeout=)`; 35 s is above core's own 30 s IMAP/SMTP shutdown budget) and every later wait, and SIGKILLs a server that hasn't exited after stdin EOF (no SIGTERM step: rpc-server treats EOF and SIGTERM alike). Worst case 60 s, about 40 s for a wedged server. `close()` blocks, so `adapter.py` runs it in a worker thread and a reconnect waits for it to release `accounts.lock`. A reader that dies on a malformed line kills the server so the dead-server handling takes over.
 - `IOTransport.__init__` takes `rpc_server=`; upstream renamed this kwarg to `rpc_executable=`. `adapter.py` passes `rpc_server=`.
 
 To update it:

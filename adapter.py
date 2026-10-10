@@ -6,6 +6,7 @@ Integrates Delta Chat as a messaging platform using deltachat2 (direct JSON-RPC)
 import functools
 import html
 import json
+import math
 import os
 import random
 import re
@@ -13,6 +14,7 @@ import secrets
 import sys
 import uuid
 import asyncio
+import concurrent.futures
 import logging
 from typing import Optional, Dict, Any, List
 
@@ -282,6 +284,22 @@ class _AsyncRpc:
 # Tracks the currently connected adapter instance; used by RPC tools.
 _active_adapter = None
 
+# IOTransport.close() blocks for up to a minute (see its docstring), so it runs
+# here instead of on the gateway loop. One worker: closes finish in order, so
+# waiting on the latest one covers every earlier one too.
+_transport_closer = concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="dc-transport-close")
+_last_transport_close: Optional[concurrent.futures.Future] = None
+
+
+async def _await_transport_close(future: concurrent.futures.Future) -> None:
+    # why: shield. The gateway cancels disconnect() after its own budget (5 s
+    # by default) and detaches it. Without the shield that cancel would also
+    # cancel a close still queued behind another, leaking a live server.
+    try:
+        await asyncio.shield(asyncio.wrap_future(future))
+    except Exception as e:
+        logger.warning(f"Error closing transport: {e}")
+
 # Per-session opaque token ↔ real chat_id mapping.
 # Tokens are generated once per unique chat_id using secrets.token_hex so they
 # are unguessable and stable within a process lifetime.  They are injected into
@@ -304,6 +322,35 @@ def _env_flag(name: str) -> bool:
 def _is_on(value) -> bool:
     """Shared on/off rule for env vars and config.yaml values (see _env_flag)."""
     return str(value).strip().lower() not in ("", "0", "false", "no", "off")
+
+
+_DEFAULT_EDIT_INTERVAL = 5.0
+_MIN_EDIT_INTERVAL = 1.0
+
+
+def _edit_interval(config) -> Optional[float]:
+    """Seconds between interim edits when message editing is on, else None.
+
+    Opt-in via platforms.deltachat-platform.message_editing / edit_min_interval
+    or DELTACHAT_MESSAGE_EDITING / DELTACHAT_EDIT_MIN_INTERVAL.
+    """
+    extra = config.extra or {}
+    raw = extra.get("message_editing")
+    if not (_env_flag("DELTACHAT_MESSAGE_EDITING") if raw is None else _is_on(raw)):
+        return None
+    raw = extra.get("edit_min_interval")
+    if raw is None:
+        # `or`: a blank answer to the plugin.yaml prompt means the default
+        raw = os.getenv("DELTACHAT_EDIT_MIN_INTERVAL") or _DEFAULT_EDIT_INTERVAL
+    try:
+        interval = float(raw)
+    except (TypeError, ValueError):
+        interval = float("nan")
+    if not math.isfinite(interval):
+        logger.warning("Invalid edit_min_interval %r, using %ss", raw, _DEFAULT_EDIT_INTERVAL)
+        interval = _DEFAULT_EDIT_INTERVAL
+    # why: a typo like 0.1 must not turn into an email per streamed token
+    return max(interval, _MIN_EDIT_INTERVAL)
 
 
 # why: /start only acknowledges Telegram's start ping and /topic refuses everything but
@@ -561,6 +608,23 @@ async def _get_or_create_chat_token(rpc, account_id: int, chat_id: int) -> str:
     return token
 
 
+def _session_dc_chat_id() -> Optional[str]:
+    """Delta Chat chat id of the turn this tool call runs in, or None.
+
+    Hermes binds each turn's origin as task-local session vars. A cron job, the
+    CLI or another platform's chat has no Delta Chat chat behind it, hence None.
+    why: the platform check is not optional — a Telegram chat id is just a
+    number too, and could name an unrelated Delta Chat chat.
+    """
+    try:
+        from gateway.session_context import get_session_env
+    except ImportError:
+        return None
+    if get_session_env("HERMES_SESSION_PLATFORM", "") != "deltachat-platform":
+        return None
+    return get_session_env("HERMES_SESSION_CHAT_ID", "") or None
+
+
 def _quote_id(reply_to) -> Optional[int]:
     """DC message id to quote, or None when reply_to is not a real DC message.
 
@@ -623,6 +687,10 @@ class DeltaChatAdapter(BasePlatformAdapter):
     Uses deltachat2 for direct JSON-RPC access (not abstracted away).
     Each Hermes profile runs its own instance with its own DC_ACCOUNTS_PATH.
     """
+
+    # why: Hermes treats a missing attribute as True and then streams with a
+    # " ▉" cursor it can never remove. Editing lives in DeltaChatEditingAdapter.
+    SUPPORTS_MESSAGE_EDITING = False
 
     def __init__(self, config: PlatformConfig):
         """Initialize the adapter.
@@ -1111,24 +1179,32 @@ class DeltaChatAdapter(BasePlatformAdapter):
             # Initialize RPC client with deltachat2, passing accounts_dir to transport
             from deltachat2.transport import IOTransport
 
+            # why: a server from a disconnect the gateway stopped waiting for
+            # may still be shutting down. It holds accounts.lock until it
+            # exits, so a new one on the same dir would fail to start.
+            pending_close = _last_transport_close
+            if pending_close is not None and not pending_close.done():
+                logger.info("Waiting for the previous deltachat-rpc-server to shut down")
+                await _await_transport_close(pending_close)
+
             os.environ["DC_ACCOUNTS_PATH"] = dc_accounts_path
             self._transport = IOTransport(accounts_dir=dc_accounts_path, rpc_server=rpc_server_path)
             self._transport.start()
             self.rpc = _AsyncRpc(deltachat2.Rpc(self._transport))
 
-            # Wait for RPC server to be ready
-            await asyncio.sleep(1)
-
+            # No startup sleep: requests queue in the stdin pipe until the
+            # server reads them, so this first call doubles as the readiness
+            # check, and a server that dies on startup fails it fast.
             # Check version - REJECT if too old
             if not await _check_dc_version(self.rpc):
-                self._cleanup()
+                await self._cleanup()
                 return False
 
             # Get or create account - use first available
             accounts = await self.rpc.get_all_accounts()
             # A lost database must be refused before onboarding creates a new one.
             if not accounts and not await self._check_db_id():
-                self._cleanup()
+                await self._cleanup()
                 return False
             onboarding = _headless_onboarding()
             if accounts:
@@ -1144,13 +1220,13 @@ class DeltaChatAdapter(BasePlatformAdapter):
                     "— or set DELTACHAT_EMAIL to onboard without a terminal "
                     "(see docs/headless-onboarding.md)"
                 )
-                self._cleanup()
+                await self._cleanup()
                 return False
 
             # Before start_io (no message may be handled on a mismatched DB) and
             # before onboarding configures a transport on an empty account.
             if not await self._check_db_id():
-                self._cleanup()
+                await self._cleanup()
                 return False
 
             # add_account() persists an account row before any transport is
@@ -1164,10 +1240,10 @@ class DeltaChatAdapter(BasePlatformAdapter):
                         "transport. Run setup.py, or set DELTACHAT_EMAIL to "
                         "configure one without a terminal."
                     )
-                    self._cleanup()
+                    await self._cleanup()
                     return False
                 if not await self._configure_transports(onboarding):
-                    self._cleanup()
+                    await self._cleanup()
                     return False
 
             # Enable bot mode: auto-accept contact requests
@@ -1208,10 +1284,10 @@ class DeltaChatAdapter(BasePlatformAdapter):
 
         except Exception as e:
             logger.error(f"Delta Chat connection failed: {e}")
-            self._cleanup()
+            await self._cleanup()
             return False
 
-    def _cleanup(self) -> None:
+    async def _cleanup(self) -> None:
         """Clean up resources and report the adapter as no longer connected.
 
         Also reached from connect()'s failure paths, which is why it marks
@@ -1223,27 +1299,31 @@ class DeltaChatAdapter(BasePlatformAdapter):
         reconnect watcher disposes of an adapter whose connect() failed (no
         fatal error recorded), this overwrites it with "disconnected" — as the
         old disconnect() already did.
+
+        The transport is closed last, in a worker thread, after all state is
+        reset: if the gateway cancels us mid-close, the adapter is already
+        consistent and the close finishes on its own.
         """
-        global _active_adapter
+        global _active_adapter, _last_transport_close
         if _active_adapter is self:
             _active_adapter = None
         self._running = False
         if self._event_loop_task:
-            # Not awaited: _cleanup is sync, and it can be reached *from* the
-            # listener task itself via the fatal-error path. _on_listener_done
-            # observes the outcome instead.
+            # Not awaited: the listener's fatal-error path reaches disconnect()
+            # through a separate notify task, but awaiting our own listener
+            # would deadlock if that ever changed. _on_listener_done observes
+            # the outcome instead.
             self._event_loop_task.cancel()
             self._event_loop_task = None
-        if self._transport:
-            try:
-                self._transport.close()
-            except Exception as e:
-                logger.warning(f"Error closing transport: {e}")
-            self._transport = None
+        transport, self._transport = self._transport, None
         self.rpc = None
         self.account_id = None
         self._invite_link = None
         self._mark_disconnected()
+        if transport:
+            # Cleared above first, so a second _cleanup() can't close it twice.
+            _last_transport_close = _transport_closer.submit(transport.close)
+            await _await_transport_close(_last_transport_close)
 
     @staticmethod
     def _on_listener_done(task: asyncio.Task) -> None:
@@ -1271,7 +1351,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
             # replacement adapter the gateway builds on reconnect.
             logger.warning("Error tearing down call manager: %s", e)
         finally:
-            self._cleanup()
+            await self._cleanup()
         logger.info("Delta Chat disconnected")
 
     async def get_my_address(self) -> Optional[str]:
@@ -2368,9 +2448,35 @@ body {{
             elif file_mime.startswith("video/"):
                 view_type = MessageViewtype.VIDEO.value
 
+        # why: Hermes' gateway.max_inbound_media_bytes is only checked by its
+        # image/audio cache helpers, and when they refused a file we fell back
+        # to the blob path, which passed it on anyway. Checked here, before any
+        # copy, so the cap holds for every kind and nothing oversized is read.
+        from gateway.platforms.base import get_inbound_media_max_bytes
+        resolved = self._resolve_blob_path(filename) if filename else None
+        limit = get_inbound_media_max_bytes()
+        size = 0
+        if resolved:
+            # why: the file can vanish or turn unreadable between exists() and
+            # here; treat that as "not found" rather than dropping the message.
+            try:
+                size = os.path.getsize(resolved)
+            except OSError as e:
+                logger.warning("Could not stat media of msg %s: %s", msg_id, e)
+                resolved = None
+        too_large = ""
+        # why: Hermes documents 0 *and* negative as "no cap".
+        if limit > 0 and size > limit:
+            logger.warning("Not passing on media of msg %s: %d bytes is over the %d-byte "
+                           "inbound media limit", msg_id, size, limit)
+            too_large = " [attachment not passed on: over the inbound media size limit]"
+            resolved = None
+        # why: media_types must stay in step with media_urls. Hermes merges a
+        # photo burst by extending both lists, so a type with no file shifts
+        # every later attachment onto the wrong type.
+
         # Voice / Audio — let Hermes handle STT via media_urls
         if view_type in (MessageViewtype.VOICE.value, MessageViewtype.AUDIO.value) and filename:
-            resolved = self._resolve_blob_path(filename)
             if resolved:
                 resolved = self._copy_to_hermes_cache(resolved, "audio")
             is_voice = view_type == MessageViewtype.VOICE.value
@@ -2379,8 +2485,8 @@ body {{
             text = f"[{'Voice' if is_voice else 'Audio'} message from {user_name}]"
             if caption:
                 text = f"{text}: {caption}"
-            text = f"{text}\n[dc:chat={token}]"
-            if not resolved:
+            text = f"{text}{too_large}\n[dc:chat={token}]"
+            if not resolved and not too_large:
                 logger.warning(f"Voice/audio file not found, forwarding without media: {filename}")
             message_event = MessageEvent(
                 text=text,
@@ -2388,33 +2494,33 @@ body {{
                 source=source,
                 message_id=str(msg_id),
                 media_urls=[resolved] if resolved else [],
-                media_types=[file_mime or ("audio/ogg" if is_voice else "audio/mpeg")],
+                media_types=[file_mime or ("audio/ogg" if is_voice else "audio/mpeg")] if resolved else [],
             )
             await self.handle_message(message_event)
 
         # Image
         elif view_type in (MessageViewtype.IMAGE.value, MessageViewtype.GIF.value, MessageViewtype.STICKER.value) and filename:
-            resolved = self._resolve_blob_path(filename)
             if resolved:
                 resolved = self._copy_to_hermes_cache(resolved, "image")
             caption = msg.get("text", "") or ""
             text = f"[Image from {user_name}]"
             if caption:
                 text = f"{text}: {caption}"
-            text = f"{text}\n[dc:chat={token}]"
+            text = f"{text}{too_large}\n[dc:chat={token}]"
             message_event = MessageEvent(
                 text=text,
                 message_type=MessageType.PHOTO,
                 source=source,
                 message_id=str(msg_id),
                 media_urls=[resolved] if resolved else [],
-                media_types=[file_mime or "image/jpeg"],
+                media_types=[file_mime or "image/jpeg"] if resolved else [],
             )
             await self.handle_message(message_event)
 
-        # File / document (including .xdc webxdc apps)
+        # File / document / video. Incoming .xdc apps have viewtype Webxdc and
+        # are not handled here.
         elif view_type in (MessageViewtype.FILE.value, MessageViewtype.VIDEO.value) and filename:
-            resolved = self._resolve_blob_path(filename)
+            is_video = view_type == MessageViewtype.VIDEO.value
             if resolved:
                 try:
                     from gateway.platforms.base import cache_document_from_bytes
@@ -2427,17 +2533,17 @@ body {{
                     logger.warning("Could not copy document to Hermes cache: %s", e)
             caption = msg.get("text", "") or ""
             file_name = msg.get("file_name") or os.path.basename(filename)
-            text = f"[File from {user_name}: {file_name}]"
+            text = f"[{'Video' if is_video else 'File'} from {user_name}: {file_name}]"
             if caption:
                 text = f"{text}: {caption}"
-            text = f"{text}\n[dc:chat={token}]"
+            text = f"{text}{too_large}\n[dc:chat={token}]"
             message_event = MessageEvent(
                 text=text,
-                message_type=MessageType.DOCUMENT,
+                message_type=MessageType.VIDEO if is_video else MessageType.DOCUMENT,
                 source=source,
                 message_id=str(msg_id),
                 media_urls=[resolved] if resolved else [],
-                media_types=[file_mime or "application/octet-stream"],
+                media_types=[file_mime or "application/octet-stream"] if resolved else [],
             )
             await self.handle_message(message_event)
 
@@ -2496,6 +2602,116 @@ body {{
         return False
 
 
+class DeltaChatEditingAdapter(DeltaChatAdapter):
+    """DeltaChatAdapter that edits sent messages in place (message_editing on).
+
+    why a subclass: Hermes only shows tool progress when type(adapter) overrides
+    edit_message (gateway/run_turn_runner.py). Overriding it on the base class,
+    even with a "not supported" body, would send one new message per tool call
+    to everyone who never opted in.
+    """
+
+    SUPPORTS_MESSAGE_EDITING = True
+
+    def __init__(self, config: PlatformConfig, interval: float = _DEFAULT_EDIT_INTERVAL):
+        super().__init__(config)
+        logger.info("Message editing on (experimental): at most one edit per %ss", interval)
+        self._edit_interval = interval
+        # msg id -> newest text not yet sent, oldest first
+        self._edit_pending: Dict[int, str] = {}
+        self._edit_last_at = float("-inf")
+        self._edit_flusher: Optional[asyncio.Task] = None
+        # why: _AsyncRpc runs in an executor, so cancelling a task can't stop an
+        # edit already on its way; serialising sends keeps the final text last.
+        self._edit_lock = asyncio.Lock()
+
+    async def send(self, chat_id: str, content: str, reply_to=None, metadata=None) -> SendResult:
+        result = await super().send(chat_id, content, reply_to=reply_to, metadata=metadata)
+        if result.success and result.message_id:
+            # a new message is an email too: without this a streamed reply's
+            # first edit followed its first chunk ~50 ms later
+            self._edit_last_at = asyncio.get_running_loop().time()
+        return result
+
+    async def edit_message(self, chat_id: str, message_id: str, content: str, *,
+                           finalize: bool = False, metadata=None) -> SendResult:
+        """Edit one of our messages, at most one interim edit per interval.
+
+        why: every edit is a whole email ("✏️" + full text) to every chat
+        member through chatmail relays run by volunteers, and Hermes asks for
+        one per streamed chunk. Interim edits share one budget per account;
+        a deferred one is queued (newest text wins) and reported as done, so
+        Hermes' idea of what's on screen matches what will be, and it stops
+        re-sending unchanged text. finalize=True (end of turn or segment)
+        goes out at once — it replaces the fresh message Hermes would
+        otherwise send. Error strings are fixed: Hermes reads "rate"/"flood"
+        in them as flood control.
+        """
+        msg_id = str(message_id or "")
+        if not self.rpc or not self.account_id or not (msg_id.isascii() and msg_id.isdigit()):
+            return SendResult(success=False, error="edit unavailable")
+        msg = int(msg_id)
+        if finalize:
+            # a finalize, even a refused one, supersedes queued interim text
+            self._edit_pending.pop(msg, None)
+        if not content.strip():
+            return SendResult(success=False, error="empty edit")
+        if self._format_html_message(content)[1] is not None:
+            # core can't edit or create HTML messages; Hermes falls back to
+            # send() for the rest, which adds the HTML part. retryable keeps a
+            # long tool-progress bubble frozen instead of one message per tool.
+            return SendResult(success=False, error="too long to edit", retryable=not finalize)
+        loop = asyncio.get_running_loop()
+        if finalize or (not self._edit_pending and not self._edit_lock.locked()
+                        and loop.time() >= self._edit_last_at + self._edit_interval):
+            async with self._edit_lock:
+                # re-check: we may have queued behind finalizes that used the slot
+                if finalize or loop.time() >= self._edit_last_at + self._edit_interval:
+                    self._edit_pending.pop(msg, None)
+                    if not await self._send_edit(msg, content):
+                        return SendResult(success=False, error="edit failed")
+                    return SendResult(success=True, message_id=msg_id)
+        self._edit_pending[msg] = content
+        if self._edit_flusher is None or self._edit_flusher.done():
+            self._edit_flusher = asyncio.create_task(self._flush_edits())
+        return SendResult(success=True, message_id=msg_id)
+
+    async def _send_edit(self, msg: int, text: str) -> bool:
+        """Send one edit; caller holds _edit_lock."""
+        self._edit_last_at = asyncio.get_running_loop().time()
+        rpc, account_id = self.rpc, self.account_id
+        if not rpc or not account_id:
+            return False
+        try:
+            await rpc.send_edit_request(account_id, msg, text)
+            return True
+        except Exception as e:
+            logger.warning("Delta Chat: editing message %s failed: %s", msg, e)
+            return False
+
+    async def _flush_edits(self) -> None:
+        """Send deferred edits, oldest message first, one per interval."""
+        loop = asyncio.get_running_loop()
+        while True:
+            delay = self._edit_last_at + self._edit_interval - loop.time()
+            if delay > 0:
+                await asyncio.sleep(delay)
+            async with self._edit_lock:
+                if not self._edit_pending:
+                    return
+                if loop.time() < self._edit_last_at + self._edit_interval:
+                    continue  # a finalize used the slot meanwhile
+                msg = next(iter(self._edit_pending))
+                await self._send_edit(msg, self._edit_pending.pop(msg))
+
+    async def _cleanup(self) -> None:
+        if self._edit_flusher:
+            self._edit_flusher.cancel()
+            self._edit_flusher = None
+        self._edit_pending.clear()
+        await super()._cleanup()
+
+
 def check_requirements() -> bool:
     """Check if deltachat2 and deltachat-rpc-server are available."""
     import shutil
@@ -2546,12 +2762,17 @@ def _env_enablement() -> Optional[Dict[str, Any]]:
     return result
 
 
+def _adapter_factory(cfg):
+    interval = _edit_interval(cfg)
+    return DeltaChatEditingAdapter(cfg, interval) if interval else DeltaChatAdapter(cfg)
+
+
 def register_platform(ctx):
     """Register Delta Chat platform adapter with Hermes."""
     ctx.register_platform(
         name="deltachat-platform",
         label="Delta Chat",
-        adapter_factory=lambda cfg: DeltaChatAdapter(cfg),
+        adapter_factory=_adapter_factory,
         check_fn=check_requirements,
         validate_config=validate_config,
         required_env=["DELTACHAT_RPC_SERVER"],
@@ -2818,13 +3039,22 @@ def register_rpc_tools(ctx) -> None:
         if adapter is None or adapter._call_manager is None:
             return json.dumps({"error": "No active call"})
 
-        # The AI is in a call — find the active session.
-        # There is typically only one active call at a time.
-        chat_ids = list(adapter._call_manager._chat_to_msg.keys())
-        if not chat_ids:
-            return json.dumps({"error": "No active call"})
+        # why: hang up the call of the chat asking, not whichever call is
+        # oldest. Calls in different chats can run at once, and "bye" typed in
+        # one chat must not cut off a call in another.
+        active = list(adapter._call_manager._chat_to_msg.keys())
+        chat_id = _session_dc_chat_id()
+        if chat_id is None:
+            # No Delta Chat chat behind this turn (cron, CLI, another
+            # platform): act only when there is no doubt which call is meant.
+            if len(active) != 1:
+                return json.dumps({"error": "No active call" if not active
+                                   else "Several calls are active — cannot tell which to end"})
+            chat_id = active[0]
+        elif chat_id not in active:
+            return json.dumps({"error": "No active call in this chat"})
 
-        success = await adapter._call_manager.request_hangup(chat_ids[0])
+        success = await adapter._call_manager.request_hangup(chat_id)
         if success:
             return json.dumps({"success": True, "message": "Call ended"})
         return json.dumps({"error": "Failed to end call"})
@@ -2984,7 +3214,7 @@ def register_rpc_tools(ctx) -> None:
                 "The goodbye message is spoken first (via normal send), then this "
                 "tool waits until TTS finishes playing before disconnecting. "
                 "Only use this when the user explicitly says goodbye or asks to end the call. "
-                "No parameters needed — there is only one active call at a time."
+                "No parameters needed — it ends the call in the current chat."
             ),
             "parameters": {
                 "type": "object",

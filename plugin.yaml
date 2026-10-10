@@ -51,6 +51,12 @@ optional_env:
   - name: DELTACHAT_COMMANDS_BIO
     description: "The bot's slash commands are appended to its profile bio, below a 'Hermes commands:' line; your own text above it is kept. The bio is sent with every message (~5 KB). Set to 0 to turn it off and remove the list again."
     prompt: "Commands in bio (blank = yes, 0 = no)"
+  - name: DELTACHAT_MESSAGE_EDITING
+    description: "Experimental. Set to 1 to let Hermes edit sent messages in place (streamed replies, tool progress). Every edit is a full email to every chat member through the chatmail relay, so edits are throttled; see DELTACHAT_EDIT_MIN_INTERVAL."
+    prompt: "Edit messages in place, experimental (blank = no)"
+  - name: DELTACHAT_EDIT_MIN_INTERVAL
+    description: "With message editing on: seconds between in-progress edits for the whole account (minimum 1). The final text is always sent."
+    prompt: "Seconds between edits (blank = 5)"
 
 # Python packages this plugin needs in Hermes' venv. Hermes resolves them together with its own
 # pinned ranges when the plugin is installed and RE-APPLIES them after every `hermes update`

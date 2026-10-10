@@ -35,6 +35,11 @@ env -u LD_LIBRARY_PATH -u PYTHONPATH HOME=/nonexistent ./.calltest-py/bin/python
 
 `HOME=/nonexistent` keeps `call_handler.py` from loading the live `~/.hermes/aiortc-env`.
 
+**The Hermes contract tests** (`tests/test_hermes_contract.py`) run
+`tests/hermes_contract/scenarios.py` under the *installed* Hermes' Python, against its real
+gateway code instead of the mocks in `conftest.py`. They find Hermes via `hermes` on PATH, or
+`HERMES_PYTHON`, and skip when neither is there (as in CI).
+
 ## Finding Hermes Source
 
 ### Locating your installed Hermes
@@ -127,6 +132,9 @@ message content.
   - `_utils.py` – `AttrDict` (camelCase → snake_case on receive), `_snake2camel` (snake_case → camelCase on send)
   - `types.py` – `MsgData`, `MessageViewtype`, `EventType`, `MessageState`, etc.
 - `deltachat-rpc-openrpc.json` – OpenRPC spec; inspect for available methods and their params
+- Hermes decides some behaviour from the adapter *class*, not from return values: tool progress
+  is only shown if `type(adapter).edit_message` is overridden. That is why `edit_message` lives
+  on `DeltaChatEditingAdapter`, which `register_platform` only picks when editing is enabled.
 
 ## DC JSON-RPC — Always Check the Spec First
 

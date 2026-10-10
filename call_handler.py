@@ -115,9 +115,20 @@ if _env_flag("DELTACHAT_CALL_ICE_DEBUG"):
     logger.info("ICE debug logging enabled (aioice + aiortc at DEBUG)")
 
 # Opt-in: route call audio to Mistral Voxtral cloud STT (fast, ~1-2s, accurate).
-# Default off → use the locally configured STT provider (e.g. faster-whisper),
-# which is much slower on CPU. Requires MISTRAL_API_KEY.
+# Default off → use the configured stt.provider and its model, like voice
+# messages do. Requires MISTRAL_API_KEY.
 _CALL_STT_VOXTRAL = _env_flag("DELTACHAT_CALL_STT_VOXTRAL")
+_DEFAULT_VOXTRAL_MODEL = "voxtral-mini-latest"
+
+
+def _voxtral_model(tt) -> str:
+    """Voxtral model for the fast path: stt.mistral.model from config, else Hermes' default
+    (which honours STT_MISTRAL_MODEL), same resolution as for voice messages."""
+    default = getattr(tt, "DEFAULT_MISTRAL_STT_MODEL", None) or _DEFAULT_VOXTRAL_MODEL
+    try:
+        return (tt._load_stt_config().get("mistral") or {}).get("model") or default
+    except Exception:
+        return _DEFAULT_VOXTRAL_MODEL
 
 # Per-call system prompt — keeps spoken replies short. Applied via the
 # MessageEvent.channel_prompt field (ephemeral, never persisted to history).
@@ -432,23 +443,26 @@ class IncomingAudioBuffer:
         """Transcribe a WAV. Runs in a worker thread.
 
         With DELTACHAT_CALL_STT_VOXTRAL enabled (and MISTRAL_API_KEY set) we use
-        Voxtral cloud Transcribe (~1-2s, accurate) — local Whisper medium on CPU
-        is ~15-30x slower than realtime (30s for a 2s clip), unusable for a live
-        call. On any Voxtral failure we fall back to the configured provider.
-        When the flag is off, the locally configured STT provider is used.
+        Voxtral cloud Transcribe (~1-2s, accurate) — local Whisper on CPU can be
+        far slower than realtime, unusable for a live call. On any Voxtral
+        failure we fall back to the configured provider.
+        When the flag is off, Hermes picks provider *and* model from the ``stt``
+        section of config.yaml — same as for voice messages. Never pass a model
+        here: a name like "medium" is only valid for local faster-whisper and
+        breaks cloud providers ("Invalid model: medium").
         """
         from tools import transcription_tools as tt
 
         if _CALL_STT_VOXTRAL and os.getenv("MISTRAL_API_KEY") and hasattr(tt, "_transcribe_mistral"):
             try:
-                result = tt._transcribe_mistral(wav_path, "voxtral-mini-latest")
+                result = tt._transcribe_mistral(wav_path, _voxtral_model(tt))
                 if result.get("success"):
                     return result
                 logger.warning("Voxtral STT failed (%s) — falling back", result.get("error"))
             except Exception as e:
                 logger.warning("Voxtral STT error (%s) — falling back", e)
 
-        return tt.transcribe_audio(wav_path, "medium")
+        return tt.transcribe_audio(wav_path)
 
     def _pcm_to_wav(self, pcm: bytes) -> Optional[str]:
         """Write 16 kHz mono s16le PCM buffer to a WAV file for STT."""
@@ -635,11 +649,13 @@ class CallManager:
                     msg_id, chat_id, caller_id, event.get("has_video"))
 
         # Hermes drops everything an unauthorized caller says anyway, so don't
-        # answer and load STT for them. None (no check wired) is not a verdict.
-        if self._adapter._is_sender_authorized(caller_id, "dm", chat_id) is False:
+        # answer and load STT for them. Fail closed: the gateway always wires a
+        # check, so None only means it raised or returned junk (base.py treats
+        # that as "unknown", never as authorization).
+        if self._adapter._is_sender_authorized(caller_id, "dm", chat_id) is not True:
             # caller_id "caller": the lookup above failed, so nobody to authorize.
-            logger.info("Declining call %s from unauthorized contact %s", msg_id,
-                        caller_id if caller_id != "caller" else "(caller lookup failed)")
+            logger.info("Declining call %s: contact %s not authorized (or check failed)",
+                        msg_id, caller_id if caller_id != "caller" else "(caller lookup failed)")
             with contextlib.suppress(Exception):
                 await self._adapter.rpc.end_call(self._adapter.account_id, msg_id)
             return
@@ -885,7 +901,32 @@ class CallManager:
         )
         self._sessions[msg_id] = session
         self._chat_to_msg[chat_id] = msg_id
+
+        # why: a peer that vanishes (network lost, app killed) never sends
+        # CallEnded. aioice's consent checks expire after ~30 s and aiortc closes
+        # the pc itself, so a once-connected call reports "closed", not "failed"
+        # ("failed" only if ICE never connected). Without this the session
+        # lingered forever, still holding the chat's call routing, the model
+        # override and dc_end_call. Our own teardown pops _sessions before
+        # pc.close(), so _end_dead_call ignores the "closed" that causes.
+        @pc.on("connectionstatechange")
+        def _on_dead():
+            if pc.connectionState in ("failed", "closed"):
+                asyncio.ensure_future(self._end_dead_call(msg_id))
+        # why: the hook is attached only after accept/place, so a pc that died
+        # in between already fired its last state change; check it once now.
+        _on_dead()
         return session
+
+    async def _end_dead_call(self, msg_id: int) -> None:
+        if msg_id not in self._sessions:
+            return
+        logger.info("Call %s: connection %s, hanging up", msg_id,
+                    self._sessions[msg_id].pc.connectionState)
+        with contextlib.suppress(Exception):
+            await asyncio.wait_for(
+                self._adapter.rpc.end_call(self._adapter.account_id, msg_id), timeout=5.0)
+        await self._teardown_session(msg_id)
 
     # ------------------------------------------------------------------ #
     # Internal — incoming call setup                                       #
@@ -1075,6 +1116,14 @@ class CallManager:
                 break
             await asyncio.sleep(0.1)
         logger.info("Outgoing call %s connection state after ICE wait: %s", msg_id, pc.connectionState)
+        # why: if the pc died during the wait, _end_dead_call has torn the call
+        # down; the greeting fallback below would then go out as a text message
+        # (adapter.send sees no active call).
+        if pc.connectionState in ("failed", "closed") or msg_id not in self._sessions:
+            logger.info("Outgoing call %s ended before the opening, skipping it", msg_id)
+            if opening_task:
+                opening_task.cancel()
+            return
 
         # Fallback: if on_track didn't fire, attach the remote audio track
         # from the negotiated transceiver.
@@ -1234,15 +1283,18 @@ class CallManager:
         transcription even starts. Running a silent dummy clip now means the
         model is hot in memory by the time the caller finishes their first sentence.
 
-        Skipped entirely when cloud STT (Voxtral) is enabled — there's no local
-        model to warm, and loading whisper would waste CPU and time.
+        Only runs when the configured provider is local faster-whisper — with
+        Voxtral or any other cloud provider there's no model to warm, and a
+        silent clip would just be a wasted API request.
         """
         if _CALL_STT_VOXTRAL:
             return
         try:
             import io
             import wave as _wave
-            from tools.transcription_tools import transcribe_audio
+            from tools import transcription_tools as tt
+            if tt._get_provider(tt._load_stt_config()) != "local":
+                return
             # Create a 0.5 s silence WAV in memory and write to a temp file
             buf = io.BytesIO()
             with _wave.open(buf, "wb") as wf:
@@ -1254,8 +1306,8 @@ class CallManager:
             tmp_path = os.path.join(tmp, "audio_cache", "_warmup.wav")
             with open(tmp_path, "wb") as f:
                 f.write(buf.getvalue())
-            logger.info("Pre-warming Whisper medium model...")
-            await asyncio.to_thread(transcribe_audio, tmp_path, "medium")
+            logger.info("Pre-warming local Whisper model...")
+            await asyncio.to_thread(tt.transcribe_audio, tmp_path)
             logger.info("Whisper model ready")
         except Exception as e:
             logger.debug("STT warmup failed (non-fatal): %s", e)
@@ -1560,7 +1612,19 @@ class CallManager:
         if session is None:
             return
         chat_id, caller_id, caller_name = session.chat_id, session.caller_id, session.caller_name
-        self._chat_to_msg.pop(chat_id, None)
+        # why: a redial can register a new call in this chat before the old one
+        # is torn down; don't take the new call's routing with us
+        if self._chat_to_msg.get(chat_id) == msg_id:
+            self._chat_to_msg.pop(chat_id)
+        newer = self._sessions.get(self._chat_to_msg.get(chat_id))
+        if newer is not None and _call_thread_id(newer.msg_id) == _call_thread_id(msg_id):
+            # why: shared-history mode gives both calls the same gateway session,
+            # so clearing "our" override and noting "call ended" would hit the
+            # live redialled call. Hand the override to it so its teardown clears it.
+            if newer.model_override_key is None:
+                newer.model_override_key = session.model_override_key
+            session.model_override_key = None
+            notify_ai = False
         self._clear_model_override(session)
         session.audio_buffer.stop()
         # pc.close() can hang if ICE is in a bad state — don't let it block shutdown
@@ -1570,6 +1634,15 @@ class CallManager:
         # Tell the AI the call is over so it doesn't think it's still connected.
         if notify_ai:
             asyncio.ensure_future(self._note_call_ended(chat_id, caller_id, caller_name, msg_id))
+
+    def _call_session_id(self, source) -> Optional[str]:
+        """Hermes session_id behind a call's session source, or None."""
+        gw = self._gateway()
+        try:
+            return gw.session_store.peek_session_id(gw._session_key_for_source(source)) or None
+        except Exception as e:
+            logger.debug("Could not resolve call session id: %s", e)
+            return None
 
     async def _note_call_ended(self, chat_id: str, caller_id: str, caller_name: str,
                                msg_id: int) -> None:
@@ -1607,13 +1680,23 @@ class CallManager:
                 user_id=caller_id or "user", user_name=caller_name or "User",
                 thread_id=None,
             )
+            # Point at the call session so the text-chat AI can read what was
+            # said instead of telling the user it has no record of the call.
+            call_sid = self._call_session_id(source)
+            if call_sid:
+                text = ("[A voice call with the user has just ended (transcript: session "
+                        f"{call_sid}; read it with session_search(session_id=\"{call_sid}\") "
+                        "if the user asks about the call). Do not call back right now.]")
+            else:
+                text = "[A voice call with the user has just ended. Do not call back right now.]"
             main_event = MessageEvent(
-                text="[A voice call with the user has just ended. Do not call back right now.]",
+                text=text,
                 message_type=MessageType.TEXT,
                 source=main_source,
                 message_id=f"{CALL_END_NOTE_PREFIX}main-{int(time.monotonic() * 1000)}",
             )
-            logger.info("Notifying main thread that call ended (chat=%s)", chat_id)
+            logger.info("Notifying main thread that call ended (chat=%s, call session=%s)",
+                        chat_id, call_sid)
             with contextlib.suppress(Exception):
                 await self._to_hermes(main_event)
 
