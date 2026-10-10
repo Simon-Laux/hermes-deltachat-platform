@@ -94,8 +94,7 @@ def contract():
         "prompt_params_match": {
             name: params(dc.DeltaChatAdapter, name) == params(BasePlatformAdapter, name)
             for name in ("send_slash_confirm", "send_clarify")},
-        "slash_confirm_api": all(hasattr(slash_confirm, n) for n in (
-            "resolve",)),
+        "slash_confirm_api": hasattr(slash_confirm, "resolve"),
         "clarify_api": all(hasattr(clarify_gateway, n) for n in (
             "_lock", "_entries", "resolve_gateway_clarify", "mark_awaiting_text"))
             and "multi_select" in {f.name for f in dataclasses.fields(clarify_gateway._ClarifyEntry)},

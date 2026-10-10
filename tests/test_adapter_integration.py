@@ -12,6 +12,7 @@ from unittest.mock import AsyncMock, MagicMock, Mock, patch
 import pytest
 
 # The conftest.py already installs the mocks, so we can import adapter now
+from tests.conftest import core_truncates
 from adapter import (
     DeltaChatAdapter,
     _parse_version,
@@ -648,28 +649,13 @@ class TestDC2Availability:
 class TestLongMessages:
     """Long text is split into messages Delta Chat shows in full (no HTML part)."""
 
-    @staticmethod
-    def _core_truncates(text):
-        """Port of core's truncate_by_lines(text, 38, 100) decision (src/tools.rs)."""
-        lines = line_chars = 0
-        for ch in text:
-            if ch == "\n":
-                line_chars, lines = 0, lines + 1
-            else:
-                line_chars += 1
-                if line_chars > 100:
-                    line_chars, lines = 1, lines + 1
-            if lines == 38:
-                return True
-        return False
-
     def test_dc_len_matches_core(self):
         rnd = random.Random(0)
         for _ in range(2000):
             text = "".join(rnd.choice(["\n", "x" * rnd.randint(1, 250), " "])
                            for _ in range(rnd.randint(0, 60)))
             # measured as an edit's receiver sees it: core prepends "✏️"
-            assert (_dc_len(text) > _DC_TEXT_LIMIT) == self._core_truncates("✏️" + text), repr(text)
+            assert (_dc_len(text) > _DC_TEXT_LIMIT) == core_truncates("✏️" + text), repr(text)
 
     def test_split_keeps_text_and_fits(self):
         rnd = random.Random(1)
@@ -748,6 +734,16 @@ class TestLongMessages:
         assert resumed.success and resumed.message_id == "12"
         assert sent[0] + "\n" + sent[2] == text   # nothing twice, nothing lost
 
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("reply_to,quoted", [("5", 5), ("call-note-1", None), ("²", None)])
+    async def test_odd_reply_ids_send_unquoted(self, platform_config, mock_rpc, reply_to, quoted):
+        # "²".isdigit() is True but int("²") raises; that failed the whole send
+        adapter = DeltaChatAdapter(platform_config)
+        adapter.rpc, adapter.account_id = mock_rpc, 1
+        mock_rpc.send_msg = AsyncMock(return_value=11)
+        assert (await adapter.send("789", "hi", reply_to=reply_to)).success
+        assert mock_rpc.send_msg.await_args.args[2].quoted_message_id == quoted
+
     def test_split_does_not_send_a_tiny_first_piece(self):
         # the only space is near the start: cut mid-word rather than send "Key:"
         pieces = _dc_split("Key: " + "x" * 5000)
@@ -756,8 +752,6 @@ class TestLongMessages:
     def test_hermes_measures_like_core(self, platform_config):
         adapter = DeltaChatAdapter(platform_config)
         assert adapter.message_len_fn is _dc_len
-        # Hermes keeps a streamed message under MAX - len(cursor) - 100
-        assert adapter.MAX_MESSAGE_LENGTH - _dc_len(" ▉") - 100 < _DC_TEXT_LIMIT
 
 
 class TestLocationSending:

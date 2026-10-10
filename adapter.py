@@ -323,6 +323,16 @@ def _is_on(value) -> bool:
     return str(value).strip().lower() not in ("", "0", "false", "no", "off")
 
 
+def _setting(extra: dict, key: str, env: str, default=""):
+    """platforms.deltachat-platform.<key> from config.yaml, else the env var.
+
+    A blank env var means *default*: that's what a blank answer to the
+    plugin.yaml prompt leaves behind.
+    """
+    raw = extra.get(key)
+    return (os.getenv(env) or default) if raw is None else raw
+
+
 # Delta Chat shows a received text in full only up to 38 lines, where a line
 # longer than 100 characters counts as several (core: truncate_by_lines,
 # DC_DESIRED_TEXT_LINES / _LINE_LEN). Longer text is cut with "[...]" and the
@@ -351,8 +361,7 @@ def _dc_split(text: str) -> List[str]:
     piece; else mid-word.
     """
     pieces = []
-    # no text longer than this fits, so measuring past it is wasted work
-    # (re-measuring the whole rest per piece made 1 MB take ~50 s)
+    # nothing longer than this fits; measuring further is wasted work
     window = _DC_TEXT_LIMIT + _DC_TEXT_LINES
     while _dc_len(text[:window + 1]) > _DC_TEXT_LIMIT:
         lo, hi = 1, min(len(text), window)  # longest prefix that fits
@@ -381,13 +390,10 @@ def _edit_interval(config) -> Optional[float]:
     or DELTACHAT_MESSAGE_EDITING / DELTACHAT_EDIT_MIN_INTERVAL.
     """
     extra = config.extra or {}
-    raw = extra.get("message_editing")
-    if not (_env_flag("DELTACHAT_MESSAGE_EDITING") if raw is None else _is_on(raw)):
+    if not _is_on(_setting(extra, "message_editing", "DELTACHAT_MESSAGE_EDITING")):
         return None
-    raw = extra.get("edit_min_interval")
-    if raw is None:
-        # `or`: a blank answer to the plugin.yaml prompt means the default
-        raw = os.getenv("DELTACHAT_EDIT_MIN_INTERVAL") or _DEFAULT_EDIT_INTERVAL
+    raw = _setting(extra, "edit_min_interval", "DELTACHAT_EDIT_MIN_INTERVAL",
+                   _DEFAULT_EDIT_INTERVAL)
     try:
         interval = float(raw)
     except (TypeError, ValueError):
@@ -679,7 +685,8 @@ def _quote_id(reply_to) -> Optional[int]:
     the whole send instead of just sending it unquoted.
     """
     s = str(reply_to or "").strip()
-    return int(s) if s.isdigit() else None
+    # isascii: "²".isdigit() is True, but int("²") raises
+    return int(s) if s.isascii() and s.isdigit() else None
 
 
 async def _resolve_chat_token(rpc, account_id: int, token: str) -> Optional[int]:
@@ -742,14 +749,12 @@ class DeltaChatAdapter(BasePlatformAdapter):
     # cursor wrapping a long last line, one for a code fence Hermes closes.
     MAX_MESSAGE_LENGTH = _DC_TEXT_LIMIT
 
-    @property
-    def message_len_fn(self):
-        return _dc_len
+    message_len_fn = staticmethod(_dc_len)
 
     async def _resume_partial_send(self, chat_id, result, *, reply_to, metadata):
         """Hermes' retry after a partial send(): send only the parts that didn't go
         out. A send_msg that raised queued nothing, so nothing is sent twice."""
-        rest = (getattr(result, "raw_response", None) or {}).get("remainder")
+        rest = (result.raw_response or {}).get("remainder")
         return await self.send(chat_id, rest, metadata=metadata) if rest else None
 
     def _ea_fit(self, text, budget, suffix="...", escape=None) -> str:
@@ -793,14 +798,9 @@ class DeltaChatAdapter(BasePlatformAdapter):
         # config.yaml (Hermes copies them into config.extra), or the
         # DELTACHAT_REQUIRE_MENTION / DELTACHAT_MENTION_ALIASES env vars.
         extra = self.config.extra or {}
-        raw = extra.get("require_mention")
-        self._require_mention = (
-            _env_flag("DELTACHAT_REQUIRE_MENTION") if raw is None
-            else _is_on(raw)
-        )
-        raw = extra.get("mention_aliases")
-        if raw is None:
-            raw = os.getenv("DELTACHAT_MENTION_ALIASES", "")
+        self._require_mention = _is_on(
+            _setting(extra, "require_mention", "DELTACHAT_REQUIRE_MENTION"))
+        raw = _setting(extra, "mention_aliases", "DELTACHAT_MENTION_ALIASES")
         if isinstance(raw, str):
             raw = raw.split(",")
         # "@spooky" and "spooky" both mean the alias spooky
@@ -808,10 +808,8 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._warned_no_mention_names = False
 
         # On by default; off removes the list again and keeps your own bio text.
-        raw = extra.get("commands_bio")
         self._commands_bio_enabled = _is_on(
-            # `or`: a blank answer to the plugin.yaml prompt means the default
-            (os.getenv("DELTACHAT_COMMANDS_BIO") or "1") if raw is None else raw)
+            _setting(extra, "commands_bio", "DELTACHAT_COMMANDS_BIO", "1"))
 
     async def _intake_allows(self, msg: Dict, chat_id) -> bool:
         """Drop what Hermes' own authorization can't judge, and leave groups
@@ -1591,7 +1589,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
                     if not ids:
                         raise
                     # Hermes must not send the visible head again on retry
-                    logger.error(f"Error sending part {len(ids) + 1}/{len(pieces)} "
+                    logger.error(f"Error sending part {n + 1}/{len(pieces)} "
                                  f"to chat {chat_id}: {e}")
                     return SendResult(
                         success=False, error=str(e), message_id=ids[-1],
@@ -2875,13 +2873,13 @@ class DeltaChatEditingAdapter(DeltaChatAdapter):
 
     SUPPORTS_MESSAGE_EDITING = True
 
-    def __init__(self, config: PlatformConfig, interval: float = _DEFAULT_EDIT_INTERVAL):
+    def __init__(self, config: PlatformConfig, interval: float):
         super().__init__(config)
         logger.info("Message editing on (experimental): at most one edit per %ss", interval)
         self._edit_interval = interval
         # msg id -> newest text not yet sent, oldest first
         self._edit_pending: Dict[int, str] = {}
-        self._edit_last_at = float("-inf")
+        self._edit_next_at = float("-inf")  # loop time the next interim edit may go out
         self._edit_flusher: Optional[asyncio.Task] = None
         # why: _AsyncRpc runs in an executor, so cancelling a task can't stop an
         # edit already on its way; serialising sends keeps the final text last.
@@ -2892,44 +2890,40 @@ class DeltaChatEditingAdapter(DeltaChatAdapter):
         if result.success and result.message_id:
             # a new message is an email too: without this a streamed reply's
             # first edit followed its first chunk ~50 ms later
-            self._edit_last_at = asyncio.get_running_loop().time()
+            self._edit_next_at = asyncio.get_running_loop().time() + self._edit_interval
         return result
 
     async def edit_message(self, chat_id: str, message_id: str, content: str, *,
                            finalize: bool = False, metadata=None) -> SendResult:
         """Edit one of our messages, at most one interim edit per interval.
 
-        why: every edit is a whole email ("✏️" + full text) to every chat
-        member through chatmail relays run by volunteers, and Hermes asks for
-        one per streamed chunk. Interim edits share one budget per account;
-        a deferred one is queued (newest text wins) and reported as done, so
-        Hermes' idea of what's on screen matches what will be, and it stops
-        re-sending unchanged text. finalize=True (end of turn or segment)
-        goes out at once — it replaces the fresh message Hermes would
-        otherwise send. Error strings are fixed: Hermes reads "rate"/"flood"
-        in them as flood control.
+        why: each edit is an email ("✏️" + full text) to every member via
+        volunteer-run relays, and Hermes asks for one per streamed chunk. A
+        deferred interim edit is queued (newest text wins) and reported as
+        done, so Hermes stops re-sending it; finalize=True (end of turn or
+        segment) goes out at once. Error strings are fixed: Hermes reads
+        "rate"/"flood" in them as flood control.
         """
-        msg_id = str(message_id or "")
-        if not self.rpc or not self.account_id or not (msg_id.isascii() and msg_id.isdigit()):
+        msg = _quote_id(message_id)
+        if not self.rpc or not self.account_id or msg is None:
             return SendResult(success=False, error="edit unavailable")
-        msg = int(msg_id)
+        msg_id = str(msg)
         if finalize:
             # a finalize, even a refused one, supersedes queued interim text
             self._edit_pending.pop(msg, None)
         if not content.strip():
             return SendResult(success=False, error="empty edit")
         if _dc_len(content) > _DC_TEXT_LIMIT:
-            # Hermes splits before this (MAX_MESSAGE_LENGTH / message_len_fn);
-            # if it doesn't, refuse rather than have the text folded away. It
-            # then sends the rest via send(), which splits too. retryable keeps
-            # a tool-progress bubble from turning into one message per tool.
+            # Hermes splits first (message_len_fn); refuse rather than have core
+            # fold it. retryable: a tool-progress bubble doesn't become one
+            # message per tool.
             return SendResult(success=False, error="too long to edit", retryable=not finalize)
         loop = asyncio.get_running_loop()
         if finalize or (not self._edit_pending and not self._edit_lock.locked()
-                        and loop.time() >= self._edit_last_at + self._edit_interval):
+                        and loop.time() >= self._edit_next_at):
             async with self._edit_lock:
                 # re-check: we may have queued behind finalizes that used the slot
-                if finalize or loop.time() >= self._edit_last_at + self._edit_interval:
+                if finalize or loop.time() >= self._edit_next_at:
                     self._edit_pending.pop(msg, None)
                     if not await self._send_edit(msg, content):
                         return SendResult(success=False, error="edit failed")
@@ -2941,7 +2935,7 @@ class DeltaChatEditingAdapter(DeltaChatAdapter):
 
     async def _send_edit(self, msg: int, text: str) -> bool:
         """Send one edit; caller holds _edit_lock."""
-        self._edit_last_at = asyncio.get_running_loop().time()
+        self._edit_next_at = asyncio.get_running_loop().time() + self._edit_interval
         rpc, account_id = self.rpc, self.account_id
         if not rpc or not account_id:
             return False
@@ -2955,17 +2949,15 @@ class DeltaChatEditingAdapter(DeltaChatAdapter):
     async def _flush_edits(self) -> None:
         """Send deferred edits, oldest message first, one per interval."""
         loop = asyncio.get_running_loop()
-        while True:
-            delay = self._edit_last_at + self._edit_interval - loop.time()
+        while self._edit_pending:
+            delay = self._edit_next_at - loop.time()
             if delay > 0:
                 await asyncio.sleep(delay)
             async with self._edit_lock:
-                if not self._edit_pending:
-                    return
-                if loop.time() < self._edit_last_at + self._edit_interval:
-                    continue  # a finalize used the slot meanwhile
-                msg = next(iter(self._edit_pending))
-                await self._send_edit(msg, self._edit_pending.pop(msg))
+                # a finalize may have used the slot, or sent the text, meanwhile
+                if self._edit_pending and loop.time() >= self._edit_next_at:
+                    msg = next(iter(self._edit_pending))
+                    await self._send_edit(msg, self._edit_pending.pop(msg))
 
     async def _cleanup(self) -> None:
         if self._edit_flusher:
