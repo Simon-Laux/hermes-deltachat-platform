@@ -3335,7 +3335,7 @@ def register_rpc_tools(ctx) -> None:
 
     async def _start_call_handler(args: dict, **kwargs) -> str:
         args = args or {}
-        chat_token = args.get("chat_token")
+        chat_token = (args.get("chat_token") or "").strip()
         # `opening` is the exact line spoken on connect; accept `topic` as alias.
         opening = (args.get("opening") or args.get("topic") or "").strip()
         adapter = _active_adapter
@@ -3358,6 +3358,12 @@ def register_rpc_tools(ctx) -> None:
             if real_chat_id is None:
                 return json.dumps({"error": "No Delta Chat chat behind this turn — pass the "
                                             "chat_token of the person to call"})
+
+        # why: spoken turns have this chat as their session, so "can we talk
+        # about X" on a call could dial it again — the new call takes over the
+        # chat's routing and the live call goes silent, then loses it for good.
+        if adapter._call_manager.has_active_call(str(real_chat_id)):
+            return json.dumps({"error": "Already on a call in this chat — just keep talking"})
 
         try:
             msg_id = await adapter._call_manager.start_call(str(real_chat_id), opening=opening)

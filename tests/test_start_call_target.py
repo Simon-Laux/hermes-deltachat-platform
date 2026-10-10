@@ -29,6 +29,7 @@ def start_call():
 def calls(monkeypatch):
     fake = MagicMock()
     fake._call_manager.start_call = AsyncMock(return_value=7)
+    fake._call_manager.has_active_call = lambda chat_id: False
     monkeypatch.setattr(adapter, "_active_adapter", fake)
     return fake._call_manager
 
@@ -71,3 +72,28 @@ async def test_token_wins_over_the_asking_chat(start_call, calls, monkeypatch):
     monkeypatch.setitem(adapter._chat_token_to_id, "tok", 30)
     assert json.loads(await start_call({"chat_token": "tok", "opening": "Hi!"}))["success"]
     calls.start_call.assert_awaited_once_with("30", opening="Hi!")
+
+
+@pytest.mark.asyncio
+async def test_no_second_call_into_a_live_one(start_call, calls, monkeypatch):
+    """A spoken turn has the call's chat as its session; dialling it again would
+    take over the routing of the running call."""
+    _session(monkeypatch, HERMES_SESSION_PLATFORM=DC, HERMES_SESSION_CHAT_ID="20")
+    calls.has_active_call = lambda chat_id: chat_id == "20"
+    assert "error" in json.loads(await start_call({"opening": "Hi!"}))
+    calls.start_call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_unknown_token_does_not_fall_back(start_call, calls, monkeypatch):
+    """A made-up or stale token must fail, not quietly ring the asking chat."""
+    _session(monkeypatch, HERMES_SESSION_PLATFORM=DC, HERMES_SESSION_CHAT_ID="20")
+    assert "error" in json.loads(await start_call({"chat_token": "nope", "opening": "Hi!"}))
+    calls.start_call.assert_not_awaited()
+
+
+@pytest.mark.asyncio
+async def test_blank_token_calls_the_asking_chat(start_call, calls, monkeypatch):
+    _session(monkeypatch, HERMES_SESSION_PLATFORM=DC, HERMES_SESSION_CHAT_ID="20")
+    assert json.loads(await start_call({"chat_token": "  ", "opening": "Hi!"}))["success"]
+    calls.start_call.assert_awaited_once_with("20", opening="Hi!")
