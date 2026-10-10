@@ -3,6 +3,7 @@
 Integrates Delta Chat as a messaging platform using deltachat2 (direct JSON-RPC).
 """
 
+import dataclasses
 import functools
 import json
 import math
@@ -2593,6 +2594,8 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 chat_type=chat_type,
                 user_id=user_id,
                 user_name=user_name,
+                # the turn's triggering message (HERMES_SESSION_MESSAGE_ID): what dc_react reacts to
+                message_id=str(msg_id),
             )
 
             # Append chat token for dc_safe_rpc_call — skip on slash commands so
@@ -2718,6 +2721,7 @@ class DeltaChatAdapter(BasePlatformAdapter):
             chat_type=chat_type,
             user_id=user_id,
             user_name=user_name,
+            message_id=str(msg_id),
         )
 
         token = await _get_or_create_chat_token(self.rpc, self.account_id, int(chat_id))
@@ -2843,6 +2847,19 @@ class DeltaChatAdapter(BasePlatformAdapter):
 
         else:
             logger.debug(f"Unhandled view_type={view_type}, file={filename}")
+
+    async def handle_message(self, event: MessageEvent) -> None:
+        """Hermes' handle_message, minus a stale triggering message on its own turns.
+
+        why: background-process notifications, restart auto-resume and plugin
+        injection run on the session's stored source, whose message_id is the
+        chat's first message; dc_react would react to that. Hermes drops it the
+        same way for goal prompts (gateway/run_goals.py _synthetic_prompt_event).
+        A copy, since that source is the live session origin.
+        """
+        if getattr(event, "internal", False) and getattr(event.source, "message_id", None):
+            event.source = dataclasses.replace(event.source, message_id=None)
+        await super().handle_message(event)
 
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Get metadata for a chat.
@@ -3325,6 +3342,29 @@ def register_rpc_tools(ctx) -> None:
         except Exception as e:
             return json.dumps({"error": str(e)})
 
+    async def _react_handler(args: dict, **kwargs) -> str:
+        adapter, chat_id = _active_adapter, _session_dc_chat_id()
+        if adapter is None or chat_id is None:
+            return json.dumps({"error": "Only works when answering a Delta Chat message"})
+        from gateway.session_context import get_session_env
+        # Hermes binds the message that started this turn; call turns have none
+        msg_id = get_session_env("HERMES_SESSION_MESSAGE_ID", "")
+        if not msg_id.isdigit():
+            return json.dumps({"error": "No message to react to in this turn"})
+        emoji = (args or {}).get("emoji")
+        # why: Hermes doesn't check arguments against the schema, and core sends any
+        # string as the "emoji" -- a sentence would show up as a reaction
+        # core also turns one of 30+ bytes into "remove" (Reaction::new); family
+        # emoji with skin tones get there
+        if not isinstance(emoji, str) or len(emoji.strip().encode()) >= 30 or len(emoji.split()) > 1:
+            return json.dumps({"error": "emoji must be a single emoji, or '' to remove yours"})
+        emoji = emoji.strip()
+        try:
+            await adapter.rpc.send_reaction(adapter.account_id, int(msg_id), [emoji] if emoji else [])
+        except Exception as e:
+            return json.dumps({"error": f"Reaction failed: {e}"})
+        return json.dumps({"success": True})
+
     async def _end_call_handler(args: dict, **kwargs) -> str:
         adapter = _active_adapter
         if adapter is None or adapter._call_manager is None:
@@ -3510,6 +3550,35 @@ def register_rpc_tools(ctx) -> None:
         handler=_safe_call_handler,
         is_async=True,
         emoji="🔒",
+    )
+
+    ctx.register_tool(
+        name="dc_react",
+        toolset="deltachat",
+        schema={
+            "description": (
+                "React to the message you are answering with a single emoji, like a tapback. "
+                "Use it when a reaction is what a person would do: something funny gets a 😂, "
+                "warmth gets a ❤️, a plan you're on board with gets a 👍. Still reply with "
+                "text, if only a few words: a turn without text shows the user an error. "
+                "Occasionally, when felt: not on every message, never as a status signal, and "
+                "never narrate it ('I reacted with...'). One reaction per message: another "
+                "emoji replaces yours, an empty string removes it."
+            ),
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "emoji": {
+                        "type": "string",
+                        "description": "The emoji, e.g. '❤️', '😂', '👍'. Empty string removes your reaction.",
+                    },
+                },
+                "required": ["emoji"],
+            },
+        },
+        handler=_react_handler,
+        is_async=True,
+        emoji="💛",
     )
 
     ctx.register_tool(

@@ -64,6 +64,8 @@ def test_api_contract(run):
     assert {"success", "message_id", "error", "retryable"} <= set(c["sendresult_fields"])
     assert all(c["prompt_params_match"].values()), c["prompt_params_match"]
     assert c["slash_confirm_api"] and c["clarify_api"]
+    assert c["session_vars"] == [], c["session_vars"]  # names Hermes doesn't know
+    assert c["build_source_message_id"]
     # our override passes the lists by keyword, so they must stay nameable
     assert [n for n, _ in c["deliver_media_params"]] == [
         "self", "event", "media_files", "local_files"]
@@ -126,3 +128,8 @@ def test_streamed_reply_in_a_call_is_spoken_once_in_full(run, case):
     assert c["log"] == []  # nothing leaks into the chat as text
     assert c["final_sent"]
     assert c["sends"] < 20, c["sends"]
+
+
+def test_hermes_own_turns_drop_the_stored_message_id(run):
+    """dc_react must not hit the chat's first message on a notification turn."""
+    assert run["internal"] == {"seen": [None], "origin_kept": "7"}, run["internal"]
