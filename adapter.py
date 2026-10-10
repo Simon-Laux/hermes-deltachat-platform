@@ -4,7 +4,6 @@ Integrates Delta Chat as a messaging platform using deltachat2 (direct JSON-RPC)
 """
 
 import functools
-import html
 import json
 import math
 import os
@@ -324,7 +323,48 @@ def _is_on(value) -> bool:
     return str(value).strip().lower() not in ("", "0", "false", "no", "off")
 
 
-_DEFAULT_EDIT_INTERVAL = 5.0
+# Delta Chat shows a received text in full only up to 38 lines, where a line
+# longer than 100 characters counts as several (core: truncate_by_lines,
+# DC_DESIRED_TEXT_LINES / _LINE_LEN). Longer text is cut with "[...]" and the
+# rest hidden behind "Show full message", so we never send a text above it.
+_DC_TEXT_LINES = 38
+_DC_LINE_LEN = 100
+_DC_TEXT_LIMIT = _DC_TEXT_LINES * _DC_LINE_LEN
+
+
+def _dc_len(text: str) -> int:
+    """Length as Delta Chat displays it: display lines x 100.
+
+    Used as the adapter's message_len_fn, so Hermes' own splitting (streamed
+    replies, tool progress, fallback sends) measures what core truncates by.
+    Grows monotonically with the text, as Hermes' bisection needs.
+    """
+    return _DC_LINE_LEN * sum(1 + max(0, len(line) - 1) // _DC_LINE_LEN
+                              for line in text.split("\n"))
+
+
+def _dc_split(text: str) -> List[str]:
+    """Cut text into pieces Delta Chat shows in full; "".join(pieces) == text.
+
+    Cuts after a newline when one is in the second half of the piece, else
+    after a space, else mid-word.
+    """
+    pieces = []
+    while _dc_len(text) > _DC_TEXT_LIMIT:
+        lo, hi = 1, len(text)  # longest prefix that fits
+        while lo < hi:
+            mid = (lo + hi + 1) // 2
+            lo, hi = (mid, hi) if _dc_len(text[:mid]) <= _DC_TEXT_LIMIT else (lo, mid - 1)
+        cut = text.rfind("\n", 0, lo) + 1
+        if cut < lo // 2:
+            cut = text.rfind(" ", 0, lo) + 1 or lo
+        pieces.append(text[:cut])
+        text = text[cut:]
+    pieces.append(text)
+    return pieces
+
+
+_DEFAULT_EDIT_INTERVAL = 3.0
 _MIN_EDIT_INTERVAL = 1.0
 
 
@@ -691,6 +731,13 @@ class DeltaChatAdapter(BasePlatformAdapter):
     # why: Hermes treats a missing attribute as True and then streams with a
     # " ▉" cursor it can never remove. Editing lives in DeltaChatEditingAdapter.
     SUPPORTS_MESSAGE_EDITING = False
+    # In _dc_len units. Hermes' stream consumer keeps a live message under
+    # MAX_MESSAGE_LENGTH - len(cursor) - 100 = 37 lines, so the cursor still fits.
+    MAX_MESSAGE_LENGTH = _DC_TEXT_LIMIT + _DC_LINE_LEN
+
+    @property
+    def message_len_fn(self):
+        return _dc_len
 
     def __init__(self, config: PlatformConfig):
         """Initialize the adapter.
@@ -1438,53 +1485,6 @@ class DeltaChatAdapter(BasePlatformAdapter):
 
         return None
 
-    def _format_html_message(self, text: str, max_lines: int = 40) -> tuple:
-        """Format long messages with HTML for better readability in Delta Chat.
-
-        If message is longer than max_lines, returns (text_part, html_part)
-        where text_part is the first max_lines and html_part is the full
-        message with proper styling. Otherwise returns (text, None).
-
-        Args:
-            text: The message text
-            max_lines: Maximum lines before using HTML (default: 40)
-
-        Returns:
-            Tuple of (plain_text, html_text) - html_text is None if not needed
-        """
-        lines = text.split("\n")
-        if len(lines) <= max_lines:
-            return (text, None)
-
-        # First max_lines as plain text
-        text_part = "\n".join(lines[:max_lines])
-
-        # Full message as HTML with nice formatting; escape to prevent injection
-        escaped = html.escape(text).replace("\n", "<br>\n")
-        html_part = f"""<!DOCTYPE html>
-<html>
-<head>
-<meta charset="utf-8">
-<style>
-body {{
-    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
-    font-size: 16px;
-    line-height: 1.5;
-    color: #333;
-    background-color: #fff;
-    padding: 16px;
-    max-width: 800px;
-    margin: 0 auto;
-}}
-</style>
-</head>
-<body>
-{escaped}
-</body>
-</html>"""
-
-        return (text_part, html_part)
-
     async def _resolve_chat_id(self, chat_id) -> int:
         """Real DC chat id for an outbound target: a numeric id or a chat token.
 
@@ -1552,33 +1552,39 @@ body {{
                     error="Delta Chat not connected",
                 )
 
-            # Format long messages with HTML
-            text_part, html_part = self._format_html_message(content)
+            from deltachat2.types import MsgData
 
+            dc_chat_id = await self._resolve_chat_id(chat_id)
             quoted_id = _quote_id(reply_to)
+            # Long text goes out as several messages that Delta Chat shows in
+            # full, not one folded behind "Show full message" (see _dc_len).
+            pieces = [p for p in _dc_split(content) if p.strip("\n")] or [content]
+            ids: List[str] = []
+            delivered = 0
+            for piece in pieces:
+                try:
+                    msg_id = await self.rpc.send_msg(
+                        self.account_id, dc_chat_id,
+                        MsgData(text=piece.strip("\n"),
+                                quoted_message_id=None if ids else quoted_id),
+                    )
+                except Exception as e:
+                    if not ids:
+                        raise
+                    # Hermes must not send the visible head again on retry
+                    logger.error(f"Error sending part {len(ids) + 1}/{len(pieces)} "
+                                 f"to chat {chat_id}: {e}")
+                    return SendResult(
+                        success=False, error=str(e), message_id=ids[-1],
+                        raw_response={"partial_overflow": True, "last_message_id": ids[-1],
+                                      "delivered_prefix": content[:delivered]},
+                    )
+                ids.append(str(msg_id))
+                delivered += len(piece)
 
-            if html_part:
-                from deltachat2.types import MsgData, MessageViewtype
-
-                msg_id = await self.rpc.send_msg(
-                    self.account_id,
-                    await self._resolve_chat_id(chat_id),
-                    MsgData(text=text_part, html=html_part, viewtype=MessageViewtype.TEXT, quoted_message_id=quoted_id),
-                )
-            else:
-                from deltachat2.types import MsgData
-
-                msg_id = await self.rpc.send_msg(
-                    self.account_id,
-                    await self._resolve_chat_id(chat_id),
-                    MsgData(text=content, quoted_message_id=quoted_id),
-                )
-
-            logger.debug(f"Sent message {msg_id} to chat {chat_id}")
-            return SendResult(
-                success=True,
-                message_id=str(msg_id),
-            )
+            logger.debug(f"Sent message(s) {', '.join(ids)} to chat {chat_id}")
+            return SendResult(success=True, message_id=ids[-1],
+                              continuation_message_ids=tuple(ids[:-1]))
 
         except Exception as e:
             logger.error(f"Error sending message to chat {chat_id}: {e}")
@@ -2887,10 +2893,11 @@ class DeltaChatEditingAdapter(DeltaChatAdapter):
             self._edit_pending.pop(msg, None)
         if not content.strip():
             return SendResult(success=False, error="empty edit")
-        if self._format_html_message(content)[1] is not None:
-            # core can't edit or create HTML messages; Hermes falls back to
-            # send() for the rest, which adds the HTML part. retryable keeps a
-            # long tool-progress bubble frozen instead of one message per tool.
+        if _dc_len(content) > _DC_TEXT_LIMIT:
+            # Hermes splits before this (MAX_MESSAGE_LENGTH / message_len_fn);
+            # if it doesn't, refuse rather than have the text folded away. It
+            # then sends the rest via send(), which splits too. retryable keeps
+            # a tool-progress bubble from turning into one message per tool.
             return SendResult(success=False, error="too long to edit", retryable=not finalize)
         loop = asyncio.get_running_loop()
         if finalize or (not self._edit_pending and not self._edit_lock.locked()
@@ -3019,15 +3026,13 @@ def register_platform(ctx):
             "them when the content really is code.) "
             "You cannot edit a message after sending it — get it right the first time "
             "(you can still delete one, see below). "
-            "KEEP REPLIES UNDER 40 LINES. Past that, only the first 40 lines stay in the "
-            "chat bubble and the rest is moved into an HTML part the user has to tap "
-            "\"show full message\" to read — it opens like an email, which is a real "
-            "interruption mid-conversation. Prefer to say less, or to send several "
-            "shorter messages, over crossing that line. "
+            "KEEP REPLIES SHORT, ideally under 38 lines. A longer reply is split into "
+            "several chat messages, each one an email to every chat member, and a wall "
+            "of messages is hard to follow on a phone. Prefer to say less. "
             "For genuinely long output — a report, a full document, a data dump — do not "
             "paste it at all. Write a PDF and attach it, or build an interactive webxdc "
             "app (see the webxdc instructions below). Both arrive as a normal attachment "
-            "and are far nicer to read than a wall of text or an HTML fallback. "
+            "and are far nicer to read than a wall of text. "
             "You CAN send voice messages (use send_voice tool), videos, images, files, and delete messages. "
             "When a user sends a voice message, it is automatically transcribed — just respond to the transcribed content normally. "
             "Location messages can be sent to share points of interest on a map. "

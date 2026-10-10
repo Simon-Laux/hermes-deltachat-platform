@@ -145,7 +145,7 @@ async def main():
     print(json.dumps({
         "contract": contract(),
         "stream": await stream(words, 2.0 / len(words)),
-        "long": await stream(words[:10] + [f"\nL{i}" for i in range(45)], 0.03),
+        "long": await stream(words[:10] + [f"\nL{i}" for i in range(90)], 0.02),
         "media": await media(),
     }))
 

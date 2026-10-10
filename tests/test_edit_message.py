@@ -80,12 +80,12 @@ def test_default_off_keeps_tool_progress_off():
 
 @pytest.mark.parametrize("extra,env,expected", [
     ({}, {"DELTACHAT_MESSAGE_EDITING": "0"}, None),
-    ({}, {"DELTACHAT_MESSAGE_EDITING": "1"}, 5.0),
-    ({}, {"DELTACHAT_MESSAGE_EDITING": "1", "DELTACHAT_EDIT_MIN_INTERVAL": ""}, 5.0),
+    ({}, {"DELTACHAT_MESSAGE_EDITING": "1"}, 3.0),
+    ({}, {"DELTACHAT_MESSAGE_EDITING": "1", "DELTACHAT_EDIT_MIN_INTERVAL": ""}, 3.0),
     ({}, {"DELTACHAT_MESSAGE_EDITING": "1", "DELTACHAT_EDIT_MIN_INTERVAL": "8"}, 8.0),
     ({"message_editing": True, "edit_min_interval": 0.1}, {}, 1.0),   # clamped
-    ({"message_editing": True, "edit_min_interval": "x"}, {}, 5.0),
-    ({"message_editing": True, "edit_min_interval": "inf"}, {}, 5.0),
+    ({"message_editing": True, "edit_min_interval": "x"}, {}, 3.0),
+    ({"message_editing": True, "edit_min_interval": "inf"}, {}, 3.0),
     ({"message_editing": False}, {"DELTACHAT_MESSAGE_EDITING": "1"}, None),
 ])
 def test_config(monkeypatch, extra, env, expected):
@@ -166,7 +166,7 @@ async def test_finalize_waits_for_in_flight_flush(ed):
 
 
 @pytest.mark.parametrize("message_id,content,connected", [
-    ("123", "\n".join(["x"] * 41), True),   # would need an HTML part
+    ("123", "\n".join(["x"] * 41), True),   # past what Delta Chat shows in full
     ("__no_edit__", "hi", True),
     ("²", "hi", True),                      # isdigit() but not int()-able
     ("123", "  \n", True),

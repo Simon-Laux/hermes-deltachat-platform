@@ -41,6 +41,7 @@ class MockSendResult:
     metadata: Optional[Dict[str, Any]] = None
     raw_response: Any = None
     retryable: bool = False
+    continuation_message_ids: tuple = ()
 
 
 @dataclass

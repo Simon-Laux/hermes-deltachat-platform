@@ -5,6 +5,7 @@ Tests the adapter with mocked Hermes gateway classes.
 
 import asyncio
 import os
+import random
 import tempfile
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, Mock, patch
@@ -18,6 +19,9 @@ from adapter import (
     _check_dc2_available,
     MIN_DC_VERSION,
     MAX_TESTED_DC_VERSION,
+    _DC_TEXT_LIMIT,
+    _dc_len,
+    _dc_split,
 )
 
 
@@ -641,58 +645,90 @@ class TestDC2Availability:
             sys.modules["deltachat2"] = original_modules
 
 
-class TestHTMLFormatting:
-    """Test HTML message formatting for long messages."""
+class TestLongMessages:
+    """Long text is split into messages Delta Chat shows in full (no HTML part)."""
 
-    def test_short_message_no_html(self, platform_config):
-        """Test that short messages (< 40 lines) don't get HTML formatting."""
+    @staticmethod
+    def _core_truncates(text):
+        """Port of core's truncate_by_lines(text, 38, 100) decision (src/tools.rs)."""
+        lines = line_chars = 0
+        for ch in text:
+            if ch == "\n":
+                line_chars, lines = 0, lines + 1
+            else:
+                line_chars += 1
+                if line_chars > 100:
+                    line_chars, lines = 1, lines + 1
+            if lines == 38:
+                return True
+        return False
+
+    def test_dc_len_matches_core(self):
+        rnd = random.Random(0)
+        for _ in range(2000):
+            text = "".join(rnd.choice(["\n", "x" * rnd.randint(1, 250), " "])
+                           for _ in range(rnd.randint(0, 60)))
+            assert (_dc_len(text) > _DC_TEXT_LIMIT) == self._core_truncates(text), repr(text)
+
+    def test_split_keeps_text_and_fits(self):
+        rnd = random.Random(1)
+        for _ in range(300):
+            text = "".join(rnd.choice(["\n", "word ", "x" * rnd.randint(1, 500)])
+                           for _ in range(rnd.randint(0, 400)))
+            pieces = _dc_split(text)
+            assert "".join(pieces) == text
+            assert all(_dc_len(p) <= _DC_TEXT_LIMIT for p in pieces)
+
+    @pytest.mark.asyncio
+    async def test_long_reply_is_several_messages(self, platform_config, mock_rpc):
         adapter = DeltaChatAdapter(platform_config)
-        short_text = "This is a short message."
+        adapter.rpc, adapter.account_id = mock_rpc, 1
+        mock_rpc.send_msg = AsyncMock(side_effect=[11, 12, 13])
+        text = "\n".join(f"Line {i}" for i in range(100))
 
-        text_part, html_part = adapter._format_html_message(short_text)
+        result = await adapter.send("789", text, reply_to="5")
 
-        assert text_part == short_text
-        assert html_part is None
+        sent = [c.args[2] for c in mock_rpc.send_msg.await_args_list]
+        assert len(sent) == 3
+        assert "\n".join(d.text for d in sent) == text
+        assert all(_dc_len(d.text) <= _DC_TEXT_LIMIT and not d.html for d in sent)
+        assert [d.quoted_message_id for d in sent] == [5, None, None]
+        assert result.success and result.message_id == "13"
+        assert result.continuation_message_ids == ("11", "12")
 
-    def test_long_message_with_html(self, platform_config):
-        """Test that long messages (> 40 lines) get HTML formatting."""
+    @pytest.mark.asyncio
+    async def test_short_reply_is_one_message(self, platform_config, mock_rpc):
         adapter = DeltaChatAdapter(platform_config)
-        # Create a message with 50 lines
-        long_text = "\n".join([f"Line {i}" for i in range(50)])
+        adapter.rpc, adapter.account_id = mock_rpc, 1
+        mock_rpc.send_msg = AsyncMock(return_value=11)
+        text = "\n".join(f"Line {i}" for i in range(38))   # the most core shows in full
 
-        text_part, html_part = adapter._format_html_message(long_text)
+        result = await adapter.send("789", text)
 
-        # text_part should have first 40 lines
-        assert text_part == "\n".join([f"Line {i}" for i in range(40)])
-        # html_part should contain the full message
-        assert html_part is not None
-        assert "Line 40" in html_part
-        assert "Line 49" in html_part
-        # Check for HTML styling
-        assert "sans-serif" in html_part
-        assert "font-size: 16px" in html_part
+        assert mock_rpc.send_msg.await_args.args[2].text == text
+        assert result.message_id == "11" and result.continuation_message_ids == ()
 
-    def test_exactly_40_lines_no_html(self, platform_config):
-        """Test that exactly 40 lines doesn't trigger HTML formatting."""
+    @pytest.mark.asyncio
+    async def test_partial_failure_is_reported_as_partial(self, platform_config, mock_rpc):
+        # Hermes must not re-send the part that already arrived
         adapter = DeltaChatAdapter(platform_config)
-        text_40_lines = "\n".join([f"Line {i}" for i in range(40)])
+        adapter.rpc, adapter.account_id = mock_rpc, 1
+        mock_rpc.send_msg = AsyncMock(side_effect=[11, RuntimeError("relay down")])
+        text = "\n".join(f"Line {i}" for i in range(60))
 
-        text_part, html_part = adapter._format_html_message(text_40_lines)
+        result = await adapter.send("789", text)
 
-        assert text_part == text_40_lines
-        assert html_part is None
+        first = mock_rpc.send_msg.await_args_list[0].args[2].text
+        assert not result.success and result.message_id == "11"
+        assert result.raw_response["partial_overflow"] is True
+        assert result.raw_response["last_message_id"] == "11"
+        assert result.raw_response["delivered_prefix"].strip("\n") == first
 
-    def test_41_lines_with_html(self, platform_config):
-        """Test that 41 lines triggers HTML formatting."""
+    def test_hermes_measures_like_core(self, platform_config):
         adapter = DeltaChatAdapter(platform_config)
-        text_41_lines = "\n".join([f"Line {i}" for i in range(41)])
-
-        text_part, html_part = adapter._format_html_message(text_41_lines)
-
-        # text_part should have first 40 lines
-        assert text_part == "\n".join([f"Line {i}" for i in range(40)])
-        # html_part should exist
-        assert html_part is not None
+        assert adapter.message_len_fn is _dc_len
+        # Hermes keeps a streamed message under MAX - len(cursor) - 100
+        assert adapter.MAX_MESSAGE_LENGTH - _dc_len(" ▉") - 100 < _DC_TEXT_LIMIT
 
 
 class TestLocationSending:
