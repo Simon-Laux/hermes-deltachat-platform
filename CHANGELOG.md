@@ -30,9 +30,28 @@ repairs and doc typo fixes are left out; see the git log for those.
   relay, so in-progress edits are limited to one per
   `DELTACHAT_EDIT_MIN_INTERVAL` seconds (default 5) for the whole account;
   the final text always goes out. See the README. (#54)
+- **Calls hang up on their own when nobody is there.** After 5 minutes
+  without caller speech, or about 9 minutes of background noise with no
+  pause, the bot says a short goodbye and ends the call. If it doesn't, the
+  adapter hangs up 30 seconds later. Time while the bot speaks or is still
+  working on a reply doesn't count. Tune or turn off (`0`) with
+  `DELTACHAT_CALL_IDLE_HANGUP_S` (default 300) and
+  `DELTACHAT_CALL_NOISE_HANGUP_TURNS` (default 3).
 
 ### Fixed
 
+- **Long speech without a pause in calls.** Speech that never paused for 1
+  second, or steady background noise such as a car or a TV, kept growing one
+  recording for the whole call and reached STT as a single huge clip. It is
+  now transcribed in pieces of up to 30 seconds and reaches the bot as one
+  turn when you pause. After 3 minutes without a pause the bot gets what was
+  said so far anyway, with a note that it may be background noise, and you
+  can interrupt its reply.
+- **Interrupted call replies could keep playing.** When you talked over the
+  bot and its next reply arrived while the old one was still being
+  synthesized, the old audio played after the new reply and could end the
+  call on its behalf. The bot is now also told which part of a replaced
+  reply you never heard.
 - **Attachments over Hermes' size cap still reached the agent.** When
   Hermes refused to cache a file over `gateway.max_inbound_media_bytes`
   (default 128 MiB), the adapter passed the raw Delta Chat file instead, and

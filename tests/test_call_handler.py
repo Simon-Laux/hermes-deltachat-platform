@@ -11,6 +11,8 @@ Run via:  nix develop --command bash -c "cd tests && python3 -m pytest test_call
 import asyncio
 import os
 import sys
+import time
+import types
 import wave
 
 import pytest
@@ -271,6 +273,436 @@ class TestHangupMarker:
         await mgr._play_response("12", "Sure, here is a joke.")
         assert spoken == ["Sure, here is a joke."]
         mgr._hangup_session.assert_not_awaited()
+
+
+class TestStaleResponse:
+    """A reply that a newer one replaced mid-TTS must not play or end the turn."""
+
+    def _manager(self, monkeypatch):
+        import json
+        import threading
+        import types
+        from unittest.mock import MagicMock
+
+        gates = {}   # sentence -> threading.Event that releases its TTS call
+        started = {}  # sentence -> threading.Event set once its TTS call began
+
+        def fake_tts(sentence):
+            started[sentence].set()
+            gates[sentence].wait(5)
+            return json.dumps({"success": True, "file_path": sentence})
+
+        fake_mod = types.ModuleType("tools.tts_tool")
+        fake_mod.text_to_speech_tool = fake_tts
+        monkeypatch.setitem(sys.modules, "tools.tts_tool", fake_mod)
+        # "Decode" to a frame count keyed by the sentence, so the queue shows whose audio it is.
+        monkeypatch.setattr(ch.HermesAudioTrack, "decode_tts",
+                            staticmethod(lambda path: _make_frames(3 if path.startswith("Old") else 7)))
+
+        session = ch.CallSession(
+            pc=MagicMock(), chat_id="12", msg_id=1, caller_id="11", caller_name="X",
+            outgoing_track=ch.HermesAudioTrack(), audio_buffer=MagicMock(),
+            ice_channel=MagicMock(),
+        )
+        mgr = ch.CallManager(adapter=MagicMock())
+        mgr._sessions[1] = session
+        mgr._chat_to_msg["12"] = 1
+
+        def gate(sentence):
+            gates[sentence], started[sentence] = threading.Event(), threading.Event()
+            return gates[sentence], started[sentence]
+        return mgr, session, gate
+
+    @staticmethod
+    async def _until(event):
+        for _ in range(500):
+            if event.is_set():
+                return
+            await asyncio.sleep(0.01)
+        raise AssertionError("TTS call never started")
+
+    @pytest.mark.asyncio
+    async def test_superseded_reply_drops_its_audio(self, monkeypatch):
+        mgr, session, gate = self._manager(monkeypatch)
+        old_go, old_started = gate("Old reply.")
+        new_go, new_started = gate("New reply.")
+
+        old = asyncio.ensure_future(mgr._play_response("12", "Old reply."))
+        await self._until(old_started)
+        mgr._handle_barge_in(1)           # user interrupts the old reply...
+        new = asyncio.ensure_future(mgr._play_response("12", "New reply."))
+        await self._until(new_started)    # ...and the next reply resets `interrupted`
+
+        old_go.set()
+        await old
+        assert session.outgoing_track._queue.qsize() == 0   # stale audio dropped
+        assert session.is_responding is True                # still the new reply's turn
+
+        new_go.set()
+        await new
+        assert session.outgoing_track._queue.qsize() == 7
+        assert session.is_responding is False
+
+    @pytest.mark.asyncio
+    async def test_superseded_reply_does_not_hang_up(self, monkeypatch):
+        from unittest.mock import AsyncMock
+        mgr, session, gate = self._manager(monkeypatch)
+        mgr._hangup_session = AsyncMock()
+        old_go, old_started = gate("Old goodbye.")
+        new_go, new_started = gate("New reply.")
+
+        old = asyncio.ensure_future(mgr._play_response("12", "Old goodbye. [[hangup]]"))
+        await self._until(old_started)
+        new = asyncio.ensure_future(mgr._play_response("12", "New reply."))
+        await self._until(new_started)
+        old_go.set()
+        await old
+        mgr._hangup_session.assert_not_awaited()   # the new reply owns the hangup now
+        new_go.set()
+        await new
+        mgr._hangup_session.assert_awaited_once()  # the marker still ends the call after it
+
+    @pytest.mark.asyncio
+    async def test_superseded_reply_tells_the_model_what_was_unheard(self, monkeypatch):
+        mgr, session, gate = self._manager(monkeypatch)
+        gate("Old first sentence, long enough to stand alone.")[0].set()
+        old_go, old_started = gate("Old second sentence, also long enough on its own.")
+        new_go, new_started = gate("New reply.")
+
+        old = asyncio.ensure_future(mgr._play_response(
+            "12", "Old first sentence, long enough to stand alone. Old second sentence, also long enough on its own."))
+        await self._until(old_started)    # first sentence enqueued, second in TTS
+        new = asyncio.ensure_future(mgr._play_response("12", "New reply."))
+        await self._until(new_started)
+        old_go.set()
+        new_go.set()
+        await old
+        await new
+        note = session.pending_interrupt_note
+        assert note and "Old second sentence, also long enough on its own." in note
+        assert "Old first sentence" not in note   # that part was already queued to play
+
+    @pytest.mark.asyncio
+    async def test_barged_in_reply_keeps_the_barge_in_note(self, monkeypatch):
+        mgr, session, gate = self._manager(monkeypatch)
+        old_go, old_started = gate("Old reply.")
+        new_go, new_started = gate("New reply.")
+        old = asyncio.ensure_future(mgr._play_response("12", "Old reply."))
+        await self._until(old_started)
+        mgr._handle_barge_in(1)
+        session.pending_interrupt_note = "barge-in note"
+        new = asyncio.ensure_future(mgr._play_response("12", "New reply."))
+        await self._until(new_started)
+        old_go.set()
+        new_go.set()
+        await old
+        await new
+        assert session.pending_interrupt_note == "barge-in note"
+
+
+class TestUtteranceCap:
+    """Speech that never pauses is cut into capped pieces, sent as one turn at the pause."""
+
+    S = ch._STT_BYTES_PER_SEC   # one second of buffered PCM
+
+    @pytest.fixture(autouse=True)
+    def _scaled_down(self, monkeypatch):
+        # 3 s hard cap, soft cut after 2 s (still above the 1 s pause), 12 s noise
+        # ceiling; 20 ms frames on a fake clock.
+        monkeypatch.setattr(ch, "_MAX_UTTERANCE_PCM_BYTES", self.S * 3)
+        monkeypatch.setattr(ch, "_SOFT_CUT_PCM_BYTES", self.S * 2)
+        monkeypatch.setattr(ch, "_NOISE_CEILING_PCM_BYTES", self.S * 12)
+        clock = [0.0]
+        monkeypatch.setattr(ch, "time", types.SimpleNamespace(
+            monotonic=lambda: clock[0], time=time.time))
+        self.clock = clock
+
+    def _run(self, tmp_path, script, on_speech_confirmed=None):
+        """script: [(seconds, loud)], played as 20 ms frames → (stt pieces, turns).
+
+        Forced (noise-ceiling) turns land in self.forced."""
+        import av
+        import numpy as np
+        frames = [loud for secs, loud in script for _ in range(round(secs / 0.02))]
+        clock = self.clock
+
+        class Track:
+            async def recv(self):
+                if not frames:
+                    raise RuntimeError("track ended")
+                clock[0] += 0.02
+                arr = np.full((1, 960), 5000 if frames.pop(0) else 0, dtype=np.int16)
+                f = av.AudioFrame.from_ndarray(arr, format="s16", layout="mono")
+                f.sample_rate = ch._SAMPLE_RATE
+                return f
+
+        turns, pieces, self.forced = [], [], []
+        buf = ch.IncomingAudioBuffer(str(tmp_path), on_utterance=lambda t, w: turns.append(t),
+                                     on_speech_confirmed=on_speech_confirmed,
+                                     on_ceiling=self.forced.append)
+
+        async def fake_stt(pcm):
+            pieces.append(len(pcm))
+            return f"p{len(pieces)}", "x.wav"
+        buf._transcribe_pcm = fake_stt
+        buf._running = True
+
+        async def go():
+            await buf._receive_loop(Track())
+            for _ in range(20):
+                await asyncio.sleep(0)
+        return go, pieces, turns
+
+    @pytest.mark.asyncio
+    async def test_long_utterance_is_one_turn_at_the_pause(self, tmp_path):
+        # 10.5 s of speech (a 45 s monologue, scaled) then a real pause: no turn mid-speech.
+        go, pieces, turns = self._run(tmp_path, [(10.5, True), (1.2, False)])
+        await go()
+        assert len(pieces) == 4                       # 3 + 3 + 3 + 1.5 s (+ the pause)
+        assert all(n <= self.S * 3 + 1024 for n in pieces)
+        assert sum(pieces) >= self.S * 10.5 - 1024    # nothing dropped
+        assert turns == ["p1 p2 p3 p4"]
+
+    @pytest.mark.asyncio
+    async def test_cut_prefers_a_quiet_frame_after_the_soft_limit(self, tmp_path):
+        go, pieces, turns = self._run(
+            tmp_path, [(2.5, True), (0.04, False), (1.5, True), (1.2, False)])
+        await go()
+        assert abs(pieces[0] - self.S * 2.52) < 0.05 * self.S   # cut in the gap, not at 3 s
+        assert len(turns) == 1
+
+    @pytest.mark.asyncio
+    async def test_short_tail_after_a_split_is_kept(self, tmp_path):
+        # 0.2 s after the cut is under the 0.3 s voiced minimum but must not be lost.
+        go, pieces, turns = self._run(tmp_path, [(3.2, True), (1.2, False)])
+        await go()
+        assert len(pieces) == 2
+        assert turns == ["p1 p2"]
+
+    @pytest.mark.asyncio
+    async def test_stretch_at_noise_ceiling_is_sent_as_one_forced_turn(self, tmp_path):
+        go, pieces, turns = self._run(
+            tmp_path, [(20, True), (1.2, False), (0.6, True), (1.2, False)])
+        await go()
+        # 12 s ceiling = four 3 s pieces, sent at once without waiting for a pause
+        assert self.forced == ["p1 p2 p3 p4"]
+        # then a new stretch: normal listening, combined turn at the pause
+        assert turns == ["p5 p6 p7", "p8"]
+        assert sum(pieces[:7]) >= self.S * 20 - 1024   # nothing dropped
+
+    @pytest.mark.asyncio
+    async def test_barge_in_is_rearmed_after_a_forced_turn(self, tmp_path):
+        clock, calls = self.clock, []
+
+        def confirmed():
+            calls.append(clock[0])
+            return clock[0] > 13.0   # the reply to the forced turn starts playing at 13 s
+        go, _, _ = self._run(tmp_path, [(15, True)], on_speech_confirmed=confirmed)
+        await go()
+        assert calls[0] < 1.0                     # the normal one-shot barge-in at the start
+        # retried until it hit the reply, then stopped (no calls in the 2 s after)
+        assert len(calls) > 2 and 13.0 < calls[-1] < 13.1
+
+
+class TestInactivityHangup:
+    """Silence or endless noise: the bot says goodbye, and hangs up itself if it doesn't."""
+
+    @pytest.fixture(autouse=True)
+    def _scaled_down(self, monkeypatch):
+        # 10 s idle timeout, 3 s grace, 3 forced turns; fake clock, ticks driven by hand.
+        clock = [1000.0]
+        monkeypatch.setattr(ch, "time", types.SimpleNamespace(
+            monotonic=lambda: clock[0], time=time.time))
+        monkeypatch.setattr(ch, "_IDLE_HANGUP_S", 10)
+        monkeypatch.setattr(ch, "_GOODBYE_GRACE_S", 3)
+        monkeypatch.setattr(ch, "_NOISE_HANGUP_TURNS", 3)
+        monkeypatch.setattr(sys.modules["gateway.platforms.base"], "MessageEvent",
+                            lambda **kw: types.SimpleNamespace(**kw))
+        voice_mode = types.ModuleType("tools.voice_mode")
+        voice_mode.is_whisper_hallucination = lambda t: t.strip().lower() in ("", "thank you.")
+        monkeypatch.setitem(sys.modules, "tools.voice_mode", voice_mode)
+        self.clock = clock
+
+    def _manager(self):
+        from unittest.mock import AsyncMock, MagicMock
+        adapter = MagicMock()
+        adapter._active_sessions = {}
+        adapter._source_session_key = lambda source: "call-key"
+        adapter.rpc.end_call = AsyncMock()
+        mgr = ch.CallManager(adapter=adapter)
+        mgr._to_hermes = AsyncMock()
+        mgr._note_call_ended = AsyncMock()
+        pc = TestDeadCall._FakePc()
+        buf = types.SimpleNamespace(capturing=False, last_voice_time=0.0, stop=lambda: None)
+        session = mgr._register_session(pc, None, ch.HermesAudioTrack(), buf, 1, "12", "10", "Bob")
+        return mgr, session, adapter, pc
+
+    def _advance(self, mgr, session, seconds):
+        self.clock[0] += seconds
+        return mgr._watchdog_tick(session)
+
+    def _sent(self, mgr):
+        return [c.args[0].text for c in mgr._to_hermes.await_args_list]
+
+    @staticmethod
+    async def _settle():
+        for _ in range(5):
+            await asyncio.sleep(0)
+
+    @pytest.mark.asyncio
+    async def test_silence_injects_the_goodbye_turn(self):
+        mgr, session, _, _ = self._manager()
+        self._advance(mgr, session, 9)
+        await self._settle()
+        assert self._sent(mgr) == []
+        self._advance(mgr, session, 2)
+        await self._settle()
+        [text] = self._sent(mgr)
+        assert "silent for 10 seconds" in text and "[[hangup]]" in text
+        self._advance(mgr, session, 1)   # no second goodbye while the first is pending
+        await self._settle()
+        assert len(self._sent(mgr)) == 1
+
+    @pytest.mark.asyncio
+    async def test_safety_net_hangs_up_when_the_model_does_not(self):
+        mgr, session, adapter, _ = self._manager()
+        self._advance(mgr, session, 11)
+        assert self._advance(mgr, session, 2) is False   # still within the grace period
+        assert self._advance(mgr, session, 2) is True
+        await asyncio.sleep(0.2)                          # _hangup_session's final 0.1 s
+        adapter.rpc.end_call.assert_awaited_once_with(adapter.account_id, 1)
+        assert not mgr.has_active_call("12")
+
+    @pytest.mark.asyncio
+    async def test_safety_net_waits_for_a_reply_in_progress(self):
+        mgr, session, adapter, _ = self._manager()
+        self._advance(mgr, session, 11)
+        session.is_responding = True          # the goodbye is being spoken
+        assert self._advance(mgr, session, 5) is False
+        session.hanging_up = True             # [[hangup]] drain owns the hang-up now
+        session.is_responding = False
+        assert self._advance(mgr, session, 5) is False
+        adapter.rpc.end_call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_timer_pauses_while_the_bot_responds_or_hermes_works(self):
+        mgr, session, adapter, _ = self._manager()
+        session.is_responding = True
+        self._advance(mgr, session, 9)
+        session.is_responding = False
+        session.hermes_key = "call-key"
+        adapter._active_sessions["call-key"] = object()   # a turn is with Hermes
+        self._advance(mgr, session, 30)
+        del adapter._active_sessions["call-key"]
+        self._advance(mgr, session, 9)        # 9 s since Hermes finished
+        await self._settle()
+        assert self._sent(mgr) == []
+        self._advance(mgr, session, 2)
+        await self._settle()
+        assert len(self._sent(mgr)) == 1
+
+    @pytest.mark.asyncio
+    async def test_caller_speech_resets_the_timer(self):
+        mgr, session, _, _ = self._manager()
+        self._advance(mgr, session, 8)
+        session.audio_buffer.last_voice_time = self.clock[0]
+        self._advance(mgr, session, 8)
+        session.audio_buffer.capturing = True   # utterance in progress
+        self._advance(mgr, session, 30)
+        await self._settle()
+        assert self._sent(mgr) == []
+        session.audio_buffer.capturing = False
+        session.audio_buffer.last_voice_time = self.clock[0]
+        self._advance(mgr, session, 11)
+        await self._settle()
+        assert len(self._sent(mgr)) == 1
+
+    @pytest.mark.asyncio
+    async def test_zero_disables_the_silence_timeout(self, monkeypatch):
+        monkeypatch.setattr(ch, "_IDLE_HANGUP_S", 0)
+        mgr, session, adapter, _ = self._manager()
+        self._advance(mgr, session, 10_000)
+        await self._settle()
+        assert self._sent(mgr) == []
+        adapter.rpc.end_call.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_caller_speaking_after_the_goodbye_keeps_the_call(self):
+        mgr, session, adapter, _ = self._manager()
+        self._advance(mgr, session, 11)
+        await mgr._on_utterance(1, "12", "Hello? I'm still here.", "10", "Bob")
+        assert self._advance(mgr, session, 5) is False
+        await asyncio.sleep(0.2)
+        adapter.rpc.end_call.assert_not_awaited()
+        assert mgr.has_active_call("12")
+
+    @pytest.mark.asyncio
+    async def test_forced_turn_carries_the_noise_note(self):
+        mgr, session, _, _ = self._manager()
+        await mgr._on_ceiling(1, "12", "and then the weather tomorrow", "10", "Bob")
+        [text] = self._sent(mgr)
+        assert text.startswith(ch._CEILING_NOTE)
+        assert text.endswith("and then the weather tomorrow")
+
+    @pytest.mark.asyncio
+    async def test_empty_or_hallucinated_forced_turn_is_not_sent_but_counts(self):
+        mgr, session, _, _ = self._manager()
+        await mgr._on_ceiling(1, "12", "", "10", "Bob")
+        await mgr._on_ceiling(1, "12", "Thank you.", "10", "Bob")
+        assert self._sent(mgr) == []
+        assert session.forced_turns == 2
+
+    @pytest.mark.asyncio
+    async def test_consecutive_forced_turns_trigger_the_goodbye(self):
+        mgr, session, adapter, _ = self._manager()
+        for _ in range(3):
+            await mgr._on_ceiling(1, "12", "tv noise", "10", "Bob")
+        await self._settle()
+        sent = self._sent(mgr)
+        assert len(sent) == 3 and sent[0].startswith(ch._CEILING_NOTE)
+        assert "Only background noise" in sent[2] and "[[hangup]]" in sent[2]
+        assert "tv noise" not in sent[2]
+        session.audio_buffer.capturing = True    # the noise goes on
+        self._advance(mgr, session, 4)
+        await asyncio.sleep(0.2)
+        adapter.rpc.end_call.assert_awaited_once()   # safety net
+
+    @pytest.mark.asyncio
+    async def test_a_real_utterance_resets_the_forced_turn_count(self):
+        mgr, session, _, _ = self._manager()
+        await mgr._on_ceiling(1, "12", "tv noise", "10", "Bob")
+        await mgr._on_ceiling(1, "12", "tv noise", "10", "Bob")
+        await mgr._on_utterance(1, "12", "Sorry, I was driving.", "10", "Bob")
+        await mgr._on_ceiling(1, "12", "tv noise", "10", "Bob")
+        await self._settle()
+        assert not any("Only background noise" in t for t in self._sent(mgr))
+        assert session.forced_turns == 1
+
+    @pytest.mark.asyncio
+    async def test_zero_disables_the_noise_hangup(self, monkeypatch):
+        monkeypatch.setattr(ch, "_NOISE_HANGUP_TURNS", 0)
+        mgr, session, _, _ = self._manager()
+        for _ in range(5):
+            await mgr._on_ceiling(1, "12", "tv noise", "10", "Bob")
+        await self._settle()
+        assert all(t.startswith(ch._CEILING_NOTE) for t in self._sent(mgr))
+        assert session.goodbye_deadline == 0.0
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("end", ["call_ended", "hangup", "dead_call"])
+    async def test_teardown_cancels_the_timer(self, end):
+        mgr, session, _, pc = self._manager()
+        watchdog = session.watchdog
+        if end == "call_ended":
+            await mgr._handle_call_ended({"msg_id": 1})
+        elif end == "hangup":
+            await mgr._hangup_session(session)
+        else:
+            pc.set_state("failed")
+            await self._settle()
+        await asyncio.sleep(0)
+        assert watchdog.cancelled()
+        assert not mgr.has_active_call("12")
 
 
 class TestIncomingCallAuthorization:
