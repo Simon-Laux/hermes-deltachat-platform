@@ -751,6 +751,14 @@ class DeltaChatAdapter(BasePlatformAdapter):
 
     message_len_fn = staticmethod(_dc_len)
 
+    def max_message_length_for_chat(self, chat_id: str) -> int:
+        # why: send() fails call previews, so a call reply over the limit would have
+        # Hermes split heads that fail too; its retry `continue` skips the loop's
+        # sleep and spins the gateway loop (stream_consumer.py `_split_first_send`).
+        if self._call_manager and self._call_manager.has_active_call(chat_id):
+            return 1 << 30
+        return self.MAX_MESSAGE_LENGTH
+
     async def _resume_partial_send(self, chat_id, result, *, reply_to, metadata):
         """Hermes' retry after a partial send(): send only the parts that didn't go
         out. A send_msg that raised queued nothing, so nothing is sent twice."""
@@ -1557,13 +1565,11 @@ class DeltaChatAdapter(BasePlatformAdapter):
                 if not (metadata or {}).get("notify"):
                     logger.debug("Call %s: not speaking non-final send: %r",
                                  chat_id, (content or "")[:80])
-                    # why: a streamed preview (expect_edits) that "succeeds" puts
-                    # Hermes's stream consumer in fallback mode, and the final then
-                    # carries only the unseen tail — often nothing, so the reply is
-                    # never spoken. Failing it makes Hermes send the whole final
-                    # (stream_consumer_transport.py `_first_send`). Other status
-                    # sends stay successful: a failed busy ack goes through
-                    # `_send_with_retry`'s plain-text fallback and logs warnings.
+                    # why: a preview (expect_edits) that "succeeds" with no id puts
+                    # Hermes's stream consumer in fallback mode, so the final carries
+                    # only the unseen tail (stream_consumer_transport.py `_first_send`).
+                    # Fail only previews: a failed busy ack would go through
+                    # `_send_with_retry`'s plain-text fallback.
                     if (metadata or {}).get("expect_edits"):
                         return SendResult(success=False, error="call: preview not spoken")
                     return SendResult(success=True, message_id=None)
