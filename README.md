@@ -88,7 +88,8 @@ Deep integration with Delta Chat's native features — voice messages, voice cal
 - Read receipts
 - Bot mode: auto-accepts contact requests, no manual approval needed
 - Only end-to-end encrypted contacts reach the agent — in Delta Chat identity is the key, so
-  unencrypted mail is dropped unread. Calls from contacts Hermes hasn't approved are declined.
+  unencrypted mail is dropped unread. Calls from contacts Hermes hasn't approved are declined;
+  the caller then gets what an unknown contact's message gets (a pairing code by default).
   In a group where Hermes approves none of the members, the agent leaves (the group sees it
   leave); someone who wants to add it should message it directly first to get approved
 

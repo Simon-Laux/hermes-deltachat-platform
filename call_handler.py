@@ -39,6 +39,9 @@ from pathlib import Path
 from typing import Any, Callable, Dict, Optional
 
 import av
+# why at import time: a missing numpy then disables calls at connect with a clear
+# ERROR, instead of every call connecting and staying deaf.
+import numpy as np
 from aiortc import (
     RTCConfiguration,
     RTCIceServer,
@@ -182,13 +185,21 @@ def _call_thread_id(msg_id) -> Optional[str]:
 # drops these because Whisper invents them on silent clips, but a call only
 # transcribes audio that passed the RMS gate (>= 0.3 s voiced), so here they are
 # real answers — and a dropped "bye" meant the caller could not say goodbye.
-# Only a single one: repeats ("Thank you. Thank you.") are what Whisper produces
-# on noise, so those still go through Hermes's filter.
-_SHORT_REPLY_RE = _re.compile(r"^(?:ok(?:ay)?|thanks|thank you|bye(?: bye)?)[.!,]*$", _re.IGNORECASE)
+# Combinations count too ("Okay, bye.", "Thanks, bye!" are how people hang up),
+# but no phrase twice: repeats ("Thank you. Thank you.") are what Whisper
+# produces on noise, so those still go through Hermes's filter.
+_SHORT_PHRASE = r"(?:okay|ok|thank you|thanks|bye bye|bye)"
+_SHORT_REPLY_RE = _re.compile(rf"^{_SHORT_PHRASE}(?:[\s.,!]+{_SHORT_PHRASE})*[.!,]*$",
+                              _re.IGNORECASE)
 
 
 def _is_short_reply(transcript: str) -> bool:
-    return bool(_SHORT_REPLY_RE.match(transcript.strip()))
+    t = transcript.strip()
+    if not _SHORT_REPLY_RE.match(t):
+        return False
+    phrases = [p.lower().replace("okay", "ok")
+               for p in _re.findall(_SHORT_PHRASE, t, _re.IGNORECASE)]
+    return len(phrases) == len(set(phrases))
 
 
 def _spawn(coro, what: str) -> asyncio.Future:
@@ -371,8 +382,6 @@ class IncomingAudioBuffer:
         to_ndarray() to avoid the plane alignment padding that bytes(plane)
         would include.
         """
-        import numpy as np
-
         resampler = av.AudioResampler(format="s16", layout="mono", rate=16000)
         _RMS_THRESHOLD = 200            # below this → silence (int16 range 0-32767)
         _MIN_VOICED_S = 0.3             # require this much actual voiced audio to process

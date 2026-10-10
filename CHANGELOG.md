@@ -76,9 +76,12 @@ repairs and doc typo fixes are left out; see the git log for those.
   use stalled call setup for minutes.
 - **"OK", "Thanks" and "Bye" spoken in a call were thrown away** as Whisper
   hallucinations, so a plain "bye" couldn't end the call. Calls only
-  transcribe audio that is clearly speech, so these now reach the agent.
-- **A missing aiortc no longer stops the whole adapter.** Text messaging
-  connects and calls are disabled, with an ERROR saying what to install.
+  transcribe audio that is clearly speech, so these now reach the agent, also
+  combined ("Okay, bye."). The same phrase repeated is still dropped.
+- **A missing aiortc, av or numpy no longer stops the whole adapter.** Text
+  messaging connects and calls are disabled, with an ERROR saying what to
+  install; incoming calls are ended instead of ringing out, and
+  `dc_start_call` says why it can't call.
 - **The agent couldn't load the bundled webxdc skill.** The system prompt
   told it to call `skill_view('plugin:deltachat-platform:webxdc-converter')`,
   which Hermes reads as a plugin called `plugin`, so the call returned "Skill

@@ -891,7 +891,8 @@ class TestShortReplies:
         return mgr
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("said", ["OK.", "Okay!", "Thanks.", "Thank you.", "Bye.", "Bye bye."])
+    @pytest.mark.parametrize("said", ["OK.", "Okay!", "Thanks.", "Thank you.", "Bye.", "Bye bye.",
+                                      "Okay, bye.", "Thanks, bye!", "OK, thank you."])
     async def test_short_reply_reaches_hermes(self, monkeypatch, said):
         mgr = self._manager(monkeypatch)
         await mgr._on_utterance(1, "12", said, "10", "X")
@@ -899,7 +900,8 @@ class TestShortReplies:
 
     @pytest.mark.asyncio
     @pytest.mark.parametrize("said", ["You.", "Thanks for watching!",
-                                      "Thank you. Thank you. Thank you.", "..."])
+                                      "Thank you. Thank you. Thank you.", "Okay. OK.",
+                                      "Bye. Bye.", "..."])
     async def test_hallucinations_are_still_dropped(self, monkeypatch, said):
         mgr = self._manager(monkeypatch)
         await mgr._on_utterance(1, "12", said, "10", "X")
