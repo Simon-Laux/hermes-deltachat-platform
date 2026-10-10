@@ -193,14 +193,23 @@ class IOTransport:
                 if not line:  # EOF
                     break
                 response = json.loads(line)
-                if "id" in response:
+                # why: valid JSON need not be an object; `in`/.get() on a
+                # number or list would raise and kill the reader.
+                is_obj = isinstance(response, dict)
+                if is_obj and "id" in response:
                     # The caller may already have given up on a dead server
                     # (see call()); dropping its reply must not kill the reader.
                     pending = self.pending_results.pop(response["id"], None)
                     if pending is not None:
                         pending.set(response)
                 else:
-                    self.logger.warning("Got a response without ID: %s", response)
+                    # Not the whole response: a result can carry message text
+                    # or addresses. The error object is what explains it.
+                    self.logger.warning(
+                        "Got a response without ID: %s",
+                        response.get("error", sorted(response))
+                        if is_obj else type(response).__name__)
+                    self.logger.debug("Response without ID: %s", response)
         except Exception:
             # Log an exception if the reader loop dies.
             self.logger.exception("Exception in the reader loop")
