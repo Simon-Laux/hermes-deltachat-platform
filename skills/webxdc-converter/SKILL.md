@@ -196,7 +196,7 @@ EOF
 
 For a bundled app, run the build first and pass the build output instead: `python3 - myapp/dist myapp.xdc`.
 
-Fix every ERROR and package again. The network check only finds absolute URLs written in tags, CSS and ES module imports. It does not see requests made from JavaScript (`fetch`, `XMLHttpRequest`, `WebSocket`, `new Worker`, `importScripts`, `img.src = …`, `new Audio(…)`, elements created with `document.createElement`, …), so before sending, search all of the app's JavaScript (`.js` files and inline `<script>` blocks) for `http://`, `https://`, `ws://`, `wss://` and `"//`, and look at how each hit is used. Also look for URLs assembled from strings (`"https://" + host`, template literals). A hit that loads something must point to a file inside the `.xdc` by relative path or be removed; `WebSocket`, `EventSource` and `navigator.sendBeacon` have no packaged form, so those can only be removed. An external request fails in the chat even though the app works in a browser.
+Fix every ERROR and package again. The messenger blocks network access, so anything loaded from outside the `.xdc` (a CDN script, a web font, an API call) just fails, even though the app works in a browser. The check catches URLs in tags, CSS and imports, but not requests made from JavaScript: search the JS for `http://`, `https://`, `wss://` and `"//`, and make sure the app doesn't need any of them to work. Bundle what it needs into the `.xdc`; drop features that need a server.
 
 ### Size guidance
 
