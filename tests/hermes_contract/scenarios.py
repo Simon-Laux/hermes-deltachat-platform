@@ -80,6 +80,33 @@ async def stream(chunks, delay):
             "text": "".join(chunks)}
 
 
+async def call_stream(chunks, delay):
+    """Stream a reply into an active call; returns what got spoken."""
+    a = editing_adapter()
+    spoken = []
+
+    class Calls:  # the CallManager surface send() touches
+        def is_call_end_reply(self, reply_to): return False
+        def has_active_call(self, chat_id): return True
+        def is_call_thread(self, thread_id): return thread_id == "call-1"
+        def consume_call_ack(self, chat_id): return False
+        async def play_response(self, chat_id, text): spoken.append(text)
+
+    a._call_manager = Calls()
+    consumer = GatewayStreamConsumer(
+        a, "42", StreamConsumerConfig(edit_interval=0.05, buffer_threshold=5),
+        metadata={"thread_id": "call-1"})
+    task = asyncio.create_task(consumer.run())
+    for chunk in chunks:
+        consumer.on_delta(chunk)
+        await asyncio.sleep(delay)
+    consumer.finish()
+    await asyncio.wait_for(task, 30)
+    await asyncio.sleep(0.1)  # play_response runs as its own task
+    return {"spoken": spoken, "log": a.rpc.log, "text": "".join(chunks),
+            "final_sent": consumer.final_response_sent}
+
+
 def contract():
     """Facts about the real Hermes API this adapter relies on."""
     from tools import clarify_gateway, slash_confirm
@@ -150,6 +177,7 @@ async def main():
         "fence": await stream(["```\n" + "\n".join(f"c{i}" for i in range(35)) + "\n",
                                "y" * 99] + [f"\nm{i}" for i in range(5)], 0.4),
         "media": await media(),
+        "call": await call_stream(words[:20], 0.02),
     }))
 
 

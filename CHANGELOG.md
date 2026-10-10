@@ -63,6 +63,9 @@ action`, and get as much space as people need to upgrade safely.
 
 ### Fixed
 
+- **Streamed replies in a call were cut short or never spoken.** With
+  streaming on, the bot spoke only the end of its reply, or nothing when the
+  reply was short. It now speaks the whole reply.
 - **Voice calls never heard the caller on a plain install.** The call code
   needs `numpy`, which neither aiortc nor Hermes's default install brings
   in; the receive loop died on its first frame without a log line, so the
