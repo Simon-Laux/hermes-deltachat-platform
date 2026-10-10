@@ -35,6 +35,14 @@ repairs and doc typo fixes are left out; see the git log for those.
   `node_modules` and notes archives over 1 MB and 10 MB. Generated icons are 256 px instead of 128. When the bot sends
   a new version of a shared-state app it now tells you the old data stays
   in the previous message.
+- **The webxdc skill guards against unsafe or broken app content.** It
+  tells the bot to show user text with `textContent` instead of unescaped
+  `innerHTML` (XSS in shared apps), to escape `</` in JSON baked into a
+  `<script>`, and to say when baked-in data will go stale. When the bot has
+  an image generator it may draw the icon with it, and the skill explains
+  how to prompt it and how to catch a JPEG saved as `icon.png`. The bot now
+  says when it hasn't opened an app itself, and it makes changes in the
+  sources rather than only inside the `.xdc`.
 - **Optional message editing, experimental** (`DELTACHAT_MESSAGE_EDITING`, off by default).
   Hermes can then edit streamed replies, tool progress, heartbeats and
   approval prompts in place. Every edit is an email through the chatmail
