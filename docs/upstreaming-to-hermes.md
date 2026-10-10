@@ -223,6 +223,21 @@ rather than a dump:
    We had the same pattern in our own `/workspace/` copy-to-cache remap,
    worse because the cache is trusted unconditionally; #47 removed it.
 
+5. **Busy-text merging drops the quote of every message but the first.**
+   `_queue_text_debounce` (`gateway/platforms/base.py`, 0.21.5) merges
+   text that arrives while the agent is busy into the first event: it
+   appends `text` and overwrites `message_id` and `reply_to_message_id`
+   with the newest message's *own* id, but leaves `reply_to_text`,
+   `reply_to_author_*` and `reply_to_is_own_message` from the first event.
+   So if the first message is plain and a later one is a quote-reply, the
+   merged turn has no `reply_to_text` and the quote is gone (Hermes only
+   shows `[Replying to: …]` when both fields are set). If the first one
+   quoted, its quote stays but `reply_to_message_id` no longer names the
+   quoted message. Affects every platform that sets reply context; we do
+   since #87. Fix in core: carry the reply fields over together, e.g. keep
+   the first quote and only take a later one when there is none yet, or
+   fold each quote into the appended text.
+
 Fixing 1–2 also benefits us directly if we *stay* out of tree.
 
 ---
