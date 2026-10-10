@@ -4,6 +4,8 @@ Notable changes for people running the adapter, as a short overview; the git log
 has the details. Internal refactors, test repairs and doc typo fixes are left out.
 Until a release, `Unreleased` describes the end state: a later change to something
 already listed rewrites that entry instead of adding another.
+Breaking changes are the exception: they go first, under `### Breaking / requires
+action`, and get as much space as people need to upgrade safely.
 
 ## Unreleased
 
