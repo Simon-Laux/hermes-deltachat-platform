@@ -166,12 +166,12 @@ with zipfile.ZipFile(out) as zf:
         notes.append("no icon.png or icon.jpg at the archive root")
     url = r"""(?:https?:)?//[^"'\s>)]+"""
     markup = [  # in .html and .css
-        r"""<(?:script|img|iframe|source|video|audio|track|embed|object)\b[^>]*?(?<![\w-])(?:src|srcset|data|poster)\s*=\s*["']?(?:[^"'>]*[\s,])?""" + url,
+        r"""<(?:script|img|iframe|source|video|audio|track|embed|object)\b[^>]*?(?<![\w-])(?:src|srcset|data|poster)\s*=\s*["']?(?!data:)(?:[^"'>]*[\s,])?""" + url,  # data: URIs are inline; base64 MP3 starts with //
         r"""<link\b(?=[^>]*\brel\s*=\s*["']?[^"'>]*\b(?:stylesheet|icon|preload|modulepreload|manifest))[^>]*?\bhref\s*=\s*["']?""" + url,
         r"""url\(\s*["']?""" + url,
         r"""@import\s+["']""" + url,
     ]
-    imports = [r"""\bfrom\s*["']""" + url, r"""\bimport\s*\(?\s*["']""" + url]  # in .html and .js
+    imports = [r"""\b(?:import|export)\b[^;"'()]*?\bfrom\s*["']""" + url, r"""\bimport\s*\(?\s*["']""" + url]  # in .html and .js
     for n in names:
         patterns = (markup if n.endswith((".html", ".htm", ".css")) else []) + (imports if n.endswith((".html", ".htm", ".js", ".mjs")) else [])
         text = zf.read(n).decode("utf-8", "replace") if patterns else ""
@@ -196,7 +196,7 @@ EOF
 
 For a bundled app, run the build first and pass the build output instead: `python3 - myapp/dist myapp.xdc`.
 
-Fix every ERROR and package again. The network check only finds absolute URLs written in tags, CSS and ES module imports. It does not see requests made from JavaScript, so before sending, search all of the app's JavaScript (`.js` files and inline `<script>` blocks) for `fetch(`, `XMLHttpRequest`, `WebSocket`, `EventSource`, `navigator.sendBeacon` and URLs assembled from strings (`"https://" + host`, template literals). `fetch` and `XMLHttpRequest` may load files inside the `.xdc` by relative path; every other hit must be removed — an external request fails in the chat even though the app works in a browser.
+Fix every ERROR and package again. The network check only finds absolute URLs written in tags, CSS and ES module imports. It does not see requests made from JavaScript (`fetch`, `XMLHttpRequest`, `WebSocket`, `new Worker`, `importScripts`, `img.src = …`, `new Audio(…)`, elements created with `document.createElement`, …), so before sending, search all of the app's JavaScript (`.js` files and inline `<script>` blocks) for `http://`, `https://`, `ws://`, `wss://` and `"//`, and look at how each hit is used. Also look for URLs assembled from strings (`"https://" + host`, template literals). A hit that loads something must point to a file inside the `.xdc` by relative path or be removed; `WebSocket`, `EventSource` and `navigator.sendBeacon` have no packaged form, so those can only be removed. An external request fails in the chat even though the app works in a browser.
 
 ### Size guidance
 
