@@ -145,6 +145,8 @@ state from the same point in time, or clear the approvals as the error message d
 - Barge-in support: interrupt the AI mid-sentence and it adapts
 - Per-call isolated AI session with optional model override and system prompt
 - Optional Voxtral cloud STT for fast (~1–2s) transcription
+- Says goodbye and hangs up after 5 min of silence or ~9 min of background noise
+  (`DELTACHAT_CALL_IDLE_HANGUP_S`, `DELTACHAT_CALL_NOISE_HANGUP_TURNS`; see [docs/voice-calls.md](docs/voice-calls.md))
 
 ### Proactive Messaging & Cron
 Hermes has built-in cron scheduling. To route scheduled task delivery to a Delta Chat chat, set it as the home channel. From within the chat, type:

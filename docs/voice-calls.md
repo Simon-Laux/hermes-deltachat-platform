@@ -80,9 +80,11 @@ DC mobile  ──WebRTC audio──▶  aiortc  ──▶  silence detection  �
   Speech that runs on without a pause is cut into pieces of at most 30s (at a
   quiet frame after 25s where possible) to bound memory. Each piece is
   transcribed right away, but the agent gets one combined turn only when you
-  pause, so it never replies while you are still talking. A stretch of more
-  than ~3 minutes with no pause is treated as background noise (TV, music)
-  and dropped without a turn.
+  pause, so it never replies while you are still talking. After ~3 minutes
+  with no pause the agent gets what was said so far as one turn anyway, with
+  a note that it may be background noise (TV, music, a car). It answers or,
+  if the audio doesn't look addressed to it, says goodbye and hangs up.
+  Listening then goes on as normal.
 - The transcript is injected into the normal Hermes session pipeline, so the
   agent has full context, tools, and memory — same as a text chat.
 - The AI's reply is intercepted before it would be sent as a chat message and
@@ -97,6 +99,34 @@ off, an interrupt is only triggered after ~0.25s of sustained voiced audio
 (estimated from how much of the reply had played), so it won't assume you heard
 the part it was cut off on. The same note is sent when a newer reply replaces
 one that was still being synthesized.
+
+In a noisy place the 1s pause may never come. After a forced turn (see above),
+barge-in stays armed until it actually cuts into the reply, so you can still
+interrupt it. The flip side: steady noise loud enough to pass the gate also
+cuts that reply off.
+
+## Hanging up on silence or noise
+
+The bot ends a call nobody is in any more:
+
+- **Silence.** No voiced audio from the caller for
+  `DELTACHAT_CALL_IDLE_HANGUP_S` seconds. Time while the bot is speaking or a
+  turn is still with Hermes doesn't count; the timer runs from the end of the
+  last reply or the last caller speech, whichever is later.
+- **Endless noise.** `DELTACHAT_CALL_NOISE_HANGUP_TURNS` forced turns in a row
+  (see above) with no normal, pause-ended utterance in between.
+
+In both cases the agent gets a turn such as "[The caller has been silent for
+5 minutes. Say a brief goodbye and end the call with [[hangup]].]", so the
+goodbye is in the caller's language and the bot's voice. If the call is still
+up 30s later and no reply is playing, the adapter hangs up itself. If the
+caller says something in that time (anything that ends with a normal pause),
+the hang-up is called off.
+
+| Variable | Default | Description |
+|---|---|---|
+| `DELTACHAT_CALL_IDLE_HANGUP_S` | `300` | Seconds of caller silence before the bot says goodbye and hangs up. `0` turns it off. |
+| `DELTACHAT_CALL_NOISE_HANGUP_TURNS` | `3` | Forced turns in a row (one per ~3 min without a pause, so 3 ≈ 9 min) before the bot says goodbye and hangs up. `0` turns it off. |
 
 ## Configuration (environment variables)
 
