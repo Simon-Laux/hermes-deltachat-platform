@@ -7,6 +7,14 @@ already listed rewrites that entry instead of adding another.
 Breaking changes are the exception: they go first, under `### Breaking / requires
 action`, and get as much space as people need to upgrade safely.
 
+## Unreleased
+
+### New
+
+- **The agent can react to your message.** A new `dc_react` tool lets it
+  add an emoji to its reply (❤️ for a thank-you, 😂 for a joke). It can only
+  react to the message it is answering.
+
 ## 2.1.0 (2026-10-10)
 
 ### Breaking / requires action
@@ -57,9 +65,6 @@ time far more often.
 - **Safer, sturdier apps.** User text is escaped, baked-in data ships as a
   JSON file, the skill explains last-writer-wins vs. event sourcing for shared
   state, and the bot says when it hasn't opened an app itself.
-- **The agent can react to your message.** A new `dc_react` tool lets it
-  add an emoji to its reply (❤️ for a thank-you, 😂 for a joke). It can only
-  react to the message it is answering.
 
 ### Fixed
 
