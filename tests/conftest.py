@@ -237,6 +237,10 @@ class MockBasePlatformAdapter:
         """Mock base local-file extractor (see extract_media note)."""
         return [], content
 
+    async def _deliver_media_attachments(self, event, media_files, local_files, **kwargs):
+        """Mock base delivery — records what would be sent."""
+        self.delivered = (list(media_files), list(local_files), kwargs)
+
     @staticmethod
     def filter_media_delivery_paths(media_files, session_key: str = ""):
         """Mock base media filter — pass through unchanged."""

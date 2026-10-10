@@ -5,6 +5,8 @@ pure/near-pure adapter methods and need no live RPC. Container->host
 translation of /workspace/ paths is Hermes's job since 0.21.5.
 """
 
+import pytest
+
 # conftest.py installs the gateway mocks, so importing adapter here is safe.
 from adapter import DeltaChatAdapter
 
@@ -59,35 +61,39 @@ class TestExtractLocalFiles:
         assert files == []
         assert "/workspace/myapp.xdc" in remaining
 
-    def test_still_extracts_workspace_xdc(self, platform_config):
-        """Regression: Docker /workspace/ paths must still be picked up.
+    def test_bare_workspace_xdc_stays_text(self, platform_config):
+        """A bare /workspace/ path is not delivered; the agent uses MEDIA:.
 
-        These are container-side and never exist on the host, so they are
-        exempt from the isfile() guard; Hermes translates them at delivery.
+        Taking it on faith re-sent the app on every later reply that
+        mentioned it: Hermes's "already delivered" check compares the
+        translated host path with the /workspace/ path in the history.
         """
         adapter = _make_adapter(platform_config)
         content = "Built it: /workspace/app.xdc done."
 
-        files, _remaining = adapter.extract_local_files(content)
+        files, remaining = adapter.extract_local_files(content)
 
-        assert "/workspace/app.xdc" in files
+        assert files == []
+        assert remaining == content
 
-    def test_removal_leaves_other_occurrences_alone(self, platform_config):
+    def test_removal_leaves_other_occurrences_alone(self, platform_config, tmp_path):
         """Deletion is span-based, not a global str.replace()."""
         adapter = _make_adapter(platform_config)
+        app = tmp_path / "app.xdc"
+        app.write_bytes(b"PK\x03\x04")
         content = (
-            "Built /workspace/app.xdc.\n"
+            f"Built {app}.\n"
             "```\n"
-            "cp /workspace/app.xdc ./dist/\n"
+            f"cp {app} ./dist/\n"
             "```\n"
         )
 
         files, remaining = adapter.extract_local_files(content)
 
-        assert files == ["/workspace/app.xdc"]
+        assert files == [str(app)]
         # The bare mention is gone; the one inside the code block survives.
-        assert remaining.count("/workspace/app.xdc") == 1
-        assert "cp /workspace/app.xdc ./dist/" in remaining
+        assert remaining.count(str(app)) == 1
+        assert f"cp {app} ./dist/" in remaining
 
 
 class TestExtractMedia:
@@ -175,3 +181,58 @@ class TestDeliveryFiltersNotOverridden:
 
         assert seen["media"] == ([("/workspace/clip.mp4", False)], key)
         assert seen["local"] == (["/workspace/app.xdc"], key)
+
+
+class TestNoDoubleDelivery:
+    """A file named by a MEDIA: tag and as a bare path in one reply goes out once."""
+
+    async def _deliver(self, adapter, media, local):
+        await adapter._deliver_media_attachments(
+            object(), media, local, force_document_attachments=False,
+            human_delay=0, metadata={}, record_delivery=lambda r: None)
+        return adapter.delivered
+
+    @pytest.mark.asyncio
+    async def test_bare_path_of_tagged_file_is_dropped(self, platform_config, tmp_path):
+        adapter = _make_adapter(platform_config)
+        app = tmp_path / "app.xdc"
+        app.write_bytes(b"PK\x03\x04")
+        media, rest = adapter.extract_media(f"Here it is:\nMEDIA:{app}\nSaved at {app}.")
+        local, _ = adapter.extract_local_files(rest)
+        assert local == [str(app)]  # both extractors see it ...
+
+        media, local, kwargs = await self._deliver(adapter, media, local)
+
+        assert media == [(str(app), False)]
+        assert local == []  # ... but it is sent once
+        assert kwargs["human_delay"] == 0  # the rest is passed through
+
+    @pytest.mark.asyncio
+    async def test_paths_compare_resolved(self, platform_config, tmp_path, monkeypatch):
+        """~ and symlinked spellings of the same file count as the same file."""
+        monkeypatch.setenv("HOME", str(tmp_path))
+        real = tmp_path / "real.pdf"
+        real.write_bytes(b"%PDF")
+        (tmp_path / "link.pdf").symlink_to(real)
+        adapter = _make_adapter(platform_config)
+
+        _, local, _ = await self._deliver(
+            adapter, [("~/real.pdf", False)], [str(tmp_path / "link.pdf")])
+
+        assert local == []
+
+    @pytest.mark.asyncio
+    async def test_other_bare_paths_are_kept(self, platform_config, tmp_path):
+        adapter = _make_adapter(platform_config)
+        a, b = str(tmp_path / "a.pdf"), str(tmp_path / "b.pdf")
+
+        media, local, _ = await self._deliver(adapter, [(a, False)], [b, a, b])
+
+        assert media == [(a, False)]
+        assert local == [b, b]  # only the tagged file is dropped, order kept
+
+    @pytest.mark.asyncio
+    async def test_empty_lists(self, platform_config):
+        adapter = _make_adapter(platform_config)
+
+        assert (await self._deliver(adapter, [], []))[:2] == ([], [])

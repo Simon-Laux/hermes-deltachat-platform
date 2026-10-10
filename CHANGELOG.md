@@ -54,7 +54,21 @@ repairs and doc typo fixes are left out; see the git log for those.
   reach Hermes as plain text, so the agent had to guess what "this" meant.
   The quoted message (in full, if it is from the same chat) and its author
   are now passed on, for text, voice, image and file messages alike.
-
+- **Attachments could arrive twice.** A reply that sent a file with a
+  `MEDIA:` tag and also mentioned its path ("saved at /…/app.xdc"), or
+  mentioned one file under two spellings (`~/app.xdc` and its full path, or
+  through a symlink), delivered it once per mention. It now goes out once,
+  for every file type.
+- **A webxdc app in the Docker sandbox could be re-sent on later replies.**
+  A bare `/workspace/app.xdc` mention was sent without checking, so when
+  Hermes could not tell it had already been delivered, the app went out
+  again. A bare `/workspace/…` path is now left as text, as it already was
+  for other file types; the agent sends files with a `MEDIA:` tag, as the
+  webxdc skill tells it to.
+- **Text after a `MEDIA:` tag for a `.xdc` could vanish.** In
+  "MEDIA:/workspace/a b.xdc and /workspace/c.xdc" the tag ran on to the last
+  `.xdc` of the line, so if the file could not be sent the rest of the
+  sentence was cut from the reply.
 - **Attachments over Hermes' size cap still reached the agent.** When
   Hermes refused to cache a file over `gateway.max_inbound_media_bytes`
   (default 128 MiB), the adapter passed the raw Delta Chat file instead, and

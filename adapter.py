@@ -2172,15 +2172,17 @@ body {{
     def _xdc_path_is_deliverable(path: str) -> bool:
         """True for a bare .xdc path worth handing to the delivery pipeline.
 
-        /workspace/ paths are container-side and never exist on the host, so
-        they are taken on faith; Hermes's delivery filter translates them to
-        the host sandbox (Hermes >= 0.21.5).  Everything else must actually
-        exist — the base extractor applies the same os.path.isfile() guard,
-        and without it a path merely mentioned in prose is cut from the reply
-        text and pushed at the user as an attachment.
+        The path must exist on the host — the base extractor applies the same
+        os.path.isfile() guard, and without it a path merely mentioned in
+        prose is cut from the reply text and pushed at the user as an
+        attachment.
+
+        Docker /workspace/ paths never exist on the host, so a bare mention
+        of one stays text; the agent sends those with a MEDIA: tag.  Taking
+        them on faith re-sent the app on every later reply that mentioned
+        it: Hermes's "already delivered" check compares the translated host
+        path against the /workspace/ path recorded in the history.
         """
-        if path.startswith("/workspace/"):
-            return True
         try:
             return os.path.isfile(os.path.expanduser(path))
         except (OSError, RuntimeError, ValueError):
@@ -2224,14 +2226,9 @@ body {{
         """Extend base to also pick up bare .xdc paths.
 
         .xdc is not in Hermes's MEDIA_DELIVERY_EXTS, so the base staticmethod
-        never picks up bare .xdc paths.  We add them explicitly here for both
-        deployment shapes:
-          * Docker sandbox container paths like /workspace/app.xdc, which don't
-            exist on the host — Hermes's filter_local_delivery_paths then maps
-            them to the host sandbox before validation.
-          * Agent-workspace paths on non-Docker deployments (absolute /... or
-            home ~/... paths already visible on the host) — these flow
-            untouched to the base validator, which enforces the denylist.
+        never picks up bare .xdc paths.  We add absolute /... and home ~/...
+        paths that exist on the host; they flow untouched to the base
+        validator, which enforces the denylist.
 
         A bare path is a guess at intent, not an instruction, so candidates
         must clear _xdc_path_is_deliverable before they are removed from the
@@ -2252,6 +2249,25 @@ body {{
             spans.append(span)
 
         return files, self._delete_spans(remaining, spans)
+
+    async def _deliver_media_attachments(self, event, media_files, local_files, *args, **kwargs):
+        """Skip bare paths that a MEDIA: tag in the same reply already sends.
+
+        "MEDIA:/x/app.xdc … saved at /x/app.xdc" puts the file in both lists,
+        and Hermes sends each list in full, so the user got it twice.  This is
+        the one hook that sees both lists; by now both hold validated host
+        paths, so a /workspace/ tag compares equal to its host-side mention.
+        """
+        def key(path):
+            try:
+                return os.path.realpath(os.path.expanduser(path))
+            except (OSError, RuntimeError, ValueError):
+                return path
+
+        tagged = {key(p) for p, _ in media_files or []}
+        local_files = [p for p in local_files or [] if key(p) not in tagged]
+        return await super()._deliver_media_attachments(
+            event, media_files, local_files, *args, **kwargs)
 
     def _rpc_server_exit_code(self) -> Optional[int]:
         """Exit code of the deltachat-rpc-server subprocess, or None if alive.
