@@ -19,11 +19,8 @@ Delta Chat plugin for Hermes Agent.
 └── skills/
     └── webxdc-converter/
         ├── SKILL.md              # Webxdc conversion skill
-        ├── references/
-        │   └── webxdc-api.md      # Webxdc API documentation
-        └── scripts/
-            ├── package_xdc.py      # XDC packaging script
-            └── generate_icon.py     # Icon generation script
+        └── references/
+            └── webxdc-api.md      # Webxdc API documentation
 ```
 
 ## Hermes Profile Directory Structure
