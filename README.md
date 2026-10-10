@@ -97,9 +97,10 @@ answered by reacting to that exact message (typed replies still work):
 - Command approvals: 👍 approve once, 👎 deny (`/approve session|always` typed only)
 - Slash-command confirmations (`/reset`, `/new`, `/undo`, `/reload-mcp`, costly `/model`):
   👍 approve once, 👎 cancel (`/always` typed only, since it turns the confirmation off for good)
+- Questions with up to 9 choices: react 1️⃣–9️⃣ (multi-select questions are typed only)
 
 Only someone who could have typed the answer can react: an approved contact whose session
-the prompt belongs to and, with `allow_admin_from` set, an admin.
+the prompt belongs to and, for approvals and confirmations with `allow_admin_from` set, an admin.
 
 ### Group Chats
 By default the agent answers every message in a group. Set `DELTACHAT_REQUIRE_MENTION=1` and it

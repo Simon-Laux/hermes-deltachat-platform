@@ -719,6 +719,8 @@ class DeltaChatAdapter(BasePlatformAdapter):
         self._approval_prompts: Dict[int, tuple] = {}
         # Slash-confirm prompt msg id -> (Hermes session key, confirm_id), oldest first.
         self._slash_confirm_prompts: Dict[int, tuple] = {}
+        # Clarify prompt msg id -> (Hermes session key, clarify_id, choice labels), oldest first.
+        self._clarify_prompts: Dict[int, tuple] = {}
 
         # Group mention gating (opt-in; DMs are never gated). Set
         # platforms.deltachat-platform.require_mention / mention_aliases in
@@ -1674,6 +1676,44 @@ body {{
                                   (session_key, confirm_id))
         return result
 
+    # Keycaps 1️⃣-9️⃣ as compared: with the variation selector removed
+    _CLARIFY_REACTIONS = {f"{n}⃣": n - 1 for n in range(1, 10)}
+
+    async def send_clarify(self, chat_id: str, question: str, choices: Optional[list], clarify_id: str,
+                           session_key: str, metadata: Optional[Dict[str, Any]] = None) -> SendResult:
+        """Send Hermes' multiple-choice clarify with keycap-numbered choices to react with.
+
+        Open questions, more than 9 choices and multi-select (one reaction
+        can't pick several) get Hermes' numbered-text prompt. Typed answers
+        work either way: the entry is put in text mode like the base does.
+        """
+        args = dict(chat_id=chat_id, question=question, choices=choices, clarify_id=clarify_id,
+                    session_key=session_key, metadata=metadata)
+
+        if not choices or len(choices) > len(self._CLARIFY_REACTIONS):
+            return await super().send_clarify(**args)
+        try:
+            # multi_select lives on the pending entry; read it the way the base does
+            from tools import clarify_gateway as _cg
+            from tools.clarify_gateway import mark_awaiting_text, resolve_gateway_clarify  # noqa: F401
+            with _cg._lock:
+                multi_select = bool(_cg._entries[clarify_id].multi_select)
+        except Exception as e:
+            logger.warning("Can't read clarify %s, sending it without reactions: %s", clarify_id, e)
+            return await super().send_clarify(**args)
+        if multi_select:
+            return await super().send_clarify(**args)
+        numbered = [f"{n}️⃣ {choice}" for n, choice in enumerate(choices, start=1)]
+        text = "\n".join([f"❓ {question}", "", *numbered, "",
+                          "React to this exact message with a number, or reply with the "
+                          "number, the option text, or your own answer."])
+        mark_awaiting_text(clarify_id)
+        result = await self.send(chat_id, text, metadata=metadata)
+        if result.success and result.message_id:
+            self._remember_prompt(self._clarify_prompts, result.message_id,
+                                  (session_key, clarify_id, list(choices)))
+        return result
+
     @staticmethod
     def _reaction_choice(event: Dict[str, Any], mapping: Dict[str, Any]):
         """The value *mapping* gives the event's reaction, or None.
@@ -1734,6 +1774,33 @@ body {{
             await self._handle_approval_reaction(event)
         elif msg_id in self._slash_confirm_prompts:
             await self._handle_slash_confirm_reaction(event)
+        elif msg_id in self._clarify_prompts:
+            await self._handle_clarify_reaction(event)
+
+    async def _handle_clarify_reaction(self, event: Dict[str, Any]) -> None:
+        """Answer the clarify a keycap reaction picks a choice of.
+
+        Nothing is sent back: the agent carrying on is the feedback, and a
+        stale clarify was already answered or timed out.
+        """
+        msg_id, contact_id = event.get("msg_id"), event.get("contact_id")
+        session_key, clarify_id, labels = self._clarify_prompts[msg_id]
+        index = self._reaction_choice(event, self._CLARIFY_REACTIONS)
+        if index is None or index >= len(labels):
+            return
+        # why: no command -- Hermes doesn't slash-gate clarify answers either
+        if not await self._reaction_authorized(event, session_key, None):
+            return
+        if self._clarify_prompts.pop(msg_id, None) is None:
+            return
+        try:
+            from tools.clarify_gateway import resolve_gateway_clarify
+            resolved = resolve_gateway_clarify(clarify_id, labels[index])
+        except Exception as e:
+            logger.warning("Clarify reaction on prompt %s failed: %s", msg_id, e)
+            return
+        logger.info("Contact %s reacted to clarify prompt %s: choice %d (resolved: %s)",
+                    contact_id, msg_id, index + 1, resolved)
 
     async def _handle_slash_confirm_reaction(self, event: Dict[str, Any]) -> None:
         """Resolve the slash confirm a 👍/👎 reaction answers."""
