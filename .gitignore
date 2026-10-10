@@ -80,3 +80,6 @@ docs/fork-backport-notes.md
 
 # Python built by the call-test recipe in AGENTS.md
 .calltest-py
+
+# Release share pics and notes, built locally and attached to GitHub releases
+release-assets/
