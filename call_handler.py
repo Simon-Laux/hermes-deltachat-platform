@@ -182,12 +182,13 @@ def _call_thread_id(msg_id) -> Optional[str]:
 # drops these because Whisper invents them on silent clips, but a call only
 # transcribes audio that passed the RMS gate (>= 0.3 s voiced), so here they are
 # real answers — and a dropped "bye" meant the caller could not say goodbye.
-_SHORT_REPLY_RE = _re.compile(r"^(?:ok(?:ay)?|thanks|thank you|bye|[\s.,!])+$", _re.IGNORECASE)
+# Only a single one: repeats ("Thank you. Thank you.") are what Whisper produces
+# on noise, so those still go through Hermes's filter.
+_SHORT_REPLY_RE = _re.compile(r"^(?:ok(?:ay)?|thanks|thank you|bye(?: bye)?)[.!,]*$", _re.IGNORECASE)
 
 
 def _is_short_reply(transcript: str) -> bool:
-    t = transcript.strip()
-    return bool(_SHORT_REPLY_RE.match(t)) and any(c.isalpha() for c in t)
+    return bool(_SHORT_REPLY_RE.match(transcript.strip()))
 
 
 def _spawn(coro, what: str) -> asyncio.Future:
@@ -201,8 +202,7 @@ def _spawn(coro, what: str) -> asyncio.Future:
 
     def _done(t: asyncio.Future) -> None:
         if not t.cancelled() and t.exception() is not None:
-            logger.error("Call task %s crashed: %r", what, t.exception(),
-                         exc_info=t.exception())
+            logger.error("Call task %s crashed", what, exc_info=t.exception())
 
     task.add_done_callback(_done)
     return task
@@ -459,7 +459,7 @@ class IncomingAudioBuffer:
                 logger.error("STT failed: %s", e)
                 return
         stt_s = time.monotonic() - t0
-        if not result.get("success"):
+        if not result.get("success") and not result.get("no_speech"):
             # why ERROR: on a fresh install this is "No STT provider available" or
             # a failed model download, and the caller just gets no answer.
             # Hermes's error text, never the transcript.
@@ -493,7 +493,10 @@ class IncomingAudioBuffer:
         if _CALL_STT_VOXTRAL and os.getenv("MISTRAL_API_KEY") and hasattr(tt, "_transcribe_mistral"):
             try:
                 result = tt._transcribe_mistral(wav_path, _voxtral_model(tt))
-                if result.get("success"):
+                # no_speech: Hermes's cloud path reports a silent clip as a
+                # failure; it's just noise that passed the RMS gate, not a reason
+                # to fall back and pay for a second transcription.
+                if result.get("success") or result.get("no_speech"):
                     return result
                 logger.warning("Voxtral STT failed (%s) — falling back", result.get("error"))
             except Exception as e:
@@ -1407,8 +1410,11 @@ class CallManager:
         tmp_path = cache / "_warmup.wav"
         tmp_path.write_bytes(buf.getvalue())
         logger.info("Pre-warming local Whisper model...")
-        tt.transcribe_audio(str(tmp_path))
-        logger.info("Whisper model ready")
+        result = tt.transcribe_audio(str(tmp_path))
+        if result.get("success") or result.get("no_speech"):
+            logger.info("Whisper model ready")
+        else:
+            logger.warning("Whisper warmup failed: %s", result.get("error"))
 
     # ------------------------------------------------------------------ #
     # Per-call LLM model override (opt-in via DELTACHAT_CALL_MODEL)        #

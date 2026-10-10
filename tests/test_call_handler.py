@@ -309,10 +309,7 @@ class TestIncomingCallAuthorization:
     async def test_unauthorized_caller_reaches_hermes_auth_gate(self, monkeypatch):
         """A declined caller gets what an unknown contact's message would get
         (pairing code by default), instead of a silent hang-up."""
-        import types
         from unittest.mock import AsyncMock
-        monkeypatch.setattr(sys.modules["gateway.platforms.base"], "MessageEvent",
-                            lambda **kw: types.SimpleNamespace(**kw))
         mgr, adapter = self._manager(False)
         mgr._to_hermes = AsyncMock()
         await mgr._handle_incoming_call({"msg_id": 5, "chat_id": 12, "place_call_info": "sdp"})
@@ -320,10 +317,24 @@ class TestIncomingCallAuthorization:
         kwargs = adapter.build_source.call_args.kwargs
         assert (kwargs["user_id"], kwargs["chat_id"], kwargs["chat_type"]) == ("10", "12", "dm")
         assert "thread_id" not in kwargs   # the text DM, not a call session
+        event = mgr._to_hermes.call_args.args[0]
+        # internal=True would skip Hermes's auth gate and hand the text to the agent
+        assert not getattr(event, "internal", False)
+        assert not event.text.startswith("/")   # never parsed as a command
+
+    @pytest.mark.asyncio
+    async def test_failed_caller_lookup_is_not_reported(self):
+        from unittest.mock import AsyncMock
+        mgr, adapter = self._manager(False)
+        adapter.rpc.get_message = AsyncMock(side_effect=RuntimeError("gone"))
+        mgr._to_hermes = AsyncMock()
+        await mgr._handle_incoming_call({"msg_id": 5, "chat_id": 12, "place_call_info": "sdp"})
+        adapter.rpc.end_call.assert_awaited_once()
+        mgr._to_hermes.assert_not_awaited()
 
     @pytest.mark.asyncio
     async def test_failed_auth_check_is_not_reported(self):
-        # None means the check itself broke; Hermes would not pair on that either.
+        # None means our check broke; stay conservative and send nothing.
         from unittest.mock import AsyncMock
         mgr, adapter = self._manager(None)
         mgr._to_hermes = AsyncMock()
@@ -809,6 +820,18 @@ class TestFreshInstanceDiagnostics:
         assert "No STT provider available" in caplog.text
 
     @pytest.mark.asyncio
+    async def test_silent_clip_on_cloud_stt_is_not_an_error(self, monkeypatch, tmp_path, caplog):
+        # Hermes's cloud path returns success=False + no_speech for an empty
+        # transcript; noise passing the RMS gate must not flood ERROR.
+        buf = ch.IncomingAudioBuffer(str(tmp_path), on_utterance=lambda t, w: None)
+        monkeypatch.setattr(ch.IncomingAudioBuffer, "_transcribe", staticmethod(
+            lambda p: {"success": False, "transcript": "", "no_speech": True,
+                       "error": "Groq returned empty transcript"}))
+        with caplog.at_level("ERROR"):
+            await buf._process_utterance(b"\x00" * 3200)
+        assert "STT failed" not in caplog.text
+
+    @pytest.mark.asyncio
     async def test_spawned_task_crash_is_logged(self, caplog):
         async def boom():
             raise ModuleNotFoundError("No module named 'numpy'")
@@ -853,9 +876,11 @@ class TestShortReplies:
         from unittest.mock import AsyncMock, MagicMock
         voice_mode = types.ModuleType("tools.voice_mode")
         # Hermes's rule: these phrases on their own count as hallucinations.
-        voice_mode.is_whisper_hallucination = lambda t: t.strip().lower().rstrip(".!") in {
-            "ok", "okay", "thanks", "thank you", "bye", "bye bye", "you",
-            "thanks for watching"}
+        import re
+        repeat = re.compile(r"^(?:thank you|thanks|bye|you|ok|okay|the end|\.|\s|,|!)+$", re.I)
+        voice_mode.is_whisper_hallucination = lambda t: (
+            t.strip().lower().rstrip(".!") in {"thank you", "bye", "you", "thanks for watching"}
+            or bool(repeat.match(t.strip())))
         tools_pkg = sys.modules.get("tools") or types.ModuleType("tools")
         monkeypatch.setitem(sys.modules, "tools", tools_pkg)
         monkeypatch.setitem(sys.modules, "tools.voice_mode", voice_mode)
@@ -873,12 +898,10 @@ class TestShortReplies:
         mgr._to_hermes.assert_awaited_once()
 
     @pytest.mark.asyncio
-    @pytest.mark.parametrize("said", ["You.", "Thanks for watching!"])
+    @pytest.mark.parametrize("said", ["You.", "Thanks for watching!",
+                                      "Thank you. Thank you. Thank you.", "..."])
     async def test_hallucinations_are_still_dropped(self, monkeypatch, said):
         mgr = self._manager(monkeypatch)
         await mgr._on_utterance(1, "12", said, "10", "X")
         mgr._to_hermes.assert_not_awaited()
 
-    def test_punctuation_only_is_not_a_short_reply(self):
-        assert not ch._is_short_reply("...")
-        assert not ch._is_short_reply("")

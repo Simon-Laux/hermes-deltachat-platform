@@ -67,7 +67,9 @@ repairs and doc typo fixes are left out; see the git log for those.
   know yet used to be hung up silently. The call is still declined, but the
   caller now gets what an unknown contact's message gets: a pairing code by
   default, or the decline text, or nothing, per `unauthorized_dm_behavior`,
-  rate-limited by Hermes.
+  rate-limited by Hermes. With `ignore`, an unknown caller now also shows up
+  as Hermes's "Unauthorized user" warning and its one-time notice in the
+  home channel, like an unknown sender's message does.
 - **The first incoming call on a fresh install had no Whisper warmup.** It
   wrote into a folder that didn't exist yet. The warmup also no longer runs
   on the call's event loop, where Hermes installing faster-whisper on first
