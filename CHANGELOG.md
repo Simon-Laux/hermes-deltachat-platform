@@ -53,6 +53,30 @@ repairs and doc typo fixes are left out; see the git log for those.
 
 ### Fixed
 
+- **Voice calls never heard the caller on a plain install.** The call code
+  needs `numpy`, which neither aiortc nor Hermes's default install brings
+  in; the receive loop died on its first frame without a log line, so the
+  bot greeted and then never answered. `plugin.yaml` now declares `numpy`
+  and `av`, and a crash in a call's background task is logged at ERROR.
+- **Call problems on a fresh instance are now visible in `gateway.log`.**
+  A failed transcription (no STT provider, failed model download) is logged
+  at ERROR with Hermes's reason instead of being dropped at DEBUG. So are a
+  missing TURN server and an SDP of ours without a relay candidate, which
+  behind NAT mean the call will not connect.
+- **Declined callers now hear back.** A call from a contact Hermes doesn't
+  know yet used to be hung up silently. The call is still declined, but the
+  caller now gets what an unknown contact's message gets: a pairing code by
+  default, or the decline text, or nothing, per `unauthorized_dm_behavior`,
+  rate-limited by Hermes.
+- **The first incoming call on a fresh install had no Whisper warmup.** It
+  wrote into a folder that didn't exist yet. The warmup also no longer runs
+  on the call's event loop, where Hermes installing faster-whisper on first
+  use stalled call setup for minutes.
+- **"OK", "Thanks" and "Bye" spoken in a call were thrown away** as Whisper
+  hallucinations, so a plain "bye" couldn't end the call. Calls only
+  transcribe audio that is clearly speech, so these now reach the agent.
+- **A missing aiortc no longer stops the whole adapter.** Text messaging
+  connects and calls are disabled, with an ERROR saying what to install.
 - **The agent couldn't load the bundled webxdc skill.** The system prompt
   told it to call `skill_view('plugin:deltachat-platform:webxdc-converter')`,
   which Hermes reads as a plugin called `plugin`, so the call returned "Skill

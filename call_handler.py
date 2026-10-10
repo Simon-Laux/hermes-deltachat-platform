@@ -178,6 +178,36 @@ def _call_thread_id(msg_id) -> Optional[str]:
     return f"{_CALL_THREAD_ID}-{msg_id}"
 
 
+# "OK", "Thanks", "Bye bye" and the like. Hermes's Whisper-hallucination filter
+# drops these because Whisper invents them on silent clips, but a call only
+# transcribes audio that passed the RMS gate (>= 0.3 s voiced), so here they are
+# real answers — and a dropped "bye" meant the caller could not say goodbye.
+_SHORT_REPLY_RE = _re.compile(r"^(?:ok(?:ay)?|thanks|thank you|bye|[\s.,!])+$", _re.IGNORECASE)
+
+
+def _is_short_reply(transcript: str) -> bool:
+    t = transcript.strip()
+    return bool(_SHORT_REPLY_RE.match(t)) and any(c.isalpha() for c in t)
+
+
+def _spawn(coro, what: str) -> asyncio.Future:
+    """ensure_future that logs a crash instead of losing it.
+
+    why: a bare ensure_future keeps its exception until the task is garbage
+    collected, so a missing numpy killed the receive loop and left a deaf call
+    with nothing in gateway.log.
+    """
+    task = asyncio.ensure_future(coro)
+
+    def _done(t: asyncio.Future) -> None:
+        if not t.cancelled() and t.exception() is not None:
+            logger.error("Call task %s crashed: %r", what, t.exception(),
+                         exc_info=t.exception())
+
+    task.add_done_callback(_done)
+    return task
+
+
 # message_id prefix of the injected "call ended" notes. Hermes anchors a reply on
 # the id of the message it answers (base.py `_reply_anchor_for_event`), so a reply
 # carrying this prefix is the AI acknowledging the note — never meant for the user.
@@ -324,7 +354,7 @@ class IncomingAudioBuffer:
 
     def start(self, track) -> None:
         self._running = True
-        self._task = asyncio.ensure_future(self._receive_loop(track))
+        self._task = _spawn(self._receive_loop(track), "audio receive loop")
 
     def stop(self) -> None:
         self._running = False
@@ -357,7 +387,7 @@ class IncomingAudioBuffer:
         def _emit():
             if _voiced_s >= _MIN_VOICED_S:
                 logger.info("Utterance end: %.1f s voiced, %d KB", _voiced_s, len(_SPEECH_BUF) // 1024)
-                asyncio.ensure_future(self._process_utterance(bytes(_SPEECH_BUF)))
+                _spawn(self._process_utterance(bytes(_SPEECH_BUF)), "utterance STT")
 
         logger.info("Audio receive loop started")
         while self._running:
@@ -425,11 +455,18 @@ class IncomingAudioBuffer:
         async with self._stt_lock:   # one at a time — avoids concurrent CPU contention
             try:
                 result = await asyncio.to_thread(self._transcribe, wav_path)
-                transcript = result.get("transcript", "").strip() if result.get("success") else ""
             except Exception as e:
                 logger.error("STT failed: %s", e)
                 return
         stt_s = time.monotonic() - t0
+        if not result.get("success"):
+            # why ERROR: on a fresh install this is "No STT provider available" or
+            # a failed model download, and the caller just gets no answer.
+            # Hermes's error text, never the transcript.
+            logger.error("STT failed after %.1fs (%s): %s", stt_s,
+                         result.get("provider", "?"), result.get("error", "no error given"))
+            return
+        transcript = (result.get("transcript") or "").strip()
         if transcript:
             # Its first 80 chars are logged at DEBUG when it is injected.
             logger.info("perf STT=%.1fs (%s) → %d chars", stt_s, result.get("provider", "?"),
@@ -652,17 +689,20 @@ class CallManager:
         # answer and load STT for them. Fail closed: the gateway always wires a
         # check, so None only means it raised or returned junk (base.py treats
         # that as "unknown", never as authorization).
-        if self._adapter._is_sender_authorized(caller_id, "dm", chat_id) is not True:
+        verdict = self._adapter._is_sender_authorized(caller_id, "dm", chat_id)
+        if verdict is not True:
             # caller_id "caller": the lookup above failed, so nobody to authorize.
             logger.info("Declining call %s: contact %s not authorized (or check failed)",
                         msg_id, caller_id if caller_id != "caller" else "(caller lookup failed)")
             with contextlib.suppress(Exception):
                 await self._adapter.rpc.end_call(self._adapter.account_id, msg_id)
+            if verdict is False and caller_id != "caller":
+                await self._report_declined_call(msg_id, chat_id, caller_id, caller_name)
             return
 
         # Start warming up Whisper NOW — before ICE gathering and SDP exchange
         # which take ~5-10 s, giving the model time to load into memory.
-        asyncio.ensure_future(self._warmup_stt())
+        _spawn(self._warmup_stt(), "STT warmup")
 
         try:
             await self._answer_call(msg_id, chat_id, sdp_offer, caller_id, caller_name)
@@ -671,6 +711,37 @@ class CallManager:
             # Try to decline gracefully
             with contextlib.suppress(Exception):
                 await self._adapter.rpc.end_call(self._adapter.account_id, msg_id)
+
+    async def _report_declined_call(self, msg_id: int, chat_id: str,
+                                    caller_id: str, caller_name: str) -> None:
+        """Hand a declined call to Hermes as if the caller had written in the chat.
+
+        why: a call never reaches Hermes's inbound pipeline, so a caller who
+        never wrote first got hung up on without a pairing code or any reason.
+        Hermes's auth gate runs before it looks at the text, so this gets the
+        same answer an unknown contact's message would (pairing code, decline
+        text or nothing, per unauthorized_dm_behavior), rate-limited by Hermes
+        per contact — redialing can't make it spam the chat or burn tokens.
+        """
+        from gateway.platforms.base import MessageEvent, MessageType
+
+        source = self._adapter.build_source(
+            chat_id=chat_id,
+            chat_name=f"Chat {chat_id}",
+            chat_type="dm",
+            user_id=caller_id,
+            user_name=caller_name,
+        )
+        event = MessageEvent(
+            text="[Declined an incoming voice call: the caller is not authorized yet]",
+            message_type=MessageType.TEXT,
+            source=source,
+            message_id=str(msg_id),
+        )
+        try:
+            await self._to_hermes(event)
+        except Exception as e:
+            logger.warning("Could not report declined call %s to Hermes: %s", msg_id, e)
 
     async def _handle_call_ended(self, event: Dict[str, Any]) -> None:
         msg_id = int(event["msg_id"])
@@ -718,15 +789,32 @@ class CallManager:
         ice_json = await self._adapter.rpc.ice_servers(self._adapter.account_id)
         logger.debug("ice_servers raw: %s", ice_json)   # debug: contains TURN credentials
         ice_servers = []
+        dropped_ipv6 = 0
         for s in (json.loads(ice_json) or []):
             urls = s.get("urls", [])
             if isinstance(urls, str):
                 urls = [urls]
             ipv4_urls = [u for u in urls if "[" not in u]
+            dropped_ipv6 += len(urls) - len(ipv4_urls)
             if ipv4_urls:
                 ice_servers.append(RTCIceServer(**{**s, "urls": ipv4_urls}))
-        logger.info("Using %d ICE server(s)", len(ice_servers))
+        logger.info("Using %d ICE server(s), dropped %d IPv6 URL(s)", len(ice_servers), dropped_ipv6)
+        if not any(u.startswith(("turn:", "turns:"))
+                   for s in ice_servers for u in s.urls):
+            # why ERROR: behind NAT (most VPS and containers) a call without a
+            # relay connects nowhere and is hung up ~30 s later as "failed".
+            logger.error("No usable TURN server among DC's ICE servers — calls from "
+                         "behind NAT will not connect (IPv6-only TURN can't be used by aiortc)")
         return RTCConfiguration(iceServers=ice_servers)
+
+    @classmethod
+    def _check_relay(cls, sdp: str, what: str) -> None:
+        """Log an error when our own SDP carries no TURN relay candidate."""
+        summary = cls._sdp_candidates(sdp)
+        logger.info("%s candidates: %s", what, summary)
+        if "relay:" not in summary:
+            logger.error("%s has no relay candidate — TURN allocation failed or no TURN "
+                         "server; the call only connects if the peer can reach us directly", what)
 
     @staticmethod
     def _sdp_candidates(sdp: str) -> str:
@@ -869,8 +957,9 @@ class CallManager:
         """Build the incoming-audio buffer wired to STT + barge-in for a call."""
         return IncomingAudioBuffer(
             hermes_home=self._get_hermes_home(),
-            on_utterance=lambda transcript, wav: asyncio.ensure_future(
-                self._on_utterance(msg_id, chat_id, transcript, caller_id, caller_name)
+            on_utterance=lambda transcript, wav: _spawn(
+                self._on_utterance(msg_id, chat_id, transcript, caller_id, caller_name),
+                "utterance to Hermes",
             ),
             on_speech_confirmed=lambda: self._handle_barge_in(msg_id),
         )
@@ -951,7 +1040,7 @@ class CallManager:
         pc.addTrack(out_track)
         await pc.setLocalDescription(await pc.createAnswer())
         await self._gather_ice(pc)
-        logger.info("Our answer candidates: %s", self._sdp_candidates(pc.localDescription.sdp))
+        self._check_relay(pc.localDescription.sdp, "Our answer")
         logger.info("Our answer media: %s", self._sdp_media(pc.localDescription.sdp))
 
         await self._adapter.rpc.accept_incoming_call(
@@ -1027,7 +1116,7 @@ class CallManager:
         # Our offer out (ICE gathered) → place the call to get the msg_id.
         await pc.setLocalDescription(await pc.createOffer())
         await self._gather_ice(pc)
-        logger.info("Our offer candidates: %s", self._sdp_candidates(pc.localDescription.sdp))
+        self._check_relay(pc.localDescription.sdp, "Our offer")
         logger.info("Our offer media: %s", self._sdp_media(pc.localDescription.sdp))
         msg_id = int(await self._adapter.rpc.place_outgoing_call(
             self._adapter.account_id, int(chat_id), pc.localDescription.sdp, False,
@@ -1046,7 +1135,7 @@ class CallManager:
 
         self._register_session(pc, ice_channel, out_track, audio_buf,
                                msg_id, chat_id, caller_id, caller_name)
-        asyncio.ensure_future(self._warmup_stt())
+        _spawn(self._warmup_stt(), "STT warmup")
 
         # Pre-render the opening line in parallel with ringing — by pickup the
         # audio is ready, so there's zero post-pickup latency and no AI call.
@@ -1289,28 +1378,37 @@ class CallManager:
         """
         if _CALL_STT_VOXTRAL:
             return
+        # why a thread for all of it: _get_provider can pip-install faster-whisper
+        # synchronously when it is missing — minutes on the call loop, which
+        # stalls ICE and RTP for every call.
         try:
-            import io
-            import wave as _wave
-            from tools import transcription_tools as tt
-            if tt._get_provider(tt._load_stt_config()) != "local":
-                return
-            # Create a 0.5 s silence WAV in memory and write to a temp file
-            buf = io.BytesIO()
-            with _wave.open(buf, "wb") as wf:
-                wf.setnchannels(1)
-                wf.setsampwidth(2)
-                wf.setframerate(16000)
-                wf.writeframes(b"\x00" * 16000)  # 0.5 s of silence
-            tmp = self._get_hermes_home()
-            tmp_path = os.path.join(tmp, "audio_cache", "_warmup.wav")
-            with open(tmp_path, "wb") as f:
-                f.write(buf.getvalue())
-            logger.info("Pre-warming local Whisper model...")
-            await asyncio.to_thread(tt.transcribe_audio, tmp_path)
-            logger.info("Whisper model ready")
+            await asyncio.to_thread(self._warmup_stt_sync, self._get_hermes_home())
         except Exception as e:
-            logger.debug("STT warmup failed (non-fatal): %s", e)
+            logger.warning("STT warmup failed (non-fatal): %s", e)
+
+    @staticmethod
+    def _warmup_stt_sync(hermes_home: str) -> None:
+        import io
+        import wave as _wave
+        from tools import transcription_tools as tt
+        if tt._get_provider(tt._load_stt_config()) != "local":
+            return
+        # Create a 0.5 s silence WAV in memory and write to a temp file
+        buf = io.BytesIO()
+        with _wave.open(buf, "wb") as wf:
+            wf.setnchannels(1)
+            wf.setsampwidth(2)
+            wf.setframerate(16000)
+            wf.writeframes(b"\x00" * 16000)  # 0.5 s of silence
+        # why mkdir: on incoming calls this runs before IncomingAudioBuffer
+        # creates the directory, so on a fresh HERMES_HOME the warmup always failed.
+        cache = Path(hermes_home) / "audio_cache"
+        cache.mkdir(parents=True, exist_ok=True)
+        tmp_path = cache / "_warmup.wav"
+        tmp_path.write_bytes(buf.getvalue())
+        logger.info("Pre-warming local Whisper model...")
+        tt.transcribe_audio(str(tmp_path))
+        logger.info("Whisper model ready")
 
     # ------------------------------------------------------------------ #
     # Per-call LLM model override (opt-in via DELTACHAT_CALL_MODEL)        #
@@ -1377,7 +1475,7 @@ class CallManager:
         """Inject transcribed speech as a MessageEvent → Hermes AI → send() intercept → TTS."""
         try:
             from tools.voice_mode import is_whisper_hallucination
-            if is_whisper_hallucination(transcript):
+            if not _is_short_reply(transcript) and is_whisper_hallucination(transcript):
                 logger.debug("Discarding Whisper hallucination: %r", transcript[:60])
                 return
         except ImportError:

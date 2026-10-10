@@ -13,7 +13,7 @@ pip install deltachat-rpc-server        # or: nix profile install nixpkgs#deltac
 echo "DELTACHAT_RPC_SERVER=$(which deltachat-rpc-server)" >> ~/.hermes/.env
 ```
 
-Voice calls additionally need `aiortc` (`pip install aiortc`). Everything else
+Voice calls additionally need `aiortc` and `numpy` (`pip install aiortc av numpy`). Everything else
 works without it.
 
 ## 2. Create the Delta Chat account

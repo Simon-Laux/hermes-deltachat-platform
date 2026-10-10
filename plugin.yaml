@@ -76,6 +76,14 @@ optional_env:
 # but `get_my_address()` loses its only non-SecureJoin fallback. 2.60.0 is the newest release whose
 # full RPC surface — all 25 methods this plugin calls, plus the MsgData payload — was verified
 # against the real `--openrpc` spec and a live server.
+#
+# why numpy and av: call_handler.py imports both itself. av only arrived through aiortc, and
+# numpy through nothing at all — aiortc and av don't require it and Hermes only pulls it in with
+# its [voice] extra — so on a plain install the call's receive loop died on `import numpy` and
+# every call was deaf. Listing them here instead of requiring hermes-agent[voice] keeps the
+# plugin working with cloud STT, where the voice extra's local Whisper isn't needed.
 python_dependencies:
   - deltachat-rpc-server>=2.51.0,<2.61
   - aiortc>=1.9.0
+  - av
+  - numpy

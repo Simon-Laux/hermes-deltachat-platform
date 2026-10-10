@@ -1308,8 +1308,14 @@ class DeltaChatAdapter(BasePlatformAdapter):
             global _active_adapter
             _active_adapter = self
 
-            from call_handler import CallManager
-            self._call_manager = CallManager(self)
+            # why: a missing aiortc/av used to fail connect() and take text
+            # messaging down with it; only calls need them.
+            try:
+                from call_handler import CallManager
+            except ImportError as e:
+                logger.error("Voice calls disabled: %s (install aiortc, av and numpy)", e)
+            else:
+                self._call_manager = CallManager(self)
 
             # Log the bot's address for reference
             addr = await self.get_my_address()
