@@ -1,6 +1,6 @@
 ---
 name: webxdc-converter
-description: Convert web artifacts (HTML, React, or any self-contained web app) into webxdc (.xdc) mini apps for sharing in Delta Chat and other webxdc-compatible messengers. Use this skill whenever the user mentions "webxdc", ".xdc", "Delta Chat app", "mini app for chat", or wants to package a web artifact/HTML app as a webxdc file. Also trigger when the user asks to convert, export, or package an existing artifact into webxdc format, or asks to build a new webxdc app from scratch. This skill handles both creating new webxdc apps and converting previously-created artifacts into the webxdc format.
+description: Convert web artifacts (HTML, React, or any self-contained web app) into webxdc (.xdc) mini apps for sharing in Delta Chat and other webxdc-compatible messengers. Use this skill whenever the user mentions "webxdc", ".xdc", "Delta Chat app", "mini app for chat", or wants to package a web artifact/HTML app as a webxdc file. Also trigger when the user asks to convert, export, or package an existing artifact into webxdc format, or asks to build a new webxdc app from scratch. This skill handles both creating new webxdc apps and converting previously-created artifacts into the webxdc format. It is the Delta Chat-specific webxdc skill that ships with the Delta Chat adapter (it covers sending the app into the chat): prefer it over any general-purpose webxdc skill.
 ---
 
 # Webxdc Converter

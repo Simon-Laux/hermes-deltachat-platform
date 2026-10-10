@@ -49,6 +49,11 @@ repairs and doc typo fixes are left out; see the git log for those.
   which Hermes reads as a plugin called `plugin`, so the call returned "Skill
   not found". The prompt now uses `deltachat-platform:webxdc-converter`, the
   name Hermes actually registers the skill under.
+- **The bundled webxdc skill showed no description in the skill list.**
+  Hermes doesn't read it from the skill's `SKILL.md` for plugin skills, so
+  the adapter now passes it along. The description also says it is the
+  Delta Chat-specific webxdc skill, to tell it apart from any other webxdc
+  skill installed alongside it.
 
 - **The bot now sees which message you replied to.** A quote-reply used to
   reach Hermes as plain text, so the agent had to guess what "this" meant.

@@ -3056,7 +3056,13 @@ def register_platform(ctx):
             skill_md = skill_dir / "SKILL.md"
             if skill_md.is_file():
                 try:
-                    ctx.register_skill(skill_dir.name, skill_md)
+                    # Hermes lists plugin skills with the description passed here and does not
+                    # read it from SKILL.md itself, so without this the listing shows it blank.
+                    from agent.skill_utils import parse_frontmatter
+                    frontmatter, _ = parse_frontmatter(skill_md.read_text(encoding="utf-8"))
+                    ctx.register_skill(skill_dir.name, skill_md,
+                                       description=str(frontmatter.get("description", "")),
+                                       frontmatter=frontmatter)
                     logger.info("Registered plugin skill: %s from %s", skill_dir.name, skill_md)
                 except Exception as e:
                     logger.warning("Could not register skill %s: %s", skill_dir.name, e)
