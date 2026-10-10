@@ -103,6 +103,14 @@ answered by reacting to that exact message (typed replies still work):
 Only someone who could have typed the answer can react: an approved contact whose session
 the prompt belongs to and, for approvals and confirmations with `allow_admin_from` set, an admin.
 
+**Status reactions (opt-in).** With `DELTACHAT_REACTIONS=1` the agent reacts 👀 to the message
+it is working on and swaps that for ✅ when it's done or ❌ when the turn failed; a turn
+stopped with `/stop` or `/new` just loses the 👀. Each reaction is an email to every chat
+member, so this costs two extra messages per answer. Only contacts Hermes approves get them,
+and call turns don't. Reactions approved contacts give to the agent's messages also fire Hermes'
+`reaction:added` hook (with `platform`, `reaction`, `user_id`, `channel_id` = chat id,
+`message_ts` = message id), so a gateway hook can act on them; they never reach the model.
+
 ### Group Chats
 By default the agent answers every message in a group. Set `DELTACHAT_REQUIRE_MENTION=1` and it
 only reacts to group messages that mention it (`@<display name>` or an alias from
@@ -313,6 +321,7 @@ hermes gateway start
 | `DELTACHAT_REQUIRE_MENTION` | No | — | In **group** chats, only answer messages that say `@<display name>` (or an alias), or quote-reply to the bot; commands must be addressed as `/cmd@<name>`. DMs are never gated. Also `platforms.deltachat-platform.require_mention: true` in `config.yaml` |
 | `DELTACHAT_MENTION_ALIASES` | No | — | Comma-separated extra names that count as a mention (`@<alias>`); also `platforms.deltachat-platform.mention_aliases` |
 | `DELTACHAT_COMMANDS_BIO` | No | on | Append the slash commands that work in Delta Chat to the bot's profile bio, below a `Hermes commands:` line, one `/cmd args – what` per line so people can look them up in its profile. Your own text above that line is kept. Commands that only admins may run (`allow_admin_from`) are left out. `0` turns it off and takes the list out again, which saves ~4.9 KB per message: Delta Chat isn't optimized for long bios and sends the whole bio with every message, not only now and then like the avatar. Also `platforms.deltachat-platform.commands_bio` |
+| `DELTACHAT_REACTIONS` | No | — | React 👀 to the message being worked on, then ✅/❌ — see [Status reactions](#messaging). Two extra emails per answer. Also `platforms.deltachat-platform.reactions` |
 | `DELTACHAT_MESSAGE_EDITING` | No | — | *Experimental.* Let Hermes edit sent messages in place — see [Message editing](#message-editing-opt-in). Also `platforms.deltachat-platform.message_editing` |
 | `DELTACHAT_EDIT_MIN_INTERVAL` | No | `3` | Seconds between in-progress edits for the whole account (minimum 1). Also `platforms.deltachat-platform.edit_min_interval` |
 

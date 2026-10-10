@@ -31,6 +31,14 @@ class MockMessageType(Enum):
     DOCUMENT = "document"
 
 
+class MockProcessingOutcome(Enum):
+    """Mock of gateway.platforms.base.ProcessingOutcome."""
+
+    SUCCESS = "success"
+    FAILURE = "failure"
+    CANCELLED = "cancelled"
+
+
 @dataclass
 class MockSendResult:
     """Mock of gateway.platforms.base.SendResult."""
@@ -279,6 +287,7 @@ class MockGatewayBase:
     SendResult = MockSendResult
     MessageEvent = MockMessageEvent
     MessageType = MockMessageType
+    ProcessingOutcome = MockProcessingOutcome
 
     # Real default is 128 MiB; 0 (no cap) keeps unrelated tests independent of it.
     inbound_media_max_bytes = 0

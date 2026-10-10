@@ -64,6 +64,9 @@ def test_api_contract(run):
     assert {"success", "message_id", "error", "retryable"} <= set(c["sendresult_fields"])
     assert all(c["prompt_params_match"].values()), c["prompt_params_match"]
     assert c["slash_confirm_api"] and c["clarify_api"]
+    assert c["processing_hooks"] == [["self", "event"], ["self", "event", "outcome"]]
+    assert c["outcomes"] == ["CANCELLED", "FAILURE", "SUCCESS"]
+    assert c["reaction_handler_attr"]
     # our override passes the lists by keyword, so they must stay nameable
     assert [n for n, _ in c["deliver_media_params"]] == [
         "self", "event", "media_files", "local_files"]

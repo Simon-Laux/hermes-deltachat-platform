@@ -24,6 +24,11 @@ action`, and get as much space as people need to upgrade safely.
 
 ### New
 
+- **Optional status reactions.** Set `DELTACHAT_REACTIONS=1` and the agent
+  reacts 👀 to the message it works on, then ✅ or ❌ when done, like on
+  Telegram or Signal. Off by default because each reaction is an email.
+  Reactions from approved contacts to the agent's messages now also fire
+  Hermes' `reaction:added` hook.
 - **"Call me" works.** Asked in a chat, the agent rings that chat; it can
   also schedule a call for later, and never starts a second call into a chat
   that is already on one.

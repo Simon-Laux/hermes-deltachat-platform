@@ -17,7 +17,7 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 
 from gateway.config import Platform, PlatformConfig  # noqa: E402
-from gateway.platforms.base import BasePlatformAdapter, SendResult  # noqa: E402
+from gateway.platforms.base import BasePlatformAdapter, ProcessingOutcome, SendResult  # noqa: E402
 from gateway.stream_consumer import GatewayStreamConsumer, StreamConsumerConfig  # noqa: E402
 
 # Hermes only knows the platform once the plugin is registered
@@ -122,6 +122,13 @@ def contract():
         "clarify_api": all(hasattr(clarify_gateway, n) for n in (
             "_lock", "_entries", "resolve_gateway_clarify", "mark_awaiting_text"))
             and "multi_select" in {f.name for f in dataclasses.fields(clarify_gateway._ClarifyEntry)},
+        # status reactions: Hermes calls these hooks positionally; our hook forwarding reads
+        # the handler set_reaction_handler stores
+        "processing_hooks": [params(BasePlatformAdapter, n)
+                             for n in ("on_processing_start", "on_processing_complete")],
+        "outcomes": sorted(o.name for o in ProcessingOutcome),
+        "reaction_handler_attr": "self._reaction_handler = handler" in inspect.getsource(
+            BasePlatformAdapter.set_reaction_handler),
         # tool progress stays off unless editing is enabled
         "base_not_overridden":
             dc.DeltaChatAdapter.edit_message is BasePlatformAdapter.edit_message,
