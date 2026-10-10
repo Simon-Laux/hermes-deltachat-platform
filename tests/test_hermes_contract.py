@@ -128,3 +128,8 @@ def test_streamed_reply_in_a_call_is_spoken_once_in_full(run, case):
     assert c["log"] == []  # nothing leaks into the chat as text
     assert c["final_sent"]
     assert c["sends"] < 20, c["sends"]
+
+
+def test_hermes_own_turns_drop_the_stored_message_id(run):
+    """dc_react must not hit the chat's first message on a notification turn."""
+    assert run["internal"] == {"seen": [None], "origin_kept": "7"}, run["internal"]

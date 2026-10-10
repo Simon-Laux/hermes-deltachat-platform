@@ -66,7 +66,8 @@ async def test_empty_emoji_removes_the_reaction(react, a, monkeypatch, emoji):
 @pytest.mark.parametrize("args", [
     {},  # no emoji at all must not remove the reaction
     {"emoji": None}, {"emoji": 0}, {"emoji": ["👍"]},
-    {"emoji": "thanks a lot"}, {"emoji": "x" * 17}, None,
+    {"emoji": "thanks a lot"}, {"emoji": "x" * 30}, None,
+    {"emoji": "👨🏻‍👩🏻‍👧🏻‍👦🏻"},  # 11 code points but 41 bytes: core would remove instead
 ])
 async def test_anything_but_one_emoji_is_refused(react, a, monkeypatch, args):
     _session(monkeypatch, **TURN)
@@ -77,9 +78,9 @@ async def test_anything_but_one_emoji_is_refused(react, a, monkeypatch, args):
 @pytest.mark.asyncio
 async def test_long_emoji_sequences_pass(react, a, monkeypatch):
     _session(monkeypatch, **TURN)
-    family = "👨🏻‍👩🏻‍👧🏻‍👦🏻"
-    assert (await _call(react, {"emoji": family}))["success"]
-    a.rpc.send_reaction.assert_awaited_once_with(1, 42, [family])
+    couple = "👩🏽‍🤝‍👩🏻"  # 26 bytes
+    assert (await _call(react, {"emoji": couple}))["success"]
+    a.rpc.send_reaction.assert_awaited_once_with(1, 42, [couple])
 
 
 @pytest.mark.asyncio
@@ -142,3 +143,24 @@ async def test_source_names_the_triggering_message(a, msg):
         await a._handle_incoming_message({"chat_id": 5, "msg_id": 42})
     a.handle_message.assert_awaited_once()
     assert a.handle_message.await_args.args[0].source.message_id == "42"
+
+
+@pytest.mark.asyncio
+async def test_hermes_own_turns_lose_the_stored_message_id(a, monkeypatch):
+    """Notification and auto-resume turns reuse the session's stored source,
+    whose message_id is the chat's first message."""
+    import tests.conftest as c
+    seen = []
+
+    async def base_handle(self, event):
+        seen.append(event.source.message_id)
+    monkeypatch.setattr(c.MockBasePlatformAdapter, "handle_message", base_handle)
+    origin = a.build_source(chat_id="5", chat_name="c", chat_type="dm", user_id="10",
+                            user_name="u", message_id="7")
+    for internal in (True, False):
+        event = adapter.MessageEvent(text="", message_type=adapter.MessageType.TEXT,
+                                     source=origin, message_id="42")
+        event.internal = internal
+        await DeltaChatAdapter.handle_message(a, event)
+    assert seen == [None, "7"]
+    assert origin.message_id == "7"  # the stored origin itself is untouched

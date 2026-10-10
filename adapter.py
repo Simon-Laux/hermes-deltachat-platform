@@ -3,6 +3,7 @@
 Integrates Delta Chat as a messaging platform using deltachat2 (direct JSON-RPC).
 """
 
+import dataclasses
 import functools
 import json
 import math
@@ -2847,6 +2848,19 @@ class DeltaChatAdapter(BasePlatformAdapter):
         else:
             logger.debug(f"Unhandled view_type={view_type}, file={filename}")
 
+    async def handle_message(self, event: MessageEvent) -> None:
+        """Hermes' handle_message, minus a stale triggering message on its own turns.
+
+        why: background-process notifications, restart auto-resume and plugin
+        injection run on the session's stored source, whose message_id is the
+        chat's first message; dc_react would react to that. Hermes drops it the
+        same way for goal prompts (gateway/run_goals.py _synthetic_prompt_event).
+        A copy, since that source is the live session origin.
+        """
+        if getattr(event, "internal", False) and getattr(event.source, "message_id", None):
+            event.source = dataclasses.replace(event.source, message_id=None)
+        await super().handle_message(event)
+
     async def get_chat_info(self, chat_id: str) -> Dict[str, Any]:
         """Get metadata for a chat.
 
@@ -3340,7 +3354,9 @@ def register_rpc_tools(ctx) -> None:
         emoji = (args or {}).get("emoji")
         # why: Hermes doesn't check arguments against the schema, and core sends any
         # string as the "emoji" -- a sentence would show up as a reaction
-        if not isinstance(emoji, str) or len(emoji.strip()) > 16 or len(emoji.split()) > 1:
+        # core also turns one of 30+ bytes into "remove" (Reaction::new); family
+        # emoji with skin tones get there
+        if not isinstance(emoji, str) or len(emoji.strip().encode()) >= 30 or len(emoji.split()) > 1:
             return json.dumps({"error": "emoji must be a single emoji, or '' to remove yours"})
         emoji = emoji.strip()
         try:

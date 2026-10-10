@@ -104,6 +104,25 @@ async def call_stream(chunks, delay):
     return {**r, "spoken": spoken, "sends": len(sends)}
 
 
+async def internal_turn():
+    """Our handle_message drops a stored message_id from Hermes' own (internal) turns."""
+    from gateway.platforms.base import MessageEvent, MessageType
+    a = editing_adapter()
+    origin = a.build_source(chat_id="5", chat_type="dm", user_id="10", message_id="7")
+    seen = []
+
+    async def handler(event):
+        seen.append(event.source.message_id)
+    real = BasePlatformAdapter.handle_message
+    BasePlatformAdapter.handle_message = lambda self, event: handler(event)
+    try:
+        await a.handle_message(MessageEvent(
+            text="", message_type=MessageType.TEXT, source=origin, internal=True))
+    finally:
+        BasePlatformAdapter.handle_message = real
+    return {"seen": seen, "origin_kept": origin.message_id}
+
+
 def contract():
     """Facts about the real Hermes API this adapter relies on."""
     from gateway import session_context
@@ -180,6 +199,7 @@ async def main():
         "fence": await stream(["```\n" + "\n".join(f"c{i}" for i in range(35)) + "\n",
                                "y" * 99] + [f"\nm{i}" for i in range(5)], 0.4),
         "media": await media(),
+        "internal": await internal_turn(),
         "call": await call_stream(words[:20], 0.02),
         # over the 36-line limit: Hermes would split it into heads
         "call_long": await call_stream([f"Item {i}.\n" for i in range(50)], 0.02),
