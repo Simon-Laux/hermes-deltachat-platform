@@ -181,14 +181,20 @@ fix applies if your `HERMES_HOME` sits under a denied system prefix
 
 ## Voice Call Issues
 
-**Symptom:** Incoming call events not handled
+See [voice-calls.md](voice-calls.md) for how calls work. When a call fails,
+`gateway.log` says why:
 
-**Note:** Voice call support is Phase 4 (stretch goal) and not yet implemented.
-
-**Current status:**
-- `IncomingCall` events are logged but not processed
-- WebRTC bridge not yet implemented
-- Requires aiortc and additional setup
+- **`Voice calls disabled: ...`** at connect — `aiortc`, `av` or `numpy` is
+  missing from Hermes's venv. Text messaging still works.
+- **`Declining call ...: not authorized`** — the caller isn't paired yet; they
+  get a pairing code in the chat (with the default `unauthorized_dm_behavior`).
+- **`No usable TURN server`** / **`... has no relay candidate`** — no relay, so
+  a call from behind NAT can't connect and is hung up ~30 s later. Set
+  `DELTACHAT_CALL_ICE_DEBUG=true` for details; see issue #95 for IPv6-only hosts.
+- **`STT failed after ...`** — the bot hears audio but can't transcribe it:
+  no STT provider, a failed model download, or a cloud error.
+- **`Call task ... crashed`** — a bug or a missing module in the call
+  pipeline; the traceback follows.
 
 ## Performance Issues
 

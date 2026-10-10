@@ -305,6 +305,42 @@ class TestIncomingCallAuthorization:
         mgr._answer_call.assert_awaited_once()
         adapter.rpc.end_call.assert_not_awaited()
 
+    @pytest.mark.asyncio
+    async def test_unauthorized_caller_reaches_hermes_auth_gate(self, monkeypatch):
+        """A declined caller gets what an unknown contact's message would get
+        (pairing code by default), instead of a silent hang-up."""
+        from unittest.mock import AsyncMock
+        mgr, adapter = self._manager(False)
+        mgr._to_hermes = AsyncMock()
+        await mgr._handle_incoming_call({"msg_id": 5, "chat_id": 12, "place_call_info": "sdp"})
+        mgr._to_hermes.assert_awaited_once()
+        kwargs = adapter.build_source.call_args.kwargs
+        assert (kwargs["user_id"], kwargs["chat_id"], kwargs["chat_type"]) == ("10", "12", "dm")
+        assert "thread_id" not in kwargs   # the text DM, not a call session
+        event = mgr._to_hermes.call_args.args[0]
+        # internal=True would skip Hermes's auth gate and hand the text to the agent
+        assert not getattr(event, "internal", False)
+        assert not event.text.startswith("/")   # never parsed as a command
+
+    @pytest.mark.asyncio
+    async def test_failed_caller_lookup_is_not_reported(self):
+        from unittest.mock import AsyncMock
+        mgr, adapter = self._manager(False)
+        adapter.rpc.get_message = AsyncMock(side_effect=RuntimeError("gone"))
+        mgr._to_hermes = AsyncMock()
+        await mgr._handle_incoming_call({"msg_id": 5, "chat_id": 12, "place_call_info": "sdp"})
+        adapter.rpc.end_call.assert_awaited_once()
+        mgr._to_hermes.assert_not_awaited()
+
+    @pytest.mark.asyncio
+    async def test_failed_auth_check_is_not_reported(self):
+        # None means our check broke; stay conservative and send nothing.
+        from unittest.mock import AsyncMock
+        mgr, adapter = self._manager(None)
+        mgr._to_hermes = AsyncMock()
+        await mgr._handle_incoming_call({"msg_id": 5, "chat_id": 12, "place_call_info": "sdp"})
+        mgr._to_hermes.assert_not_awaited()
+
 
 class TestOutgoingCall:
     """Answer-future resolution for outgoing calls."""
@@ -717,7 +753,8 @@ class TestCallSttModel:
         from unittest.mock import MagicMock
         monkeypatch.setattr(ch, "_CALL_STT_VOXTRAL", False)
         tt = self._fake_tt(monkeypatch, {"provider": "local"}, provider="local")
-        (tmp_path / "audio_cache").mkdir()
+        # no audio_cache/ yet: on an incoming call the warmup runs before
+        # IncomingAudioBuffer creates it, and on a fresh home it always failed.
         mgr = ch.CallManager(adapter=MagicMock())
         monkeypatch.setattr(mgr, "_get_hermes_home", lambda: str(tmp_path))
         await mgr._warmup_stt()
@@ -768,3 +805,105 @@ class TestCallEndedTranscriptLink:
     async def test_lookup_failure_keeps_the_plain_note(self, monkeypatch):
         text = await self._main_note(self._setup(monkeypatch, runner=None))
         assert text == "[A voice call with the user has just ended. Do not call back right now.]"
+
+
+class TestFreshInstanceDiagnostics:
+    """Failures a fresh install hits must reach gateway.log, not vanish."""
+
+    @pytest.mark.asyncio
+    async def test_stt_failure_is_logged_as_error(self, monkeypatch, tmp_path, caplog):
+        buf = ch.IncomingAudioBuffer(str(tmp_path), on_utterance=lambda t, w: None)
+        monkeypatch.setattr(ch.IncomingAudioBuffer, "_transcribe", staticmethod(
+            lambda p: {"success": False, "error": "No STT provider available"}))
+        with caplog.at_level("ERROR"):
+            await buf._process_utterance(b"\x00" * 3200)
+        assert "No STT provider available" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_silent_clip_on_cloud_stt_is_not_an_error(self, monkeypatch, tmp_path, caplog):
+        # Hermes's cloud path returns success=False + no_speech for an empty
+        # transcript; noise passing the RMS gate must not flood ERROR.
+        buf = ch.IncomingAudioBuffer(str(tmp_path), on_utterance=lambda t, w: None)
+        monkeypatch.setattr(ch.IncomingAudioBuffer, "_transcribe", staticmethod(
+            lambda p: {"success": False, "transcript": "", "no_speech": True,
+                       "error": "Groq returned empty transcript"}))
+        with caplog.at_level("ERROR"):
+            await buf._process_utterance(b"\x00" * 3200)
+        assert "STT failed" not in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_spawned_task_crash_is_logged(self, caplog):
+        async def boom():
+            raise ModuleNotFoundError("No module named 'numpy'")
+
+        with caplog.at_level("ERROR"):
+            task = ch._spawn(boom(), "audio receive loop")
+            with pytest.raises(ModuleNotFoundError):
+                await task
+            await asyncio.sleep(0)   # let the done callback run
+        assert "audio receive loop" in caplog.text and "numpy" in caplog.text
+
+    @pytest.mark.asyncio
+    async def test_missing_turn_is_logged_as_error(self, caplog):
+        import json
+        from unittest.mock import AsyncMock, MagicMock
+        adapter = MagicMock()
+        adapter.rpc.ice_servers = AsyncMock(return_value=json.dumps([
+            {"urls": ["stun:198.51.100.1:3478"]},
+            {"urls": ["turn:[2001:db8::1]:3478"], "username": "u", "credential": "c"},
+        ]))
+        with caplog.at_level("ERROR"):
+            await ch.CallManager(adapter=adapter)._build_ice_config()
+        assert "No usable TURN server" in caplog.text
+
+    def test_answer_without_relay_is_logged_as_error(self, caplog):
+        sdp = "a=candidate:1 1 udp 1 10.0.0.2 5000 typ host\n"
+        with caplog.at_level("ERROR"):
+            ch.CallManager._check_relay(sdp, "Our answer")
+        assert "no relay candidate" in caplog.text
+        caplog.clear()
+        with caplog.at_level("ERROR"):
+            ch.CallManager._check_relay(sdp + "a=candidate:2 1 udp 1 203.0.113.5 6000 typ relay\n",
+                                        "Our answer")
+        assert "no relay candidate" not in caplog.text
+
+
+class TestShortReplies:
+    """Hermes's Whisper-hallucination filter must not eat real short answers."""
+
+    def _manager(self, monkeypatch):
+        import types
+        from unittest.mock import AsyncMock, MagicMock
+        voice_mode = types.ModuleType("tools.voice_mode")
+        # Hermes's rule: these phrases on their own count as hallucinations.
+        import re
+        repeat = re.compile(r"^(?:thank you|thanks|bye|you|ok|okay|the end|\.|\s|,|!)+$", re.I)
+        voice_mode.is_whisper_hallucination = lambda t: (
+            t.strip().lower().rstrip(".!") in {"thank you", "bye", "you", "thanks for watching"}
+            or bool(repeat.match(t.strip())))
+        tools_pkg = sys.modules.get("tools") or types.ModuleType("tools")
+        monkeypatch.setitem(sys.modules, "tools", tools_pkg)
+        monkeypatch.setitem(sys.modules, "tools.voice_mode", voice_mode)
+        monkeypatch.setattr(sys.modules["gateway.platforms.base"], "MessageEvent",
+                            lambda **kw: types.SimpleNamespace(**kw))
+        mgr = ch.CallManager(adapter=MagicMock())
+        mgr._to_hermes = AsyncMock()
+        return mgr
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("said", ["OK.", "Okay!", "Thanks.", "Thank you.", "Bye.", "Bye bye.",
+                                      "Okay, bye.", "Thanks, bye!", "OK, thank you."])
+    async def test_short_reply_reaches_hermes(self, monkeypatch, said):
+        mgr = self._manager(monkeypatch)
+        await mgr._on_utterance(1, "12", said, "10", "X")
+        mgr._to_hermes.assert_awaited_once()
+
+    @pytest.mark.asyncio
+    @pytest.mark.parametrize("said", ["You.", "Thanks for watching!",
+                                      "Thank you. Thank you. Thank you.", "Okay. OK.",
+                                      "Bye. Bye.", "..."])
+    async def test_hallucinations_are_still_dropped(self, monkeypatch, said):
+        mgr = self._manager(monkeypatch)
+        await mgr._on_utterance(1, "12", said, "10", "X")
+        mgr._to_hermes.assert_not_awaited()
+

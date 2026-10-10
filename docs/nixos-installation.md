@@ -6,11 +6,11 @@ C extension wheels don't work reliably on NixOS.
 
 ## What the declared `python_dependencies` mean here
 
-`plugin.yaml` declares `deltachat-rpc-server` and `aiortc`, so a Hermes that supports that manifest
-key will pip-install both into its own venv when the plugin is enabled. On NixOS you still want the
+`plugin.yaml` declares `deltachat-rpc-server`, `aiortc`, `av` and `numpy`, so a Hermes that supports that manifest
+key will pip-install them into its own venv when the plugin is enabled. On NixOS you still want the
 nix-built ones, and the nix path wins without any extra work:
 
-- **aiortc** — `PYTHONPATH` entries are placed ahead of the venv's `site-packages` on `sys.path`,
+- **aiortc, av, numpy** — `PYTHONPATH` entries are placed ahead of the venv's `site-packages` on `sys.path`,
   and `call_handler.py` additionally inserts `~/.hermes/aiortc-env`'s site-packages at `sys.path[0]`
   when that symlink exists. So the nix build shadows whatever pip put in the venv. Keep following
   the GC-root recipe below; treat the venv copy as inert ballast.
@@ -95,7 +95,7 @@ nix build --impure -o ~/.hermes/aiortc-env --expr '
       (e: builtins.match ".*NousResearch/hermes-agent.*" (e.originalUrl or "") != null)
       (builtins.attrValues manifest.elements));
     pkgs = import (builtins.getFlake hermes.url).inputs.nixpkgs { system = builtins.currentSystem; };
-  in pkgs.python312.withPackages (ps: [ ps.aiortc ])'
+  in pkgs.python312.withPackages (ps: [ ps.aiortc ps.numpy ])'
 ```
 
 If Hermes comes from a NixOS or home-manager flake input instead of `nix

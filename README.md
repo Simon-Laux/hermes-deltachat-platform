@@ -42,7 +42,7 @@ Delta Chat is a decentralized private messenger with end-to-end encryption, and 
 
 **Prerequisite:** [Hermes Agent](https://github.com/NousResearch/hermes-agent) **0.21.5 or newer** must be installed first.
 
-`plugin.yaml` declares `deltachat-rpc-server` and `aiortc` as `python_dependencies`, so a Hermes
+`plugin.yaml` declares `deltachat-rpc-server`, `aiortc`, `av` and `numpy` as `python_dependencies`, so a Hermes
 that supports that manifest key installs them into its own venv when you enable the plugin — and
 re-installs them after every `hermes update`. Steps 1 and 2 are only needed on older Hermes
 releases, which ignore the key, and on NixOS — see
@@ -53,8 +53,8 @@ releases, which ignore the key, and on NixOS — see
 # 1. Install deltachat-rpc-server (only if Hermes did not)
 pip install deltachat-rpc-server
 
-# 2. Install aiortc for voice calls (only if Hermes did not)
-pip install aiortc
+# 2. Install the voice-call packages (only if Hermes did not)
+pip install aiortc av numpy
 
 # 3. Clone plugin to Hermes
 git clone https://github.com/Simon-Laux/hermes-deltachat-platform ~/.hermes/plugins/deltachat-platform
@@ -88,7 +88,8 @@ Deep integration with Delta Chat's native features — voice messages, voice cal
 - Read receipts
 - Bot mode: auto-accepts contact requests, no manual approval needed
 - Only end-to-end encrypted contacts reach the agent — in Delta Chat identity is the key, so
-  unencrypted mail is dropped unread. Calls from contacts Hermes hasn't approved are declined.
+  unencrypted mail is dropped unread. Calls from contacts Hermes hasn't approved are declined;
+  the caller then gets what an unknown contact's message gets (a pairing code by default).
   In a group where Hermes approves none of the members, the agent leaves (the group sees it
   leave); someone who wants to add it should message it directly first to get approved
 
@@ -258,17 +259,18 @@ echo 'DELTACHAT_RPC_SERVER=/home/work/.nix-profile/bin/deltachat-rpc-server' >> 
 
 **pip:**
 ```bash
-pip install aiortc
+pip install aiortc av numpy
 ```
 
 **NixOS** (add to your `python3.withPackages` in flake.nix):
 ```nix
-(python3.withPackages (ps: with ps; [ deltachat2 aiortc ]))
+(python3.withPackages (ps: with ps; [ deltachat2 aiortc numpy ]))
 ```
 
 aiortc brings in `av` (PyAV/libav for audio resampling), `aioice`, and Opus support — all required
-for the WebRTC call pipeline. `call_handler.py` imports `av` directly but only aiortc is declared,
-so `av` arrives as a transitive dependency.
+for the WebRTC call pipeline. `call_handler.py` also imports `numpy`, which neither aiortc nor
+av requires (Hermes only has it with its `[voice]` extra); without it calls connect but never
+hear the caller.
 
 ### 2. (Optional) Configure RPC server path
 

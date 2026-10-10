@@ -5,15 +5,17 @@ outgoing** ones, holding a spoken conversation either way: audio →
 speech-to-text → Hermes AI → text-to-speech → spoken reply, all over the live
 WebRTC call.
 
-Requires `aiortc` (see [nixos-installation.md](nixos-installation.md) for the
-NixOS setup). Incoming calls are auto-answered; hang up from your Delta Chat
+Requires `aiortc`, `av` and `numpy`, which `plugin.yaml` declares (see
+[nixos-installation.md](nixos-installation.md) for the NixOS setup). Incoming calls are auto-answered; hang up from your Delta Chat
 client, or the bot hangs up after its goodbye — it ends the reply with `[[hangup]]`,
 which the adapter strips before TTS. `dc_end_call` does the same as a tool.
 If the other side drops off without hanging up (lost network, killed app), the
 bot hangs up by itself once the WebRTC connection reports `closed` (or `failed`
 if ICE never connected), about 30-35 s later. Calls from contacts Hermes
 doesn't authorize, or whose authorization check fails, are declined without
-being answered.
+being answered. A declined caller Hermes doesn't know then gets the same reply
+as an unknown contact's message: a pairing code, the decline text or nothing,
+per `unauthorized_dm_behavior`.
 
 ## Outgoing calls (the bot calls you)
 

@@ -1373,8 +1373,14 @@ class DeltaChatAdapter(BasePlatformAdapter):
             global _active_adapter
             _active_adapter = self
 
-            from call_handler import CallManager
-            self._call_manager = CallManager(self)
+            # why: a missing aiortc/av used to fail connect() and take text
+            # messaging down with it; only calls need them.
+            try:
+                from call_handler import CallManager
+            except ImportError as e:
+                logger.error("Voice calls disabled: %s (install aiortc, av and numpy)", e)
+            else:
+                self._call_manager = CallManager(self)
 
             # Log the bot's address for reference
             addr = await self.get_my_address()
@@ -2471,6 +2477,12 @@ class DeltaChatAdapter(BasePlatformAdapter):
         elif event_kind == EventType.INCOMING_CALL:
             if self._call_manager:
                 asyncio.create_task(self._call_manager.handle_incoming_call(event))
+            else:
+                # Calls are disabled (aiortc/av missing): end it rather than let it ring out.
+                try:
+                    await self.rpc.end_call(self.account_id, int(event["msg_id"]))
+                except Exception as e:
+                    logger.debug("Could not end call %s: %s", event.get("msg_id"), e)
         elif event_kind == EventType.CALL_ENDED:
             if self._call_manager:
                 asyncio.create_task(self._call_manager.handle_call_ended(event))
@@ -3324,8 +3336,10 @@ def register_rpc_tools(ctx) -> None:
         # `opening` is the exact line spoken on connect; accept `topic` as alias.
         opening = (args.get("opening") or args.get("topic") or "").strip()
         adapter = _active_adapter
-        if adapter is None or adapter._call_manager is None:
+        if adapter is None:
             return json.dumps({"error": "Delta Chat not connected"})
+        if adapter._call_manager is None:
+            return json.dumps({"error": "Voice calls unavailable: aiortc/av not installed"})
 
         if not opening:
             return json.dumps({"error": "Provide 'opening' — the exact words to say when they pick up."})
