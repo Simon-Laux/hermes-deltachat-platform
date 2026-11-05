@@ -43,8 +43,9 @@ Delta Chat is a decentralized private messenger with end-to-end encryption, and 
 **Prerequisite:** [Hermes Agent](https://github.com/NousResearch/hermes-agent) **0.21.5 or newer** must be installed first.
 
 `plugin.yaml` declares `deltachat-rpc-server`, `aiortc`, `av` and `numpy` as `python_dependencies`, so a Hermes
-that supports that manifest key installs them into its own venv when you enable the plugin — and
-re-installs them after every `hermes update`. Steps 1 and 2 are only needed on older Hermes
+that supports that manifest key installs them into its own venv when you enable the plugin. On
+0.21.x they are re-installed after every `hermes update`; on 0.22.x they are not, so after an
+update check that `No module named 'aiortc'` does not appear. Steps 1 and 2 are only needed on older Hermes
 releases, which ignore the key, and on NixOS — see
 [docs/nixos-installation.md](docs/nixos-installation.md). A `No module named 'aiortc'` in
 `~/.hermes/logs/gateway.log` means you are in that case.

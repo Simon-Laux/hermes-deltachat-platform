@@ -17,9 +17,10 @@ Tested against Hermes 0.22.7, the newest release. The adapter needs no code chan
   with `python314` and the matching `PYTHONPATH` line, as in
   [docs/nixos-installation.md](docs/nixos-installation.md). An env still built for
   3.12 leaves voice calls disabled; text messaging keeps working.
-- **Hermes dropped the `honcho` dependency group.** A Nix override that
-  lists `honcho` in `extraDependencyGroups` fails to build
-  (`Extra/group name 'honcho' does not match`); remove it from the list.
+- **Hermes 0.22.x dropped the `honcho` dependency group.** A Nix override that
+  lists `honcho` in `extraDependencyGroups` fails to build on 0.22.x
+  (`Extra/group name 'honcho' does not match`); remove it from that list. 0.21.x
+  still has the group, so keep it there.
 
 ## 2.1.0 (2026-10-10)
 
