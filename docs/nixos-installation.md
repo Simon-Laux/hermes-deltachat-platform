@@ -104,7 +104,7 @@ nix build --impure -o ~/.hermes/aiortc-env --expr '
 
 If Hermes comes from a NixOS or home-manager flake input instead of `nix
 profile`, replace `hermes.url` with that input's locked ref (e.g.
-`github:NousResearch/hermes-agent/v2026.9.24`).
+`github:NousResearch/hermes-agent/v0.22.7`).
 
 Then add the environment's site-packages to Hermes's `PYTHONPATH` in `~/.hermes/.env`:
 

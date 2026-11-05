@@ -7,6 +7,20 @@ already listed rewrites that entry instead of adding another.
 Breaking changes are the exception: they go first, under `### Breaking / requires
 action`, and get as much space as people need to upgrade safely.
 
+## Unreleased
+
+Tested against Hermes 0.22.7, the newest release. The adapter needs no code change for it.
+
+### Breaking / requires action
+
+- **Hermes 0.22.x runs on Python 3.14.** On NixOS, rebuild `~/.hermes/aiortc-env`
+  with `python314` and the matching `PYTHONPATH` line, as in
+  [docs/nixos-installation.md](docs/nixos-installation.md). An env still built for
+  3.12 leaves voice calls disabled; text messaging keeps working.
+- **Hermes dropped the `honcho` dependency group.** A Nix override that
+  lists `honcho` in `extraDependencyGroups` fails to build
+  (`Extra/group name 'honcho' does not match`); remove it from the list.
+
 ## 2.1.0 (2026-10-10)
 
 ### Breaking / requires action

@@ -106,8 +106,9 @@ nix flake prefetch github:NousResearch/hermes-agent/<tag> --json
 ```
 
 Notes:
-- Tags are date-based (`v2026.8.19`); the real semver is in `pyproject.toml`
-  (that tag is 0.20.5).
+- Tags come in two schemes: date-based (`v2026.9.24`, which is 0.21.5) and semver
+  (`v0.22.7`, the newest release). `pyproject.toml` gave the semver for the date-based tag
+  but says `0.0.0` for `v0.22.7`, so check the GitHub release for that one.
 - PyPI's `hermes-agent` lags GitHub — prefer a tag over the PyPI version.
 - The prefetched path is not a GC root; re-run the prefetch to get it back
   (same rev → same path).

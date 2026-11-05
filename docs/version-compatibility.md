@@ -3,7 +3,8 @@
 ## Hermes
 
 The plugin requires **Hermes 0.21.5** (tag `v2026.9.24`) or newer, declared as
-`requires_hermes: ">=0.21.5"` in `plugin.yaml`. Hermes releases that understand
+`requires_hermes: ">=0.21.5"` in `plugin.yaml`. The newest release it is tested
+against is **Hermes 0.22.7** (tag `v0.22.7`). Hermes releases that understand
 that key refuse to load the plugin on an older version and record the reason as
 the plugin's load error. Releases that predate the key (0.15.x, for example)
 ignore it and load the plugin anyway, untested — so the gate only stops
